@@ -7,7 +7,7 @@
 
 use std::collections::HashSet;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -244,6 +244,12 @@ impl DelegatedBrowserBearer {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Whether this bearer expires within `margin_secs` of `now_unix`. See [`expires_within`].
+    #[must_use]
+    pub fn expires_within(&self, margin_secs: u64, now_unix: u64) -> bool {
+        expires_within(self.as_str(), margin_secs, now_unix)
+    }
 }
 
 /// Opaque, independently verified `aud=sandbox-manager` credential. It is
@@ -262,6 +268,39 @@ impl DelegatedSandboxBearer {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Whether this bearer expires within `margin_secs` of `now_unix`. See [`expires_within`].
+    #[must_use]
+    pub fn expires_within(&self, margin_secs: u64, now_unix: u64) -> bool {
+        expires_within(self.as_str(), margin_secs, now_unix)
+    }
+}
+
+/// The switch of the bearer expiry guard (F-f05-15). With it on, a delegated sandbox or browser bearer that
+/// expires within [`BEARER_EXPIRY_MARGIN_SECS`] is not used for a call that would send it. Default off: every
+/// bearer is used as it always was. Only the literal `true` turns it on.
+const BEARER_EXPIRY_GUARD_ENV: &str = "EXECUTION_CORE_BEARER_EXPIRY_GUARD";
+
+/// How close to its `exp` a delegated bearer may be before the guard refuses to use it, in seconds. A call
+/// that starts inside this margin can still be in flight when the credential stops working.
+pub(crate) const BEARER_EXPIRY_MARGIN_SECS: u64 = 20;
+
+/// Whether the bearer expiry guard is on. Read once per process, as the other execution-core switches are.
+#[must_use]
+pub(crate) fn bearer_expiry_guard_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        mp_contracts::loop_fold::switch_from(std::env::var(BEARER_EXPIRY_GUARD_ENV).ok().as_deref())
+    })
+}
+
+/// Whether the compact JWT `token` expires within `margin_secs` of `now_unix`, or has expired already. It
+/// verifies nothing: the bearer was verified at its boundary, and only its `exp` is read, never a claim beside
+/// it. A token whose expiry cannot be read is not known to expire, so the answer is `false`.
+#[must_use]
+pub(crate) fn expires_within(token: &str, margin_secs: u64, now_unix: u64) -> bool {
+    crate::run_budget::bearer_expiry(token)
+        .is_some_and(|exp| exp.saturating_sub(now_unix) <= margin_secs)
 }
 
 impl fmt::Debug for DelegatedInferenceBearer {
@@ -590,6 +629,30 @@ impl JwtVerifier {
             return Ok(None);
         }
         self.authenticate_delegated_browser(request, caller)
+            .await
+            .map(Some)
+    }
+
+    /// Verify the sandbox-manager credential of a thread-workspace run that may run without one
+    /// (F-f05-13). An absent `x-sandbox-authorization` is `None`: the run keeps no durable workspace and
+    /// its thread's files run ephemerally. A present bearer is checked exactly as
+    /// [`Self::authenticate_delegated_sandbox_manager`] checks it, and every refusal stays a refusal: a
+    /// bearer that is wrong, expired or posture-mismatched is never dropped in silence. Absence never
+    /// widens anything; it only removes the durable workspace.
+    ///
+    /// # Errors
+    ///
+    /// The statuses of [`Self::authenticate_delegated_sandbox_manager`] for a present bearer.
+    #[allow(clippy::result_large_err)]
+    pub async fn authenticate_run_sandbox_optional<T>(
+        &self,
+        request: &Request<T>,
+        caller: &AuthenticatedUser,
+    ) -> Result<Option<DelegatedSandboxBearer>, Status> {
+        if !request.metadata().contains_key("x-sandbox-authorization") {
+            return Ok(None);
+        }
+        self.authenticate_delegated_sandbox_manager(request, caller)
             .await
             .map(Some)
     }
@@ -1409,6 +1472,150 @@ mod tests {
                 .code(),
             tonic::Code::PermissionDenied
         );
+    }
+
+    /// F-f05-13: a thread-workspace run's sandbox credential is optional. Absent, it is `None` and the run
+    /// keeps no durable workspace; present, it is verified exactly as the required one is, and every refusal
+    /// stays a refusal. Absence never widens anything.
+    #[tokio::test]
+    async fn run_sandbox_credential_is_optional_and_otherwise_verified_like_the_delegated_one() {
+        let verifier = verifier("key-sandbox").await;
+        let execution_token = sign(&claims(), "key-sandbox");
+        let caller = verifier
+            .authenticate(&authenticated_request(&execution_token))
+            .await
+            .expect("execution credential");
+
+        let absent = Request::new(());
+        assert!(
+            verifier
+                .authenticate_run_sandbox_optional(&absent, &caller)
+                .await
+                .expect("an absent bearer is not refused")
+                .is_none(),
+            "an absent bearer is None"
+        );
+
+        let mut sandbox_claims = claims();
+        sandbox_claims["aud"] = json!("sandbox-manager");
+        let sandbox_token = sign(&sandbox_claims, "key-sandbox");
+        let mut request = Request::new(());
+        request.metadata_mut().insert(
+            "x-sandbox-authorization",
+            format!("Bearer {sandbox_token}").parse().expect("metadata"),
+        );
+        let delegated = verifier
+            .authenticate_run_sandbox_optional(&request, &caller)
+            .await
+            .expect("a valid present bearer")
+            .expect("a present bearer is Some");
+        assert_eq!(delegated.as_str(), sandbox_token);
+
+        // A present bearer of another audience is a refusal, not an absent one.
+        request.metadata_mut().insert(
+            "x-sandbox-authorization",
+            format!("Bearer {execution_token}")
+                .parse()
+                .expect("metadata"),
+        );
+        assert_eq!(
+            verifier
+                .authenticate_run_sandbox_optional(&request, &caller)
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+
+        // A present bearer of another identity is refused as the required one is.
+        let mut wrong_identity = sandbox_claims.clone();
+        wrong_identity["sub"] = json!("user-2");
+        wrong_identity["user_id"] = json!("user-2");
+        let wrong_identity = sign(&wrong_identity, "key-sandbox");
+        request.metadata_mut().insert(
+            "x-sandbox-authorization",
+            format!("Bearer {wrong_identity}")
+                .parse()
+                .expect("metadata"),
+        );
+        assert_eq!(
+            verifier
+                .authenticate_run_sandbox_optional(&request, &caller)
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+
+        // A present bearer whose zero-retention posture differs from the caller's is refused too.
+        let mut other_posture = sandbox_claims;
+        other_posture["zdr"] = json!(false);
+        let other_posture = sign(&other_posture, "key-sandbox");
+        request.metadata_mut().insert(
+            "x-sandbox-authorization",
+            format!("Bearer {other_posture}").parse().expect("metadata"),
+        );
+        assert_eq!(
+            verifier
+                .authenticate_run_sandbox_optional(&request, &caller)
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied,
+            "a ZDR-mismatched bearer is refused, never dropped"
+        );
+    }
+
+    /// F-f05-15: the guard sees a bearer as expiring when its `exp` is within the margin or already past, and
+    /// never sees one it cannot read an `exp` from. Only the `exp` is read.
+    #[test]
+    fn a_bearer_about_to_expire_is_seen_by_the_guard_and_an_unknown_one_is_not() {
+        const NOW: u64 = 1_800_000_000;
+        let margin = super::BEARER_EXPIRY_MARGIN_SECS;
+        assert_eq!(margin, 20);
+        let expiring_at = crate::run_budget::unsigned_test_token_expiring_at;
+
+        assert!(
+            !expires_within(&expiring_at(NOW + 3600), margin, NOW),
+            "far from expiry"
+        );
+        assert!(
+            expires_within(&expiring_at(NOW + 20), margin, NOW),
+            "exactly at the margin"
+        );
+        assert!(
+            !expires_within(&expiring_at(NOW + 21), margin, NOW),
+            "just outside the margin"
+        );
+        assert!(
+            expires_within(&expiring_at(NOW - 5), margin, NOW),
+            "already expired"
+        );
+
+        let no_exp = crate::run_budget::unsigned_test_token(&json!({ "sub": "user-1" }));
+        assert!(
+            !expires_within(&no_exp, margin, NOW),
+            "no exp is unknown, not expiring"
+        );
+        for opaque in ["", "sandbox-token", "a.b", "a.%%%.c"] {
+            assert!(
+                !expires_within(opaque, margin, NOW),
+                "{opaque:?} has no readable expiry"
+            );
+        }
+
+        let token = expiring_at(NOW + 5);
+        let sandbox = DelegatedSandboxBearer(Arc::from(token.as_str()));
+        assert!(
+            sandbox.expires_within(margin, NOW),
+            "the sandbox bearer's method agrees"
+        );
+        let browser = DelegatedBrowserBearer(Arc::from(token.as_str()));
+        assert!(
+            browser.expires_within(margin, NOW),
+            "the browser bearer's method agrees"
+        );
+        assert!(!DelegatedBrowserBearer(Arc::from("opaque")).expires_within(margin, NOW));
     }
 
     #[tokio::test]

@@ -26,6 +26,7 @@ describe('runParkedFrameOf', () => {
       'provider_exhausted',
       'upstream_unavailable',
       'reauth_required',
+      'credential_expiring',
     ])
     for (const reason of RUN_PARK_REASONS) {
       expect(runParkedFrameOf(parkedFrame({ reason }))).toEqual({

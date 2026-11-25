@@ -303,6 +303,9 @@ pub enum ParkReason {
     CrashInterrupted,
     /// The user must sign in again.
     ReauthRequired,
+    /// A delegated browser or thread-sandbox bearer the run holds is about to expire (F-f05-15b,
+    /// D-F05-4): the run parks at a round boundary and a resume carries freshly minted bearers.
+    CredentialExpiring,
 }
 
 /// The environment switch that makes a Do-loop approval loop-owned: resumed by
@@ -469,6 +472,22 @@ pub const EXT_CONNECTOR_TAINT: &str = "connector_taint";
 /// never a credential.
 pub const EXT_CONNECTOR_SCOPE: &str = "connector_scope";
 
+/// The extension key of the documents a Do turn attached (an array of id strings, the run's
+/// `RunAgentRequest.context_document_ids`, F-f09-05). Written by execution-core's fold writer only, and
+/// only when non-empty. Read it with [`context_ids_in`]. Ids only, never content.
+pub const EXT_CONTEXT_DOCUMENT_IDS: &str = "context_document_ids";
+
+/// The extension key of the skills a Do turn attached (an array of id strings, the run's
+/// `RunAgentRequest.context_skill_ids`, F-f09-05). Written by execution-core's fold writer only, and
+/// only when non-empty. Read it with [`context_ids_in`]. Ids only, never content.
+pub const EXT_CONTEXT_SKILL_IDS: &str = "context_skill_ids";
+
+/// Most ids one carried list may hold ([`context_ids_from_value`]). A turn's references are at most
+/// [`crate::context_refs::MAX_CONTEXT_REFS`], and its merged skill list is those plus the turn's explicit skill
+/// picks (a few more), so this bound is never a legitimate list's size. Anything longer was not written by the
+/// executor's writers and is refused.
+pub const MAX_CARRIED_REF_IDS: usize = 64;
+
 /// The extension key of the id of the MCP form the gateway holds for an input pause with origin
 /// `mcp_elicitation` (EP-4 S7): a non-empty string. Written ONLY on that pause's fold, by
 /// execution-core's fold writer, so the resume can answer the held call and no other. Read it with
@@ -578,6 +597,37 @@ pub fn connector_scope_in(fold: &LoopFoldV1) -> Option<Vec<String>> {
         }
     }
     Some(ids)
+}
+
+/// The reference ids a fold recorded under `key` ([`EXT_CONTEXT_DOCUMENT_IDS`] or
+/// [`EXT_CONTEXT_SKILL_IDS`]); see [`context_ids_from_value`].
+#[must_use]
+pub fn context_ids_in(fold: &LoopFoldV1, key: &str) -> Option<Vec<String>> {
+    context_ids_from_value(fold.extensions.get(key))
+}
+
+/// The reference ids a recorded value holds. An absent value is an empty list: the turn attached none.
+/// A present value that is not a list of at most [`MAX_CARRIED_REF_IDS`] safe ids
+/// (see [`crate::context_refs::is_safe_id`]) is `None`, so the caller refuses the resume. An empty list
+/// there would mean the whole organisation, the widest search there is.
+#[must_use]
+pub fn context_ids_from_value(value: Option<&serde_json::Value>) -> Option<Vec<String>> {
+    let Some(value) = value else {
+        return Some(Vec::new());
+    };
+    let entries = value.as_array()?;
+    if entries.len() > MAX_CARRIED_REF_IDS {
+        return None;
+    }
+    entries
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .filter(|id| crate::context_refs::is_safe_id(id))
+                .map(str::to_owned)
+        })
+        .collect()
 }
 
 /// How long, in seconds, a park waits when the stop carried no better hint (a provider
@@ -1769,6 +1819,61 @@ mod tests {
                 .insert(EXT_CONNECTOR_SCOPE.to_owned(), bad.clone());
             assert_eq!(connector_scope_in(&fold), Some(Vec::new()), "{bad}");
         }
+    }
+
+    #[test]
+    fn the_context_ids_read_absent_as_none_attached_and_malformed_as_refused() {
+        let mut fold = fold();
+        // Absent: the turn attached none, so there is no narrowing to carry.
+        assert_eq!(
+            context_ids_in(&fold, EXT_CONTEXT_DOCUMENT_IDS),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            context_ids_in(&fold, EXT_CONTEXT_SKILL_IDS),
+            Some(Vec::new())
+        );
+        let ids = serde_json::json!(["doc-1", "doc.2:a_b"]);
+        fold.extensions
+            .insert(EXT_CONTEXT_DOCUMENT_IDS.to_owned(), ids.clone());
+        assert_eq!(
+            context_ids_in(&fold, EXT_CONTEXT_DOCUMENT_IDS),
+            Some(vec!["doc-1".to_owned(), "doc.2:a_b".to_owned()])
+        );
+        // It survives the wire, like every extension.
+        let back = LoopFoldV1::from_bytes(&fold.to_bytes().expect("serialize")).expect("parse");
+        assert_eq!(
+            context_ids_in(&back, EXT_CONTEXT_DOCUMENT_IDS),
+            context_ids_in(&fold, EXT_CONTEXT_DOCUMENT_IDS)
+        );
+        // Present but malformed is refused, never read as an empty list (which would search the whole org).
+        for bad in [
+            serde_json::json!("doc-1"),
+            serde_json::json!({"doc-1": true}),
+            serde_json::json!(["doc-1", 7]),
+            serde_json::json!(["doc-1", ""]),
+            serde_json::json!(["doc 1"]),
+            serde_json::json!(["../doc"]),
+            serde_json::Value::Array(
+                (0..=MAX_CARRIED_REF_IDS)
+                    .map(|n| serde_json::json!(format!("d{n}")))
+                    .collect(),
+            ),
+        ] {
+            fold.extensions
+                .insert(EXT_CONTEXT_SKILL_IDS.to_owned(), bad.clone());
+            assert_eq!(context_ids_in(&fold, EXT_CONTEXT_SKILL_IDS), None, "{bad}");
+        }
+        // A merged skill list (the turn's references plus its explicit picks) is longer than the references alone,
+        // and is read whole, up to the bound.
+        let merged: Vec<String> = (0..MAX_CARRIED_REF_IDS)
+            .map(|n| format!("skill.{n}"))
+            .collect();
+        fold.extensions.insert(
+            EXT_CONTEXT_SKILL_IDS.to_owned(),
+            serde_json::json!(merged.clone()),
+        );
+        assert_eq!(context_ids_in(&fold, EXT_CONTEXT_SKILL_IDS), Some(merged));
     }
 
     #[test]

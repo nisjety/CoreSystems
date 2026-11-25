@@ -1695,4 +1695,8 @@ message ScreenContentResponse {
   repeated string flags = 7;
   // The injection_defense mode the verdict was made under: frame, tighten or enforce.
   string mode = 8;
+  // The org's fail mode in force for the verdict: open or degraded. Open keeps a result's local verdict when the
+  // inline pass cannot answer; degraded reads the result as unverified. Empty from a gateway that predates this
+  // field, which a caller reads as degraded (F-f04-13).
+  string fail_mode = 9;
 }

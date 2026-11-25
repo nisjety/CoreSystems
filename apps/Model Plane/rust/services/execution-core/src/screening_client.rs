@@ -7,14 +7,18 @@
 //! content crosses the plane-internal boundary, and nothing keeps it.
 //!
 //! A verdict only tightens the local one. A refused, slow or mismatched answer keeps the local
-//! verdict, and a ZDR run never asks. Asking is off unless `CONTENT_SAFETY_SCREEN_RPC` is the
-//! literal `true`.
+//! verdict when the org's fail mode is `open`. Otherwise, or when no answer of the org is known, the
+//! result reads as degraded (F-f04-13). A ZDR run never asks unless `EXECUTION_SCREEN_ORG_POLICY` is
+//! also the literal `true`; then it asks for the deterministic verdict only, which the gateway gives
+//! with no classifier. Asking is off unless `CONTENT_SAFETY_SCREEN_RPC` is the literal `true`.
 //!
 //! The gateway's classifier may also run for the ask, under the content-screening principal's own
 //! credential, and only when `EXECUTION_SCREEN_INFERENCE_CREDENTIAL` is the literal `true`. A ZDR or
 //! waived run never gets that credential, so its ask keeps the gateway's zero classifier budget.
 
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use mp_contracts::model_plane::v1 as pb;
 use tonic::Status;
@@ -28,6 +32,11 @@ pub const SWITCH_ENV: &str = "CONTENT_SAFETY_SCREEN_RPC";
 /// principal (F-f04-12). Off, the call carries no classifier credential, so the gateway keeps its zero
 /// classifier budget, as before.
 pub const CREDENTIAL_SWITCH_ENV: &str = "EXECUTION_SCREEN_INFERENCE_CREDENTIAL";
+
+/// The switch that makes a failed Do verdict follow the org's fail mode, and lets a ZDR or waived run ask
+/// for the deterministic verdict (F-f04-13). Only the exact literal `true` enables it, and it takes effect only
+/// while [`SWITCH_ENV`] is on too. Off, [`screen_result`] behaves exactly as it did before.
+pub const ORG_POLICY_SWITCH_ENV: &str = "EXECUTION_SCREEN_ORG_POLICY";
 
 /// How long a Do step waits for the verdict before it keeps the local one.
 const SCREEN_DEADLINE: Duration = Duration::from_secs(3);
@@ -54,6 +63,16 @@ pub fn enabled() -> bool {
 pub fn credential_enabled() -> bool {
     static CREDENTIAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *CREDENTIAL.get_or_init(|| parse_switch(std::env::var(CREDENTIAL_SWITCH_ENV).ok().as_deref()))
+}
+
+/// Whether this process applies the org's fail mode to a failed ask and asks for ZDR runs. Read once; only the
+/// exact literal `true` enables it.
+#[must_use]
+pub fn org_policy_enabled() -> bool {
+    static ORG_POLICY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ORG_POLICY.get_or_init(|| {
+        mp_contracts::loop_fold::switch_from(std::env::var(ORG_POLICY_SWITCH_ENV).ok().as_deref())
+    })
 }
 
 /// The gateway a Do step asks. Present when the switch is on and this service holds the
@@ -100,14 +119,48 @@ pub struct Screened {
 /// Screen one result that the local scan has read in full. `local` is the complete-payload
 /// verdict for `output`, as [`super::assess`] makes it.
 ///
-/// The gateway is asked only about external results the local scan covered, and never on a ZDR
-/// run. Every other case, and every failure of the ask, keeps `local`.
+/// This reads [`org_policy_enabled`] once and screens with it. See [`screen_result_under`].
+#[allow(clippy::too_many_arguments)]
+pub async fn screen_result(
+    transport: Option<&dyn ScreenTransport>,
+    tool_name: &str,
+    output: String,
+    local: Provenance,
+    org_id: &str,
+    user_id: &str,
+    run_id: &str,
+    zdr: bool,
+    waived: bool,
+) -> Screened {
+    screen_result_under(
+        org_policy_enabled(),
+        transport,
+        tool_name,
+        output,
+        local,
+        org_id,
+        user_id,
+        run_id,
+        zdr,
+        waived,
+    )
+    .await
+}
+
+/// [`screen_result`] with the org policy given, so a test can drive both readings in one process.
+///
+/// The gateway is asked only about external results the local scan covered. Without the org policy
+/// a ZDR run is never asked. With it, a ZDR or waived run is asked for the deterministic verdict
+/// only: the request carries `zdr`, so the gateway runs no classifier, and a withhold it names
+/// applies as it does for a persistent run. Every other case keeps `local`, and so does a failed
+/// ask while the org's fail mode is known to be `open`; any other failed ask follows [`unavailable`].
 ///
 /// A waived run (`waived`) is still asked for the deterministic verdict, as before, but it is told
 /// it is zero-retention: the request carries `zdr` OR `waived`, so the gateway runs no classifier
 /// for it, and [`crate::mcp_gateway::GovernedMcp::screen_content`] attaches no classifier credential.
 #[allow(clippy::too_many_arguments)]
-pub async fn screen_result(
+pub async fn screen_result_under(
+    org_policy: bool,
     transport: Option<&dyn ScreenTransport>,
     tool_name: &str,
     output: String,
@@ -125,7 +178,7 @@ pub async fn screen_result(
         local.posture,
         ScreeningPosture::Clean | ScreeningPosture::Flagged
     );
-    if zdr || !local.trust.is_external() || !covered {
+    if (zdr && !org_policy) || !local.trust.is_external() || !covered {
         return unchanged(output, local);
     }
     let request = pb::ScreenContentRequest {
@@ -143,24 +196,38 @@ pub async fn screen_result(
             tracing::warn!(
                 tool = tool_name,
                 code = ?status.code(),
-                "content screening RPC failed; keeping the local verdict"
+                "content screening RPC failed; {}",
+                failed_ask_note(org_policy)
             );
-            return unchanged(output, local);
+            return unavailable(org_policy, org_id, tool_name, output, local);
         }
         Err(_elapsed) => {
             tracing::warn!(
                 tool = tool_name,
-                "content screening RPC passed its deadline; keeping the local verdict"
+                "content screening RPC passed its deadline; {}",
+                failed_ask_note(org_policy)
             );
-            return unchanged(output, local);
+            return unavailable(org_policy, org_id, tool_name, output, local);
         }
     };
+    if org_policy {
+        // The fail mode is a fact about the org, not the result, so an answer about other content
+        // still tells the next failed ask what this org's policy is.
+        remember_policy(
+            &mut lock_policy_memory(),
+            org_id,
+            &verdict.mode,
+            &verdict.fail_mode,
+            Instant::now(),
+        );
+    }
     if verdict.content_hash != local.content_hash {
         tracing::warn!(
             tool = tool_name,
-            "content screening verdict names other content; keeping the local verdict"
+            "content screening verdict names other content; {}",
+            failed_ask_note(org_policy)
         );
-        return unchanged(output, local);
+        return unavailable(org_policy, org_id, tool_name, output, local);
     }
     let Some(gateway) = posture_from_label(&verdict.posture) else {
         return unchanged(output, local);
@@ -181,6 +248,11 @@ pub async fn screen_result(
         content_hash: local.content_hash,
         rule_ids,
     };
+    finish(output, provenance)
+}
+
+/// A screened result. Its taint is set when the provenance is worth an audit signal, and each taint is counted.
+fn finish(output: String, provenance: Provenance) -> Screened {
     let taint = provenance.is_audit_worthy();
     if taint {
         metrics::counter!("mp_exec_screening_taint_total", "trust" => provenance.trust.label())
@@ -199,6 +271,99 @@ fn unchanged(output: String, provenance: Provenance) -> Screened {
         provenance,
         taint: false,
     }
+}
+
+/// The end of a failed ask's warning. With the org policy off it is the wording a failed ask always had, so a
+/// switch-off run logs what it logged before (F-f04-13). With it on, the org's fail mode decides, as
+/// [`unavailable`] applies it.
+fn failed_ask_note(org_policy: bool) -> &'static str {
+    if org_policy {
+        "the local verdict stands unless the org's fail mode degrades it"
+    } else {
+        "keeping the local verdict"
+    }
+}
+
+/// What a failed ask leaves a result with (F-f04-13). Without the org policy the local verdict stands, as it
+/// always did. With it, the org's fail mode decides: a fail mode known to be `open` keeps the local verdict, and
+/// anything else reads the result as degraded, tightened with [`tighten`] and never cleared to clean.
+fn unavailable(
+    org_policy: bool,
+    org_id: &str,
+    tool_name: &str,
+    output: String,
+    local: Provenance,
+) -> Screened {
+    if !org_policy {
+        return unchanged(output, local);
+    }
+    let (mode, fail_mode) = live_policy(&lock_policy_memory(), org_id, Instant::now())
+        .unwrap_or_else(|| ("unknown".to_owned(), "unknown".to_owned()));
+    if fail_mode == "open" {
+        return unchanged(output, local);
+    }
+    tracing::warn!(
+        tool = tool_name,
+        mode = %mode,
+        fail_mode = %fail_mode,
+        "content screening unavailable and the org's fail mode is not known to be open; reading the result as degraded"
+    );
+    let posture = tighten(local.posture, ScreeningPosture::Degraded);
+    finish(output, Provenance { posture, ..local })
+}
+
+/// How long an org's last answer is remembered for a failed ask: ten minutes. Past it the org's fail mode is not
+/// known, so a failed ask reads as degraded.
+const POLICY_MEMORY_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// What an org's last answer said about the org's screening policy: the injection mode and the fail mode in force,
+/// as the gateway words them, and when the answer arrived. Words only, never content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RememberedPolicy {
+    mode: String,
+    fail_mode: String,
+    seen: Instant,
+}
+
+type PolicyMemory = HashMap<String, RememberedPolicy>;
+
+/// The process's memory of each org's policy, keyed by org id. A poisoned lock still holds plain words, so it keeps
+/// answering.
+fn lock_policy_memory() -> MutexGuard<'static, PolicyMemory> {
+    static MEMORY: std::sync::OnceLock<Mutex<PolicyMemory>> = std::sync::OnceLock::new();
+    MEMORY
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Records the policy one answer named. Called for every answer that arrives, whatever its content hash, because the
+/// fail mode is a fact about the org and not about the result. Entries past the TTL are dropped here, so the memory
+/// holds only the orgs asked recently.
+fn remember_policy(
+    memory: &mut PolicyMemory,
+    org_id: &str,
+    mode: &str,
+    fail_mode: &str,
+    now: Instant,
+) {
+    memory.retain(|_, entry| now.saturating_duration_since(entry.seen) < POLICY_MEMORY_TTL);
+    memory.insert(
+        org_id.to_owned(),
+        RememberedPolicy {
+            mode: mode.to_owned(),
+            fail_mode: fail_mode.to_owned(),
+            seen: now,
+        },
+    );
+}
+
+/// The mode and fail mode an org's last answer named, while that answer is within the TTL.
+fn live_policy(memory: &PolicyMemory, org_id: &str, now: Instant) -> Option<(String, String)> {
+    memory
+        .get(org_id)
+        .filter(|entry| now.saturating_duration_since(entry.seen) < POLICY_MEMORY_TTL)
+        .map(|entry| (entry.mode.clone(), entry.fail_mode.clone()))
 }
 
 /// The posture a verdict names. `policy-disabled` and `not-applicable` say nothing about the
@@ -296,8 +461,33 @@ mod tests {
         }
     }
 
-    /// The verdict the gateway gives for `content`.
+    /// Never answers within the deadline.
+    struct SlowGateway;
+
+    #[tonic::async_trait]
+    impl ScreenTransport for SlowGateway {
+        async fn screen(
+            &self,
+            _request: pb::ScreenContentRequest,
+        ) -> Result<pb::ScreenContentResponse, Status> {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Err(Status::deadline_exceeded("never answered"))
+        }
+    }
+
+    /// The verdict the gateway gives for `content`, under enforce with an open fail mode.
     fn verdict(content: &str, posture: &str, withhold: bool) -> pb::ScreenContentResponse {
+        verdict_in(content, posture, withhold, "enforce", "open")
+    }
+
+    /// The verdict the gateway gives for `content` under `mode` and `fail_mode`.
+    fn verdict_in(
+        content: &str,
+        posture: &str,
+        withhold: bool,
+        mode: &str,
+        fail_mode: &str,
+    ) -> pb::ScreenContentResponse {
         pb::ScreenContentResponse {
             request_id: String::new(),
             trust_class: "external-web".to_owned(),
@@ -306,7 +496,8 @@ mod tests {
             withhold,
             content_hash: content_hash(content.as_bytes()),
             flags: Vec::new(),
-            mode: "enforce".to_owned(),
+            mode: mode.to_owned(),
+            fail_mode: fail_mode.to_owned(),
         }
     }
 
@@ -606,6 +797,418 @@ mod tests {
         assert_eq!(gateway.zdr_seen(), vec![false]);
     }
 
+    /// F-f04-13: a failed ask of an org whose remembered fail mode is `degraded` reads the result as degraded,
+    /// read-only and not withheld.
+    #[tokio::test]
+    async fn a_failed_ask_reads_degraded_when_the_org_remembers_degraded() {
+        let org = "org_failed_ask_degraded";
+        remember_policy(
+            &mut lock_policy_memory(),
+            org,
+            "enforce",
+            "degraded",
+            Instant::now(),
+        );
+        let gateway = FakeGateway::refusing();
+        let screened = screen_result_under(
+            true,
+            Some(&gateway),
+            "web_fetch",
+            QUIET.to_owned(),
+            assess("web_fetch", QUIET),
+            org,
+            "user_1",
+            "run_1",
+            false,
+            false,
+        )
+        .await;
+        assert_eq!(gateway.calls(), 1);
+        assert_eq!(screened.provenance.posture, ScreeningPosture::Degraded);
+        assert_eq!(
+            screened.output, QUIET,
+            "degraded frames the result, it does not withhold it"
+        );
+        assert!(screened.taint);
+    }
+
+    /// F-f04-13: a failed ask of an org whose remembered fail mode is `open` keeps the local verdict.
+    #[tokio::test]
+    async fn a_failed_ask_keeps_the_local_verdict_when_the_org_remembers_open() {
+        let org = "org_failed_ask_open";
+        remember_policy(
+            &mut lock_policy_memory(),
+            org,
+            "enforce",
+            "open",
+            Instant::now(),
+        );
+        let local = assess("web_fetch", QUIET);
+        let gateway = FakeGateway::refusing();
+        let screened = screen_result_under(
+            true,
+            Some(&gateway),
+            "web_fetch",
+            QUIET.to_owned(),
+            local.clone(),
+            org,
+            "user_1",
+            "run_1",
+            false,
+            false,
+        )
+        .await;
+        assert_eq!(screened.provenance, local);
+        assert_eq!(screened.output, QUIET);
+        assert!(!screened.taint);
+    }
+
+    /// F-f04-13: with no answer of the org known, the fail mode is unknown, which is degraded: fail closed.
+    #[tokio::test]
+    async fn a_failed_ask_reads_degraded_when_no_fail_mode_is_known() {
+        let gateway = FakeGateway::refusing();
+        let screened = screen_result_under(
+            true,
+            Some(&gateway),
+            "web_fetch",
+            QUIET.to_owned(),
+            assess("web_fetch", QUIET),
+            "org_failed_ask_never_answered",
+            "user_1",
+            "run_1",
+            false,
+            false,
+        )
+        .await;
+        assert_eq!(screened.provenance.posture, ScreeningPosture::Degraded);
+        assert!(screened.taint);
+    }
+
+    /// F-f04-13: a timed-out ask follows the fail mode the same way a refused one does.
+    #[tokio::test(start_paused = true)]
+    async fn a_timed_out_ask_follows_the_fail_mode() {
+        let screened = screen_result_under(
+            true,
+            Some(&SlowGateway),
+            "web_fetch",
+            QUIET.to_owned(),
+            assess("web_fetch", QUIET),
+            "org_timed_out_ask",
+            "user_1",
+            "run_1",
+            false,
+            false,
+        )
+        .await;
+        assert_eq!(screened.provenance.posture, ScreeningPosture::Degraded);
+
+        let org = "org_timed_out_ask_open";
+        remember_policy(
+            &mut lock_policy_memory(),
+            org,
+            "enforce",
+            "open",
+            Instant::now(),
+        );
+        let local = assess("web_fetch", QUIET);
+        let screened = screen_result_under(
+            true,
+            Some(&SlowGateway),
+            "web_fetch",
+            QUIET.to_owned(),
+            local.clone(),
+            org,
+            "user_1",
+            "run_1",
+            false,
+            false,
+        )
+        .await;
+        assert_eq!(screened.provenance, local);
+    }
+
+    /// F-f04-13: an answer about other content does not decide the verdict, but the fail mode it names still applies:
+    /// an `open` answer keeps the local verdict and a `degraded` one reads the result as degraded.
+    #[tokio::test]
+    async fn a_mismatched_answer_follows_the_fail_mode_it_names() {
+        let open_org = "org_mismatched_answer_open";
+        let answering_open =
+            FakeGateway::answering(verdict_in(FLAGGED, "flagged", true, "enforce", "open"));
+        let screened = screen_result_under(
+            true,
+            Some(&answering_open),
+            "web_fetch",
+            QUIET.to_owned(),
+            assess("web_fetch", QUIET),
+            open_org,
+            "user_1",
+            "run_1",
+            false,
+            false,
+        )
+        .await;
+        assert_eq!(
+            screened.output, QUIET,
+            "a verdict about other content withholds nothing"
+        );
+        assert_eq!(screened.provenance, assess("web_fetch", QUIET));
+        assert!(!screened.taint);
+
+        let degraded_org = "org_mismatched_answer_degraded";
+        let answering_degraded =
+            FakeGateway::answering(verdict_in(FLAGGED, "flagged", true, "enforce", "degraded"));
+        let screened = screen_result_under(
+            true,
+            Some(&answering_degraded),
+            "web_fetch",
+            QUIET.to_owned(),
+            assess("web_fetch", QUIET),
+            degraded_org,
+            "user_1",
+            "run_1",
+            false,
+            false,
+        )
+        .await;
+        assert_eq!(screened.output, QUIET);
+        assert_eq!(screened.provenance.posture, ScreeningPosture::Degraded);
+        assert!(screened.taint);
+    }
+
+    /// F-f04-13: an answer that arrives names the org's fail mode, and the next failed ask of that org follows it.
+    #[tokio::test]
+    async fn an_answer_is_remembered_for_the_next_failed_ask() {
+        let org = "org_answer_remembered";
+        let answering =
+            FakeGateway::answering(verdict_in(QUIET, "clean", false, "enforce", "open"));
+        screen_result_under(
+            true,
+            Some(&answering),
+            "web_fetch",
+            QUIET.to_owned(),
+            assess("web_fetch", QUIET),
+            org,
+            "user_1",
+            "run_1",
+            false,
+            false,
+        )
+        .await;
+        let refusing = FakeGateway::refusing();
+        let screened = screen_result_under(
+            true,
+            Some(&refusing),
+            "web_fetch",
+            QUIET.to_owned(),
+            assess("web_fetch", QUIET),
+            org,
+            "user_1",
+            "run_1",
+            false,
+            false,
+        )
+        .await;
+        assert_eq!(
+            screened.provenance.posture,
+            ScreeningPosture::Clean,
+            "the remembered open fail mode keeps the local verdict"
+        );
+    }
+
+    /// F-f04-13: a remembered answer is kept for ten minutes and no longer; a later answer drops the stale orgs.
+    #[test]
+    fn the_remembered_policy_expires_after_ten_minutes() {
+        let base = Instant::now();
+        let mut memory = PolicyMemory::new();
+        remember_policy(&mut memory, "org_ttl", "enforce", "open", base);
+        assert!(live_policy(&memory, "org_ttl", base + Duration::from_secs(599)).is_some());
+        assert!(live_policy(&memory, "org_ttl", base + POLICY_MEMORY_TTL).is_none());
+
+        remember_policy(
+            &mut memory,
+            "org_later",
+            "enforce",
+            "open",
+            base + POLICY_MEMORY_TTL,
+        );
+        assert!(!memory.contains_key("org_ttl"));
+        assert!(memory.contains_key("org_later"));
+    }
+
+    /// F-f04-13: a ZDR run under enforce, with the org policy on, is asked for the deterministic verdict only, and the
+    /// gateway's withhold applies: the model reads the stub and never the payload.
+    #[tokio::test]
+    async fn a_zdr_run_under_enforce_withholds_a_flagged_result() {
+        let gateway = FakeGateway::answering(verdict_in(QUIET, "flagged", true, "enforce", "open"));
+        let screened = screen_result_under(
+            true,
+            Some(&gateway),
+            "web_fetch",
+            QUIET.to_owned(),
+            assess("web_fetch", QUIET),
+            "org_zdr_enforce",
+            "user_1",
+            "run_1",
+            true,
+            false,
+        )
+        .await;
+        assert_eq!(gateway.calls(), 1);
+        assert_eq!(gateway.zdr_seen(), vec![true]);
+        assert!(screened
+            .output
+            .starts_with("[withheld: web_fetch result (external-web)"));
+        assert_eq!(screened.provenance.posture, ScreeningPosture::Flagged);
+        assert!(screened.taint);
+        let rendered = render(&screened.output, &screened.provenance);
+        assert!(
+            !rendered.contains("cost table"),
+            "a withheld payload must not reach the model: {rendered}"
+        );
+    }
+
+    /// F-f04-13: frame mode frames a ZDR result and never withholds it, as for a persistent run.
+    #[tokio::test]
+    async fn a_zdr_run_in_frame_mode_is_framed_not_withheld() {
+        let gateway = FakeGateway::answering(verdict_in(QUIET, "flagged", false, "frame", "open"));
+        let screened = screen_result_under(
+            true,
+            Some(&gateway),
+            "web_fetch",
+            QUIET.to_owned(),
+            assess("web_fetch", QUIET),
+            "org_zdr_frame",
+            "user_1",
+            "run_1",
+            true,
+            false,
+        )
+        .await;
+        assert_eq!(gateway.zdr_seen(), vec![true]);
+        assert_eq!(
+            screened.output, QUIET,
+            "frame mode never replaces the payload"
+        );
+        assert_eq!(screened.provenance.posture, ScreeningPosture::Flagged);
+    }
+
+    /// F-f04-13: with the org policy off, a ZDR run is never asked and a failed ask keeps the local verdict whatever
+    /// the memory holds, as before.
+    #[tokio::test]
+    async fn with_the_org_policy_off_nothing_changes_for_a_zdr_or_a_failed_ask() {
+        let org = "org_policy_off";
+        remember_policy(
+            &mut lock_policy_memory(),
+            org,
+            "enforce",
+            "degraded",
+            Instant::now(),
+        );
+        let local = assess("web_fetch", QUIET);
+
+        let gateway = FakeGateway::answering(verdict(QUIET, "flagged", true));
+        let zdr = screen_result_under(
+            false,
+            Some(&gateway),
+            "web_fetch",
+            QUIET.to_owned(),
+            local.clone(),
+            org,
+            "user_1",
+            "run_1",
+            true,
+            false,
+        )
+        .await;
+        assert_eq!(gateway.calls(), 0);
+        assert_eq!(zdr.provenance, local);
+
+        let refusing = FakeGateway::refusing();
+        let failed = screen_result_under(
+            false,
+            Some(&refusing),
+            "web_fetch",
+            QUIET.to_owned(),
+            local.clone(),
+            org,
+            "user_1",
+            "run_1",
+            false,
+            false,
+        )
+        .await;
+        assert_eq!(failed.output, QUIET);
+        assert_eq!(failed.provenance, local);
+        assert!(!failed.taint);
+    }
+
+    /// F-f04-13: with the org policy off, no answer is remembered, so the memory never changes a result.
+    #[tokio::test]
+    async fn with_the_org_policy_off_no_answer_is_remembered() {
+        let org = "org_policy_off_no_memory";
+        let gateway =
+            FakeGateway::answering(verdict_in(QUIET, "clean", false, "enforce", "degraded"));
+        screen_result_under(
+            false,
+            Some(&gateway),
+            "web_fetch",
+            QUIET.to_owned(),
+            assess("web_fetch", QUIET),
+            org,
+            "user_1",
+            "run_1",
+            false,
+            false,
+        )
+        .await;
+        assert_eq!(gateway.calls(), 1);
+        assert!(!lock_policy_memory().contains_key(org));
+    }
+
+    /// F-f04-13: a waived run is asked under the org policy too, as zero-retention, and gets the same verdict.
+    #[tokio::test]
+    async fn a_waived_run_is_asked_under_the_org_policy_with_the_zero_retention_flag() {
+        let gateway = FakeGateway::answering(verdict_in(QUIET, "flagged", true, "enforce", "open"));
+        let screened = screen_result_under(
+            true,
+            Some(&gateway),
+            "web_fetch",
+            QUIET.to_owned(),
+            assess("web_fetch", QUIET),
+            "org_waived_enforce",
+            "user_1",
+            "run_1",
+            false,
+            true,
+        )
+        .await;
+        assert_eq!(gateway.zdr_seen(), vec![true]);
+        assert!(screened
+            .output
+            .starts_with("[withheld: web_fetch result (external-web)"));
+    }
+
+    /// F-f04-13: the org policy switch has its own name and reads only the exact literal `true`.
+    #[test]
+    fn the_org_policy_switch_has_its_own_name_and_the_exact_literal() {
+        assert_eq!(ORG_POLICY_SWITCH_ENV, "EXECUTION_SCREEN_ORG_POLICY");
+        assert_ne!(ORG_POLICY_SWITCH_ENV, SWITCH_ENV);
+        assert!(mp_contracts::loop_fold::switch_from(Some("true")));
+        for raw in [
+            None,
+            Some(""),
+            Some("TRUE"),
+            Some(" true"),
+            Some("1"),
+            Some("yes"),
+        ] {
+            assert!(
+                !mp_contracts::loop_fold::switch_from(raw),
+                "{raw:?} must not turn the org policy on"
+            );
+        }
+    }
+
     #[test]
     fn the_credential_switch_has_its_own_name() {
         assert_eq!(
@@ -613,6 +1216,14 @@ mod tests {
             "EXECUTION_SCREEN_INFERENCE_CREDENTIAL"
         );
         assert_ne!(CREDENTIAL_SWITCH_ENV, SWITCH_ENV);
+    }
+
+    /// F-f04-13: with the org policy off a failed ask logs the words it always had; the org policy changes only the
+    /// note a failed ask's warning ends with.
+    #[test]
+    fn a_failed_ask_is_logged_in_its_old_words_with_the_org_policy_off() {
+        assert_eq!(failed_ask_note(false), "keeping the local verdict");
+        assert!(failed_ask_note(true).contains("the org's fail mode degrades it"));
     }
 
     #[test]

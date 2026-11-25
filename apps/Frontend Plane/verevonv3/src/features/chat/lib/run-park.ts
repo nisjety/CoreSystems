@@ -27,6 +27,7 @@ export const RUN_PARK_REASONS = [
   'provider_exhausted',
   'upstream_unavailable',
   'reauth_required',
+  'credential_expiring',
 ] as const
 
 export type RunParkReason = (typeof RUN_PARK_REASONS)[number]
@@ -122,6 +123,10 @@ const PARK_REASON_LABELS: Record<RunParkReason, { no: string; en: string }> = {
   reauth_required: {
     no: 'Satt på pause: kontoen må kobles til på nytt.',
     en: 'Paused: the account needs to be reconnected.',
+  },
+  credential_expiring: {
+    no: 'Satt på pause: nettleser- eller arbeidsområdetilgangen til kjøringen var i ferd med å gå ut.',
+    en: 'Paused: the browser or workspace access for this run was about to run out.',
   },
 }
 

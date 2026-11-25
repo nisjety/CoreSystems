@@ -66,6 +66,28 @@ pub fn thread_for_step<'a>(
         .then_some(thread_id)
 }
 
+/// Whether the thread's sandbox bearer expires within the bearer guard's margin at `now_unix`, with the guard on
+/// (`guard_on`, F-f05-15). Every thread call that would send the bearer asks this one question: before the lease
+/// and the hydrate, and again before the save, because a program can run past the margin (P2-ec-10-rel1).
+#[must_use]
+pub fn thread_bearer_expiring(guard_on: bool, bearer: &str, now_unix: u64) -> bool {
+    guard_on
+        && crate::auth::expires_within(bearer, crate::auth::BEARER_EXPIRY_MARGIN_SECS, now_unix)
+}
+
+/// The refusal of a save whose sandbox bearer is inside its margin (F-f05-15, P2-ec-10-rel1). The log line names the
+/// reason and no content.
+fn bearer_expiring_refusal() -> Failure {
+    warn!(
+        reason = "bearer_expiring",
+        "thread workspace not saved: the sandbox bearer is about to expire"
+    );
+    Failure::new(
+        Cause::Unavailable,
+        "the thread's changes were not saved: its credential is about to expire",
+    )
+}
+
 /// What one thread-scope call reads and writes through: the step's thread, the
 /// user-bound sandbox-manager bearer, and the clients that reach sandbox-manager
 /// and CAS. Built only for a step [`thread_for_step`] admitted, so its presence is
@@ -91,7 +113,8 @@ pub enum Cause {
     HydrateFailed,
     /// The changes could not be uploaded or recorded.
     CommitFailed,
-    /// Not kept here: zero retention, a waiver, or no object store configured.
+    /// Not kept here: zero retention, a waiver, no object store configured, or a sandbox bearer about to
+    /// expire (F-f05-15).
     Unavailable,
 }
 
@@ -322,6 +345,14 @@ impl ThreadWorkspace<'_> {
     /// [`Cause::QuotaExceeded`] when the thread would keep too much;
     /// [`Cause::CommitFailed`] when a file cannot be read, uploaded or recorded.
     pub async fn commit(&self) -> Result<Report, Failure> {
+        self.commit_guarded(false).await
+    }
+
+    /// The save itself: [`commit`](Self::commit) with the bearer expiry guard's second check when `bearer_guard` is
+    /// on. Once the uploads have run and there is something to record, the bearer is checked again before the apply
+    /// sends it, so a bearer that came within the margin while the uploads ran refuses the save and nothing is
+    /// recorded (P2-ec-10-rel1). The clock is read at that check, so it sees the time the uploads took.
+    async fn commit_guarded(&self, bearer_guard: bool) -> Result<Report, Failure> {
         let Some(cas) = self.scope.cas_client else {
             return Err(Failure::new(
                 Cause::Unavailable,
@@ -377,6 +408,15 @@ impl ThreadWorkspace<'_> {
             });
         }
 
+        // The uploads above can run the bearer into its margin: it is checked again before the apply sends it.
+        if thread_bearer_expiring(
+            bearer_guard,
+            self.scope.bearer,
+            crate::run_budget::now_epoch_secs(),
+        ) {
+            return Err(bearer_expiring_refusal());
+        }
+
         let response = self
             .scope
             .sandbox_manager_client
@@ -404,6 +444,26 @@ impl ThreadWorkspace<'_> {
             changed,
             removed,
         })
+    }
+
+    /// [`commit`](Self::commit), with the bearer expiry guard on (`bearer_guard`, F-f05-15). The save is refused as
+    /// unavailable before anything is uploaded when the bearer already expires within the margin at `now_unix`. A
+    /// program that ran past the margin after the entry check reaches this save, so the bearer is checked once more
+    /// after the uploads, before it is sent (P2-ec-10-rel1). A refused save sends no bearer and records nothing.
+    /// With the guard off this is exactly [`commit`](Self::commit).
+    ///
+    /// # Errors
+    /// [`Cause::Unavailable`] when the bearer is inside its margin at either check; otherwise what
+    /// [`commit`](Self::commit) returns.
+    pub async fn commit_unless_expiring(
+        &self,
+        bearer_guard: bool,
+        now_unix: u64,
+    ) -> Result<Report, Failure> {
+        if thread_bearer_expiring(bearer_guard, self.scope.bearer, now_unix) {
+            return Err(bearer_expiring_refusal());
+        }
+        self.commit_guarded(bearer_guard).await
     }
 
     /// The files this call's directory holds that the thread keeps, with their
@@ -953,6 +1013,21 @@ mod tests {
         }
     }
 
+    /// The object store fake with every upload held for three seconds, so a save's uploads can outlast a bearer's
+    /// margin (P2-ec-10-rel1).
+    struct SlowPuts(CasFake);
+
+    impl Respond for SlowPuts {
+        fn respond(&self, request: &WireRequest) -> ResponseTemplate {
+            let response = self.0.respond(request);
+            if request.method.as_str() == "PUT" {
+                response.set_delay(std::time::Duration::from_secs(3))
+            } else {
+                response
+            }
+        }
+    }
+
     struct Rig {
         fake: FakeSandboxManager,
         client: SandboxManagerClient,
@@ -961,11 +1036,16 @@ mod tests {
     }
 
     async fn rig() -> Rig {
+        rig_with_cas(CasFake::default()).await
+    }
+
+    /// [`rig`] with the object store answering through `cas_responder`.
+    async fn rig_with_cas<R: Respond + 'static>(cas_responder: R) -> Rig {
         let fake = FakeSandboxManager::default();
         let client = start_fake(fake.clone()).await;
         let cas = MockServer::start().await;
         Mock::given(any())
-            .respond_with(CasFake::default())
+            .respond_with(cas_responder)
             .mount(&cas)
             .await;
         let cas_client = CasClient::new_with_transport(
@@ -1260,6 +1340,114 @@ mod tests {
         assert_eq!(report, Report::default());
         assert_eq!(rig.fake.applies(), applies);
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// F-f05-15 (P2-ec-10-rel1): a program can run past the bearer margin after the entry check. Its save is then
+    /// refused before the bearer is sent, so nothing is uploaded or recorded. With the guard off the save goes ahead.
+    #[tokio::test]
+    async fn a_save_inside_the_bearer_margin_sends_no_bearer() {
+        let rig = rig().await;
+        let root = fresh_root("save-bearer-margin");
+        let now = crate::run_budget::now_epoch_secs();
+        let expiring = crate::run_budget::unsigned_test_token_expiring_at(now + 5);
+        let thread = ThreadScope {
+            thread_id: "thread-1",
+            bearer: expiring.as_str(),
+            backend_id: BACKEND_ID,
+            sandbox_manager_client: &rig.client,
+            cas_client: Some(&rig.cas_client),
+        };
+        // The fake does not judge the bearer, so the open runs with one that is about to expire.
+        let workspace = open_in(&root, thread, &lease(), ORG, false)
+            .await
+            .expect("the thread opens");
+        std::fs::write(workspace.path().join("notes.txt"), b"written late")
+            .expect("the call writes its file");
+
+        let failure = workspace
+            .commit_unless_expiring(true, now)
+            .await
+            .expect_err("the save is refused inside the margin");
+        assert_eq!(failure.cause, Cause::Unavailable);
+        assert_eq!(
+            failure.to_json(),
+            json!({ "scope": "thread", "state": "refused", "cause": "unavailable" })
+        );
+        assert_eq!(
+            rig.fake.applies(),
+            0,
+            "the bearer's save never reaches sandbox-manager"
+        );
+        assert!(rig.fake.paths().is_empty(), "nothing is recorded");
+
+        let report = workspace
+            .commit_unless_expiring(false, now)
+            .await
+            .expect("with the guard off the save goes ahead");
+        assert_eq!(report.changed, 1);
+        assert_eq!(rig.fake.paths(), vec!["notes.txt".to_owned()]);
+        drop(workspace);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// P2-ec-10-rel1: the bearer is inside its margin only once the uploads have run. The save's first check passes
+    /// (22 seconds left, a margin of 20), each upload is held for three seconds, and the check before the apply sees
+    /// 19 seconds left. The save is refused there, so the expiring bearer is never sent to sandbox-manager.
+    #[tokio::test]
+    async fn a_save_whose_uploads_outlast_the_bearer_margin_sends_no_bearer() {
+        let rig = rig_with_cas(SlowPuts(CasFake::default())).await;
+        let root = fresh_root("save-uploads-outlast-margin");
+        let now = crate::run_budget::now_epoch_secs();
+        let expiring = crate::run_budget::unsigned_test_token_expiring_at(now + 22);
+        let thread = ThreadScope {
+            thread_id: "thread-1",
+            bearer: expiring.as_str(),
+            backend_id: BACKEND_ID,
+            sandbox_manager_client: &rig.client,
+            cas_client: Some(&rig.cas_client),
+        };
+        let workspace = open_in(&root, thread, &lease(), ORG, false)
+            .await
+            .expect("the thread opens");
+        std::fs::write(workspace.path().join("notes.txt"), b"written late")
+            .expect("the call writes its file");
+
+        let started = std::time::Instant::now();
+        let failure = workspace
+            .commit_unless_expiring(true, now)
+            .await
+            .expect_err("the save is refused once its uploads have outlasted the margin");
+        assert!(
+            started.elapsed() >= std::time::Duration::from_secs(2),
+            "the uploads ran before the refusal"
+        );
+        assert_eq!(failure.cause, Cause::Unavailable);
+        assert_eq!(
+            rig.fake.applies(),
+            0,
+            "the expiring bearer never reaches sandbox-manager"
+        );
+        assert!(rig.fake.paths().is_empty(), "nothing is recorded");
+        drop(workspace);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The guard asks one question of a thread bearer: is it expiring inside the margin, with the switch on.
+    #[test]
+    fn a_thread_bearer_is_expiring_only_inside_the_margin_and_with_the_guard_on() {
+        let now = 1_800_000_000;
+        let soon = crate::run_budget::unsigned_test_token_expiring_at(now + 5);
+        let far = crate::run_budget::unsigned_test_token_expiring_at(now + 3600);
+        assert!(thread_bearer_expiring(true, &soon, now));
+        assert!(
+            !thread_bearer_expiring(false, &soon, now),
+            "the switch off leaves every bearer alone"
+        );
+        assert!(!thread_bearer_expiring(true, &far, now));
+        assert!(
+            !thread_bearer_expiring(true, "opaque", now),
+            "an opaque bearer is not known to expire"
+        );
     }
 
     #[test]

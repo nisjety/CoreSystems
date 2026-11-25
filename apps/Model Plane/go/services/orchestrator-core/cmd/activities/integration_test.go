@@ -574,7 +574,7 @@ func TestExecuteScheduledStepActivityForwardsExactIntentAndDecision(t *testing.T
 	assert.Equal(t, "run-1:step:0", fakeExecution.executeScheduledStepReq.GetStepId())
 	assert.Equal(t, "fire-1:step:0", fakeExecution.executeScheduledStepReq.GetIdempotencyKey())
 	assert.Equal(t, "scheduled-step", step.ToolName)
-	assert.Equal(t, "scheduled result", step.Output)
+	assert.Empty(t, step.Output, "the answer is never the activity result: no content in Temporal history (F-f03-05)")
 	assert.True(t, step.Completed)
 	assert.Equal(t, "receipt-step-1", step.Metadata["receipt_id"])
 }

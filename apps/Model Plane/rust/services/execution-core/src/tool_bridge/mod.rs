@@ -950,7 +950,7 @@ fn broker_refusal(error: browser_session::BrokerError) -> browser_session::Refus
     use browser_session::BrokerError;
 
     match error {
-        BrokerError::SiteDenied => browser_session::SITE_DENIED,
+        BrokerError::SiteDenied | BrokerError::SiteAsk => browser_session::SITE_DENIED,
         BrokerError::CredentialRefused => browser_session::CREDENTIAL_EXPIRED,
         BrokerError::Unavailable => browser_session::UNAVAILABLE,
         BrokerError::Refused => browser_session::GRANT_REFUSED,
@@ -988,11 +988,35 @@ pub(crate) async fn browser_act_precheck(
     dispatch: &browser_session::BrowserDispatch<'_>,
     tool_input: &str,
 ) -> Result<(), browser_session::Refusal> {
+    act_precheck_with(
+        dispatch,
+        tool_input,
+        crate::auth::bearer_expiry_guard_enabled(),
+    )
+    .await
+}
+
+/// [`browser_act_precheck`] with the bearer guard (F-f05-15) given. With it on, a bearer about to expire is
+/// refused before the grant is read back, so the broker is not sent a credential that is about to die.
+async fn act_precheck_with(
+    dispatch: &browser_session::BrowserDispatch<'_>,
+    tool_input: &str,
+    bearer_guard: bool,
+) -> Result<(), browser_session::Refusal> {
     browser_do_act(tool_input)?;
     let session = dispatch
         .state
         .browser_session(dispatch.run_id)
         .ok_or(browser_session::NOT_OPEN)?;
+    if browser_session::browser_bearer_expiring(
+        bearer_guard,
+        dispatch.bearer,
+        crate::run_budget::now_epoch_secs(),
+    ) {
+        return Err(broker_refusal(
+            browser_session::BrokerError::CredentialRefused,
+        ));
+    }
     let answer = dispatch
         .broker
         .validate_grant(dispatch.bearer, &session.grant_id)
@@ -2731,6 +2755,69 @@ mod tests {
         let act = browser_do_act_run(&act_dispatch(&state, &broker), &quarry, CLICK_REF).await;
         assert_eq!(act.err(), Some(ACT_NOT_PERMITTED));
         assert_eq!(*broker.validations.lock().unwrap(), 2, "the grant was read at each check");
+    }
+
+    /// F-f05-15: with the guard on, an act whose bearer is about to expire is refused as an expired sign-in before
+    /// the grant is read back, and the page the run holds stays open.
+    #[tokio::test]
+    async fn an_act_with_an_expiring_bearer_is_refused_before_the_broker() {
+        let state = crate::state::StateStore::new();
+        holding_a_page(&state);
+        let broker = ActBroker {
+            read_only: false,
+            validations: std::sync::Mutex::new(0),
+        };
+        let bearer = crate::run_budget::unsigned_test_token_expiring_at(
+            crate::run_budget::now_epoch_secs() + 5,
+        );
+        let dispatch = browser_session::BrowserDispatch {
+            state: &state,
+            broker: &broker,
+            bearer: &bearer,
+            org_id: "org-1",
+            run_id: "run-1",
+        };
+
+        let refusal = act_precheck_with(&dispatch, CLICK_REF, true).await;
+        assert_eq!(refusal.err(), Some(browser_session::CREDENTIAL_EXPIRED));
+        assert_eq!(
+            *broker.validations.lock().unwrap(),
+            0,
+            "the grant was not read back"
+        );
+        assert!(
+            state.browser_session("run-1").is_some(),
+            "the page stays open"
+        );
+    }
+
+    /// With the guard off the same act reads the grant back, as it always did.
+    #[tokio::test]
+    async fn an_act_with_an_expiring_bearer_reads_the_grant_with_the_guard_off() {
+        let state = crate::state::StateStore::new();
+        holding_a_page(&state);
+        let broker = ActBroker {
+            read_only: false,
+            validations: std::sync::Mutex::new(0),
+        };
+        let bearer = crate::run_budget::unsigned_test_token_expiring_at(
+            crate::run_budget::now_epoch_secs() + 5,
+        );
+        let dispatch = browser_session::BrowserDispatch {
+            state: &state,
+            broker: &broker,
+            bearer: &bearer,
+            org_id: "org-1",
+            run_id: "run-1",
+        };
+
+        let precheck = act_precheck_with(&dispatch, CLICK_REF, false).await;
+        assert_eq!(precheck, Ok(()));
+        assert_eq!(
+            *broker.validations.lock().unwrap(),
+            1,
+            "the grant was read back"
+        );
     }
 
     /// An act with no page open is refused before the broker is asked anything.

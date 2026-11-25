@@ -124,6 +124,7 @@ func scheduledAgentLaneEnabled() bool {
 // in the direct RPC request; it is never part of Temporal input/history. The
 // Execution Core lane remains disabled by default until it can verify the
 // service caller, claim Session Core's receipt, and reconcile unknown outcomes.
+// The step's answer is never the activity's result: no content in Temporal history (F-f03-05).
 func (a *Activities) ExecuteScheduledStepActivity(
 	ctx context.Context,
 	intent ScheduledStepExecutionIntent,
@@ -210,10 +211,14 @@ func (a *Activities) ExecuteScheduledStepActivity(
 				nil,
 			)
 	}
+	// No content in Temporal history (F-f03-05): this activity result is recorded in workflow
+	// history, so the step's answer is never copied into it, in Output or in Metadata. The answer
+	// reaches the thread through Session Core's result hop, and the receipt id and counts are all
+	// the workflow needs.
 	step := StepResult{
 		StepIndex:     int(intent.StepIndex),
 		ToolName:      "scheduled-step",
-		Output:        resp.Output,
+		Output:        "",
 		Completed:     resp.Status == "completed",
 		NeedsApproval: resp.Status == "awaiting_approval",
 		Metadata: map[string]string{

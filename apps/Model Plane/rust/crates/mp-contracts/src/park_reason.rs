@@ -8,12 +8,13 @@ use crate::loop_fold::ParkReason;
 
 impl ParkReason {
     /// Every reason, in declaration order.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::CredentialWindow,
         Self::ProviderExhausted,
         Self::UpstreamUnavailable,
         Self::CrashInterrupted,
         Self::ReauthRequired,
+        Self::CredentialExpiring,
     ];
 
     /// The wire token: the serde snake_case name.
@@ -25,6 +26,7 @@ impl ParkReason {
             Self::UpstreamUnavailable => "upstream_unavailable",
             Self::CrashInterrupted => "crash_interrupted",
             Self::ReauthRequired => "reauth_required",
+            Self::CredentialExpiring => "credential_expiring",
         }
     }
 
@@ -42,7 +44,7 @@ mod tests {
 
     #[test]
     fn every_reason_round_trips_through_its_wire_token_and_matches_serde() {
-        assert_eq!(ParkReason::ALL.len(), 5);
+        assert_eq!(ParkReason::ALL.len(), 6);
         for reason in ParkReason::ALL {
             let token = reason.as_str();
             assert_eq!(ParkReason::parse(token), Some(reason), "{token}");
@@ -57,6 +59,10 @@ mod tests {
         assert_eq!(ParkReason::UpstreamUnavailable.as_str(), "upstream_unavailable");
         assert_eq!(ParkReason::CrashInterrupted.as_str(), "crash_interrupted");
         assert_eq!(ParkReason::ReauthRequired.as_str(), "reauth_required");
+        assert_eq!(
+            ParkReason::CredentialExpiring.as_str(),
+            "credential_expiring"
+        );
     }
 
     /// The position of each reason in `ParkReason::ALL`. The match has no wildcard
@@ -69,6 +75,7 @@ mod tests {
             ParkReason::UpstreamUnavailable => 2,
             ParkReason::CrashInterrupted => 3,
             ParkReason::ReauthRequired => 4,
+            ParkReason::CredentialExpiring => 5,
         }
     }
 
@@ -97,6 +104,8 @@ mod tests {
             "credential_window ",
             " credential_window",
             "credential-window",
+            "credential_expiring ",
+            "CredentialExpiring",
             "CredentialWindow",
             "token=abc",
             "unknown",

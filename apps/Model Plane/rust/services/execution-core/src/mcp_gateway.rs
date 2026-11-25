@@ -259,11 +259,19 @@ pub const FORM_NOT_ASKED: &str =
 /// Whether this run's MCP calls may allow the server to ask its owner a question.
 #[must_use]
 pub fn allow_elicitation(run: &ElicitationRun) -> bool {
+    allow_elicitation_when(elicitation_on(), run)
+}
+
+/// Whether `MCP_DO_ELICITATION` is on for this process ([`elicitation_enabled`]), through the test
+/// seam a test forces it with. Every reader of the switch outside the pure rules reads it here, so the
+/// pause ([`allow_elicitation`]) and the resume that answers a held form (W3-EP-4-S7-b) agree.
+#[must_use]
+pub fn elicitation_on() -> bool {
     #[cfg(test)]
     if let Some(forced) = test_switch::forced() {
-        return allow_elicitation_when(forced, run);
+        return forced;
     }
-    allow_elicitation_when(elicitation_enabled(), run)
+    elicitation_enabled()
 }
 
 /// A test's override of the switch, which the process reads once. Thread-local: `#[tokio::test]`
@@ -317,6 +325,16 @@ pub const ELICITATION_CANCEL: &str = "cancel";
 
 /// The gateway's typed error for an answer that reached a replica without the held call (D16).
 pub const ELICITATION_EXPIRED: &str = "mcp_elicitation_expired";
+
+/// What an answered form's call reads when a second question came back in the answer's own call: one
+/// form per call in v1 (W3-EP-4-S7-b). The second form is cancelled at once, and the call did not complete.
+pub const SECOND_FORM: &str =
+    "the MCP server asked a second question in one call; the call was cancelled";
+
+/// What an answered form's call reads when the fold names no held form to answer, or the gateway no
+/// longer holds the call (W3-EP-4-S7-b). The server's call did not complete, and nothing says it ran.
+pub const NO_LONGER_HELD: &str =
+    "the MCP server no longer holds this call (mcp_elicitation_expired); run the tool again if it is still needed";
 
 /// What goes back to the server for one form, read from its question.
 #[derive(Debug, Clone, PartialEq)]

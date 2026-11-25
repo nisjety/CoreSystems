@@ -2558,6 +2558,10 @@ fn bash_long_option(word: &str) -> Option<&str> {
 /// first operand before any `-c` (`sh x.sh -c 'rm'` runs `x.sh`, and the `-c` is one of its arguments), the standard
 /// input, which a shell reads when no operand is left after its options (`sh -s`, `sh`, `sh -`, `sh --`), or a `-c` with no
 /// command string after its options (`command_string_present`), whose string a wrapper such as `xargs` gives at run time.
+///
+/// An option word that holds an expansion is `None` too, and so is the value an option takes when that value holds one: the
+/// shell splits such a word into words when it runs, and any of them may be an option, the `-c` or its command string
+/// (`is_expanding_word`). The words after the `-c` are read with its text, so an expanding one there withholds it as before.
 fn shell_script_arguments<'a>(program: &str, args: &'a [&'a str]) -> Option<&'a [&'a str]> {
     let (letters, longs) = shell_value_options(program);
     let mut index = 0;
@@ -2572,6 +2576,10 @@ fn shell_script_arguments<'a>(program: &str, args: &'a [&'a str]) -> Option<&'a 
             };
             index += 1;
             if longs.contains(&name) {
+                // The value is the next word, and an expansion in it may split into several words.
+                if is_expanding_value(args, index) {
+                    return None;
+                }
                 index += 1;
             }
         }
@@ -2586,8 +2594,16 @@ fn shell_script_arguments<'a>(program: &str, args: &'a [&'a str]) -> Option<&'a 
         if arg == "--" || body.is_empty() {
             return None;
         }
+        // An option word that holds an expansion is split into words when the shell runs, and any of them may be an option,
+        // the `-c` or its command string (`-$X` with X='c ./x.sh' is `-c ./x.sh`), so the text is not read from it.
+        if is_expanding_word(arg) {
+            return None;
+        }
         if let Some(long) = arg.strip_prefix("--") {
             if longs.contains(&long) {
+                if is_expanding_value(args, index) {
+                    return None;
+                }
                 index += 1;
             }
             continue;
@@ -2604,12 +2620,22 @@ fn shell_script_arguments<'a>(program: &str, args: &'a [&'a str]) -> Option<&'a 
                 if at + letter.len_utf8() < body.len() {
                     return None;
                 }
+                // The value is the next word, and an expansion in it may split into several words, any of them an option.
+                if is_expanding_value(args, index) {
+                    return None;
+                }
                 index += 1;
                 break;
             }
         }
     }
     None
+}
+
+/// Whether the word at `at` is the value an option takes, and it holds an expansion. The shell splits such a word into words
+/// when it runs, so the value may be an option, the `-c` or its command string (`shell_script_arguments`).
+fn is_expanding_value(args: &[&str], at: usize) -> bool {
+    args.get(at).is_some_and(|value| is_expanding_word(value))
 }
 
 /// Whether the `-c` has its command string on the command line: the first operand that its options leave, among the
@@ -4831,8 +4857,24 @@ fn wrapped_from(
                 replace_strings.extend(xargs_replace_string(wrapper, word, args.get(index)));
             }
             match option_arity(wrapper, word) {
-                Some(Arity::Flag | Arity::Attached) => {}
-                Some(Arity::NextWord) => index += 1,
+                // An option word that holds an expansion, and so an attached value (`-u$X`, `--unset=$X`), may split
+                // into words, one of them the command: `env -u$X rm` with X='A sh' runs `sh rm`, so it is withheld.
+                Some(Arity::Flag | Arity::Attached) => {
+                    if may_split_into_words(word) {
+                        names.push(String::new());
+                    }
+                }
+                // The value is the next word, and an expansion in it may split too (`env -u $X rm`), so the command is
+                // withheld, as an expanding command word is (`command_names`).
+                Some(Arity::NextWord) => {
+                    if args
+                        .get(index)
+                        .is_some_and(|value| may_split_into_words(value))
+                    {
+                        names.push(String::new());
+                    }
+                    index += 1;
+                }
                 // An option the table does not list may take a value, so the command after it cannot be read.
                 None => {
                     names.push(String::new());
@@ -4946,7 +4988,8 @@ fn wrapped_from(
 /// it the priority, so the withheld value is named too. The list after a `repeat` count is read from its first word on
 /// (`list_names`), since the reserved words that open it run no command. Any other operand is read past, and the words
 /// after it are read with one operand fewer. The last operand ends them: the words after it are the command and its
-/// arguments, none read as an option (`command_after_operands`).
+/// arguments, none read as an option (`command_after_operands`). An operand that may split into words withholds the
+/// command too, since one of its words may be the command (`may_split_into_words`).
 fn operand_names(
     wrapper: &Wrapper,
     args: &[String],
@@ -4977,11 +5020,18 @@ fn operand_names(
             return names;
         }
     }
+    // The word is skipped as an operand, but an expansion in it may split into words, one of them the command:
+    // `timeout $D rm x` with D='5 sh' runs `sh rm x`. So the command is withheld, as an expanding option value's is.
+    let mut names = Vec::new();
+    if may_split_into_words(word) {
+        names.push(String::new());
+    }
     if program == "repeat" && operands_to_skip == 1 {
-        return list_names(rest, depth, cut);
+        names.extend(list_names(rest, depth, cut));
+        return names;
     }
     if operands_to_skip > 1 {
-        return wrapped_from(
+        names.extend(wrapped_from(
             wrapper,
             rest,
             operands_to_skip - 1,
@@ -4989,11 +5039,12 @@ fn operand_names(
             depth,
             cut,
             program,
-        );
+        ));
+        return names;
     }
     // The last operand. For chrt that is an all-digit priority with more operands after it. getopt's `+` ends the options
     // at the first non-option, so the words after it are the command and its arguments, none read as an option.
-    let mut names = command_after_operands(wrapper, rest, depth, cut);
+    names.extend(command_after_operands(wrapper, rest, depth, cut));
     // flock's getopt reads options after its lock file too (`flock FILE -c command`), so an option-shaped word there is
     // read as an option as well, and the command after those options is named too.
     if program == "flock" && rest.first().is_some_and(|first| first.starts_with('-')) {
@@ -5321,7 +5372,7 @@ fn command_words_names(words: &[String], depth: usize, cut: bool) -> Vec<String>
                 }
             }
             // The commands are in a script file or on the standard input, which no name here reads, or the command
-            // string is one a wrapper gives at run time (`shell_script_arguments`).
+            // string is one a wrapper gives at run time, or an option word or value holds an expansion (`shell_script_arguments`).
             None => names.push(String::new()),
         }
         // A shell whose syntax the reader does not model may run a command it does not name, so its value is withheld too.
@@ -5939,6 +5990,14 @@ fn is_expanding_word(word: &str) -> bool {
         .find('[')
         .is_some_and(|open| word[open..].contains(']'));
     equals_expansion || bracket_pattern || word.contains(['$', '`', '{', '}', '*', '?', '~'])
+}
+
+/// Whether a word that a wrapper reads as an option, or skips as an operand, holds an expansion that may split into
+/// words, one of which may be the command (`wrapped_from`, `operand_names`). It is `is_expanding_word`, except for the
+/// `{}` that `xargs` substitutes its input into (`-I{}`, `--replace={}`): that is literal text and makes no words, so
+/// `xargs -I{} rm {}` still names `rm` alone.
+fn may_split_into_words(word: &str) -> bool {
+    is_expanding_word(&word.replace("{}", ""))
 }
 
 /// Whether a character can be part of a command name (see `command_name`).
@@ -11846,6 +11905,106 @@ mod tests {
     }
 
     #[test]
+    fn an_expanding_option_value_or_operand_of_a_wrapper_withholds_the_command_it_may_split_into() {
+        // An unquoted expansion in the value of an option, or in an operand the wrapper skips, splits into words when it runs,
+        // and one of them may be the command: `env -u $X rm` with X='A sh' runs `env -u A sh rm`, which runs `sh`. That
+        // command is withheld, and the words after the value are read on as before, so the `rm` after it is named too.
+        for (text, expected) in [
+            ("env -u $X rm", vec!["env", "", "rm"]),
+            ("env -C $D rm", vec!["env", "", "rm"]),
+            ("env -u$X rm", vec!["env", "", "rm"]),
+            ("env --unset=$X rm", vec!["env", "", "rm"]),
+            ("nice -n $X rm", vec!["nice", "", "rm"]),
+            ("sudo -u $X rm", vec!["sudo", "", "rm"]),
+            ("doas -u $X rm", vec!["doas", "", "rm"]),
+            ("timeout -s $X 5 rm", vec!["timeout", "", "rm"]),
+            ("timeout $D rm x", vec!["timeout", "", "rm"]),
+            ("taskset $M rm x", vec!["taskset", "", "rm"]),
+            ("chroot $D rm x", vec!["chroot", "", "rm"]),
+            ("flock $F rm x", vec!["flock", "", "rm"]),
+            ("ionice -c $X rm", vec!["ionice", "", "rm"]),
+            ("xargs -n $X rm", vec!["xargs", "", "rm"]),
+            ("xargs -I $X rm {}", vec!["xargs", "", "rm"]),
+            ("stdbuf -o $X rm x", vec!["stdbuf", "", "rm"]),
+            ("chrt -T $X 5 rm", vec!["chrt", "", "rm"]),
+            ("sudo --user=$X rm", vec!["sudo", "", "rm"]),
+            ("repeat $N rm x", vec!["repeat", "", "rm"]),
+            // Negative controls: a value or operand with no expansion names only its wrapper and the command, and the `{}`
+            // that `xargs` substitutes its input into is literal text, so it names nothing of its own.
+            ("env -u HOME rm x", vec!["env", "rm"]),
+            ("timeout 5 rm", vec!["timeout", "rm"]),
+            ("nice -n 5 rm name", vec!["nice", "rm"]),
+            ("xargs -I {} rm {}", vec!["xargs", "rm"]),
+            ("xargs -I{} rm {}", vec!["xargs", "rm"]),
+        ] {
+            assert_eq!(command_prefixes(text), expected, "{text}");
+        }
+        // An assignment-shaped operand is read as the operand it may be, and its expansion withholds the command the same way.
+        assert!(command_prefixes("flock X=$D rm x").contains(&String::new()));
+    }
+
+    #[tokio::test]
+    async fn a_deny_on_the_command_an_expanding_option_value_may_run_denies_the_call() {
+        // The withheld value is one more target of the call, as an expanding env word's is.
+        let (mut policy, state) = harness(ToolClassGate::Enforce).await;
+        policy.permission_rules = true;
+        state
+            .decision_by_target
+            .lock()
+            .unwrap()
+            .insert(String::new(), "deny".to_owned());
+        let evaluation = policy
+            .evaluate_tool_call_with_input(
+                "code_interpreter",
+                r#"{"language":"sh","code":"env -u $X rm -rf y"}"#,
+                "run-a",
+                "org-a",
+                "user-a",
+                false,
+            )
+            .await
+            .expect("a deny is an evaluation, not an error");
+        assert_eq!(evaluation.decision, CapabilityDecision::Deny);
+        let sent = state.evaluated.lock().unwrap();
+        assert_eq!(
+            target_pairs(&sent),
+            pairs(&[
+                ("command_prefix", "env"),
+                ("command_prefix", ""),
+                ("command_prefix", "rm"),
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn with_the_permission_rules_off_an_expanding_option_value_or_operand_names_no_command() {
+        // The switch is off, so the request carries no tool target at all, and the withheld command is not sent either.
+        let (policy, state) = harness(ToolClassGate::Off).await;
+        for input in [
+            r#"{"language":"sh","code":"env -u $X rm -rf y"}"#,
+            r#"{"language":"sh","code":"timeout $D rm -rf y"}"#,
+        ] {
+            policy
+                .evaluate_tool_call_with_input(
+                    "code_interpreter",
+                    input,
+                    "run-a",
+                    "org-a",
+                    "user-a",
+                    false,
+                )
+                .await
+                .expect("an allowed call evaluates");
+        }
+        let sent = state.evaluated.lock().unwrap();
+        assert_eq!(sent.len(), 2, "one request per call, no extra checks");
+        for request in sent.iter() {
+            assert_eq!(request.target_kind, "");
+            assert_eq!(request.target_value, "");
+        }
+    }
+
+    #[test]
     fn a_shell_program_shaped_like_an_assignment_is_the_path_that_runs() {
         // The `shell` tool runs its program with no shell, so `A=/bin/rm` is the path that runs, as `A+=/bin/rm` is: a symlink
         // `A=` to `/` resolves it to `/bin/rm`. It names `A`, the basename `rm` and the withheld value, as a path does.
@@ -12618,6 +12777,123 @@ mod tests {
         }
         let sent = state.evaluated.lock().unwrap();
         assert_eq!(sent.len(), 3, "one request per call, no extra checks");
+        for request in sent.iter() {
+            assert_eq!(request.tool_name, "");
+            assert_eq!(request.user_id, "");
+            assert_eq!(request.target_kind, "");
+            assert_eq!(request.target_value, "");
+        }
+    }
+
+    #[tokio::test]
+    async fn with_the_permission_rules_off_a_long_run_of_assignments_after_time_names_no_command() {
+        // The reading of a run of `A=/b` after `time` is linear (`a_long_run_of_assignments_after_time_is_read_in_linear_time`).
+        // With the switch off no text is read at all, so a run of any length carries no target.
+        let (policy, state) = harness(ToolClassGate::Off).await;
+        let long = format!(
+            r#"{{"language":"sh","code":"time {}rm x"}}"#,
+            "A=/b ".repeat(12_000)
+        );
+        policy
+            .evaluate_tool_call_with_input(
+                "code_interpreter",
+                &long,
+                "run-a",
+                "org-a",
+                "user-a",
+                false,
+            )
+            .await
+            .expect("an allowed call evaluates");
+        let sent = state.evaluated.lock().unwrap();
+        assert_eq!(sent.len(), 1, "one request, no extra checks");
+        for request in sent.iter() {
+            assert_eq!(request.tool_name, "");
+            assert_eq!(request.user_id, "");
+            assert_eq!(request.target_kind, "");
+            assert_eq!(request.target_value, "");
+        }
+    }
+
+    #[tokio::test]
+    async fn with_the_permission_rules_off_a_trap_action_shaped_like_an_option_names_no_command() {
+        // The action `trap "-$x" EXIT` stores is no option (`an_expanding_trap_action_shaped_like_an_option_is_withheld`).
+        let (policy, state) = harness(ToolClassGate::Off).await;
+        for (tool, input) in [
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"trap \"-$x\" EXIT"}"#,
+            ),
+            (
+                "shell",
+                r#"{"program":"zsh","args":["-c","trap \"-$x\" EXIT"]}"#,
+            ),
+        ] {
+            policy
+                .evaluate_tool_call_with_input(tool, input, "run-a", "org-a", "user-a", false)
+                .await
+                .expect("an allowed call evaluates");
+        }
+        let sent = state.evaluated.lock().unwrap();
+        assert_eq!(sent.len(), 2, "one request per call, no extra checks");
+        for request in sent.iter() {
+            assert_eq!(request.tool_name, "");
+            assert_eq!(request.user_id, "");
+            assert_eq!(request.target_kind, "");
+            assert_eq!(request.target_value, "");
+        }
+    }
+
+    #[tokio::test]
+    async fn with_the_permission_rules_off_an_alias_operand_whose_name_expands_names_no_command() {
+        // The operand `alias "$n=y"` stores under an expanded name (`an_alias_operand_whose_name_expands_is_withheld`).
+        let (policy, state) = harness(ToolClassGate::Off).await;
+        for input in [
+            r#"{"language":"sh","code":"alias \"$n=y\"; ls"}"#,
+            r#"{"language":"sh","code":"alias $n=y; ls"}"#,
+        ] {
+            policy
+                .evaluate_tool_call_with_input(
+                    "code_interpreter",
+                    input,
+                    "run-a",
+                    "org-a",
+                    "user-a",
+                    false,
+                )
+                .await
+                .expect("an allowed call evaluates");
+        }
+        let sent = state.evaluated.lock().unwrap();
+        assert_eq!(sent.len(), 2, "one request per call, no extra checks");
+        for request in sent.iter() {
+            assert_eq!(request.tool_name, "");
+            assert_eq!(request.user_id, "");
+            assert_eq!(request.target_kind, "");
+            assert_eq!(request.target_value, "");
+        }
+    }
+
+    #[tokio::test]
+    async fn with_the_permission_rules_off_the_shells_the_lists_name_no_command() {
+        // The shells the tables name read their `-c` text only with the switch on, so with it off none of them names a command.
+        let (policy, state) = harness(ToolClassGate::Off).await;
+        let programs = [
+            "ksh93", "lksh", "osh", "ysh", "rc", "es", "hush", "bash.exe", "ksh88", "ksh2020",
+        ];
+        for program in programs {
+            let input = format!(r#"{{"program":"{program}","args":["-c","rm x"]}}"#);
+            policy
+                .evaluate_tool_call_with_input("shell", &input, "run-a", "org-a", "user-a", false)
+                .await
+                .expect("an allowed call evaluates");
+        }
+        let sent = state.evaluated.lock().unwrap();
+        assert_eq!(
+            sent.len(),
+            programs.len(),
+            "one request per call, no extra checks"
+        );
         for request in sent.iter() {
             assert_eq!(request.tool_name, "");
             assert_eq!(request.user_id, "");
@@ -14223,6 +14499,107 @@ mod tests {
                 .await
                 .expect("an allow is an evaluation, not an error");
             assert_eq!(evaluation.decision, CapabilityDecision::Allow, "{input}");
+        }
+    }
+
+    #[test]
+    fn an_expanding_option_word_or_value_of_a_posix_shell_withholds_its_dash_c_text() {
+        // The shell splits an unquoted expansion into words when it runs, so an option word or an option value that holds one
+        // may be any words, the `-c` among them: `sh -$X -c 'echo hi'` with X='c ./evil.sh' runs `sh -c ./evil.sh -c 'echo hi'`,
+        // which runs ./evil.sh, a workspace file the model can write, while naming only `echo`. Such a word withholds the text,
+        // as an expanding operand before the `-c` does (`sh $X -c`). So does a `-c` word that holds an expansion, since the
+        // words it splits into may be its command string (`sh -c$X`), and the value of a long option that expands.
+        for (text, expected) in [
+            ("sh -$X -c 'echo hi'", vec!["sh", ""]),
+            ("sh -o $X -c 'echo hi'", vec!["sh", ""]),
+            ("sh -O $X -c 'echo hi'", vec!["sh", ""]),
+            ("sh +$X -c 'echo hi'", vec!["sh", ""]),
+            ("sh -$X 'echo hi'", vec!["sh", ""]),
+            ("sh -e$X -c 'echo hi'", vec!["sh", ""]),
+            ("sh -c$X 'echo hi'", vec!["sh", ""]),
+            ("sh --rc$X -c 'echo hi'", vec!["sh", ""]),
+            ("bash --rcfile $X -c 'echo hi'", vec!["bash", ""]),
+            ("bash --init-file $X -c 'echo hi'", vec!["bash", ""]),
+            ("bash -rcfile $X -c 'echo hi'", vec!["bash", ""]),
+            (
+                "/usr/bin/bash -$X -c 'echo hi'",
+                vec!["/usr/bin/bash", "bash", ""],
+            ),
+            ("ksh -T $X -c 'echo hi'", vec!["ksh", ""]),
+            ("mksh -T$X -c 'echo hi'", vec!["mksh", ""]),
+        ] {
+            assert_eq!(command_prefixes(text), expected, "{text}");
+        }
+        // An expanding word after the `-c` is one of the words its text is read with, and withholds the value as it always did.
+        for text in [
+            "sh -c -o $X 'echo hi'",
+            "sh -c -$X 'echo hi'",
+            "sh -c -e $X",
+        ] {
+            assert!(command_prefixes(text).contains(&String::new()), "{text}");
+        }
+        // Options with no expansion read the `-c` text as before.
+        for (text, expected) in [
+            ("sh -e -c 'rm x'", vec!["sh", "rm"]),
+            ("sh -o pipefail -c 'rm x'", vec!["sh", "rm"]),
+            ("bash --rcfile x -c 'rm x'", vec!["bash", "rm"]),
+            ("ksh -T tty -c 'rm x'", vec!["ksh", "rm"]),
+        ] {
+            assert_eq!(command_prefixes(text), expected, "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_deny_on_the_command_an_expanding_shell_option_may_run_denies_the_call() {
+        // The withheld value is one more target of the call, as an expanding option value's is, so a deny on it denies the
+        // call whose text names only `echo` otherwise. The `shell` tool and `code_interpreter` in `sh` read the same text.
+        let (mut policy, state) = harness(ToolClassGate::Enforce).await;
+        policy.permission_rules = true;
+        state
+            .decision_by_target
+            .lock()
+            .unwrap()
+            .insert(String::new(), "deny".to_owned());
+        for (tool, input) in [
+            ("shell", r#"{"program":"sh","args":["-$X","-c","echo hi"]}"#),
+            (
+                "shell",
+                r#"{"program":"bash","args":["--rcfile","$X","-c","echo hi"]}"#,
+            ),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"sh -o $X -c 'echo hi'"}"#,
+            ),
+        ] {
+            let evaluation = policy
+                .evaluate_tool_call_with_input(tool, input, "run-a", "org-a", "user-a", false)
+                .await
+                .expect("a deny is an evaluation, not an error");
+            assert_eq!(evaluation.decision, CapabilityDecision::Deny, "{input}");
+        }
+    }
+
+    #[tokio::test]
+    async fn with_the_permission_rules_off_an_expanding_shell_option_names_no_command() {
+        // The switch is off, so each request carries no tool target, and the withheld text is not sent either.
+        let (policy, state) = harness(ToolClassGate::Off).await;
+        for (tool, input) in [
+            ("shell", r#"{"program":"sh","args":["-$X","-c","echo hi"]}"#),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"sh -o $X -c 'echo hi'"}"#,
+            ),
+        ] {
+            policy
+                .evaluate_tool_call_with_input(tool, input, "run-a", "org-a", "user-a", false)
+                .await
+                .expect("an allowed call evaluates");
+        }
+        let sent = state.evaluated.lock().unwrap();
+        assert_eq!(sent.len(), 2, "one request per call, no extra checks");
+        for request in sent.iter() {
+            assert_eq!(request.target_kind, "");
+            assert_eq!(request.target_value, "");
         }
     }
 

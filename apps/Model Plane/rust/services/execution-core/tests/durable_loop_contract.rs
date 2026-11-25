@@ -1419,7 +1419,7 @@ fn resume_parser_strictness_violations(loop_fold_source: &str) -> Vec<String> {
 const PARK_RESUME_BUILT_EXPECTED: bool = true;
 
 /// The executor's park (a typed, recoverable stop of a pinned root run saved as a durable
-/// `park` fold, the run left open) is written by ONE function, behind ONE decision, from three
+/// `park` fold, the run left open) is written by ONE function, behind ONE decision, from four
 /// places in the loop, and a parked run returns before it is finalized. Each claim below is what
 /// a careless edit would break without turning a lib test red:
 ///
@@ -1430,8 +1430,9 @@ const PARK_RESUME_BUILT_EXPECTED: bool = true;
 ///   twice in `try_park`), so no stray resumable park outlives the committed fallback;
 /// * the four park keys (`EXT_PARKS` and its three siblings) are written by `park_fold` and
 ///   nowhere else, and the executor never writes `crash_interrupted`;
-/// * the loop parks from exactly three stops, in the order the loop meets them (a latched
-///   refusal, the deadline, a failed round), each through `park_at_boundary`, the only caller of
+/// * the loop parks from exactly four stops, in the order the loop meets them (a latched
+///   refusal, the deadline, an expiring browser or sandbox bearer (F-f05-15b), a failed round),
+///   each through `park_at_boundary`, the only caller of
 ///   `try_park`; `run_parkable` is decided once, before the loop starts, from the run's own
 ///   facts (zero-retention, waived, Space, depth, release, derivable tools, route);
 /// * a parked outcome returns from `run_agent_with_route_parkable` BEFORE `finalize`, and its
@@ -1586,7 +1587,7 @@ fn park_writer_violations(
         violations.push("park_reason_for names CrashInterrupted (or is gone): the table never produces a crash".into());
     }
 
-    // The loop: three stops, one door, one decision.
+    // The loop: four stops, one door, one decision.
     match agent.fn_body_skel("run_rounds") {
         None => violations.push("agent.rs has no `fn run_rounds`: re-point this guard".into()),
         Some(rounds) => {
@@ -1594,14 +1595,20 @@ fn park_writer_violations(
             let calls_in_rounds = matches_of(&rounds, boundary);
             let calls_total = matches_of(&agent.skel, boundary)
                 .saturating_sub(matches_of(&agent.skel, r"\bfn\s+park_at_boundary\b"));
-            if calls_in_rounds != 3 || calls_total != 3 {
+            if calls_in_rounds != 4 || calls_total != 4 {
                 violations.push(format!(
-                    "agent.rs calls `park_at_boundary(` {calls_total} times ({calls_in_rounds} inside run_rounds); the loop parks from exactly three stops"
+                    "agent.rs calls `park_at_boundary(` {calls_total} times ({calls_in_rounds} inside run_rounds); the loop parks from exactly four stops"
                 ));
             }
             let mut at = Vec::new();
-            for stop in ["LatchedRefusal", "Deadline", "FailedRound"] {
-                let found: Vec<usize> = Regex::new(&format!(r"\bParkStop\s*::\s*{stop}\s*\("))
+            // `CredentialExpiring` (F-f05-15b) is a unit stop, so a stop is matched by its name alone.
+            for stop in [
+                "LatchedRefusal",
+                "Deadline",
+                "CredentialExpiring",
+                "FailedRound",
+            ] {
+                let found: Vec<usize> = Regex::new(&format!(r"\bParkStop\s*::\s*{stop}\b"))
                     .expect("pattern")
                     .find_iter(&rounds)
                     .map(|found| found.start())
@@ -1614,16 +1621,16 @@ fn park_writer_violations(
                     )),
                 }
             }
-            if at.len() == 3 && !(at[0] < at[1] && at[1] < at[2]) {
+            if at.len() == 4 && !(at[0] < at[1] && at[1] < at[2] && at[2] < at[3]) {
                 violations.push(
-                    "the park stops are not in the order the loop meets them: a latched refusal, the deadline, a failed round"
+                    "the park stops are not in the order the loop meets them: a latched refusal, the deadline, an expiring bearer, a failed round"
                         .into(),
                 );
             }
             let built = r"\boutcome\s*:\s*RoundsOutcome\s*::\s*Parked\s*\(";
-            if matches_of(&rounds, built) != 3 || matches_of(&agent.skel, built) != 3 {
+            if matches_of(&rounds, built) != 4 || matches_of(&agent.skel, built) != 4 {
                 violations.push(
-                    "agent.rs builds `RoundsOutcome::Parked(` other than three times, all in run_rounds"
+                    "agent.rs builds `RoundsOutcome::Parked(` other than four times, all in run_rounds"
                         .into(),
                 );
             }
@@ -1653,9 +1660,10 @@ fn park_writer_violations(
             for (stop, anchor) in [
                 ("LatchedRefusal", r"\.\s*refusal\s*\.\s*latched\s*\("),
                 ("Deadline", r"\.\s*deadline\s*\.\s*expired\s*\("),
+                ("CredentialExpiring", r"\bcredential_expiring_now\s*\("),
                 ("FailedRound", r"\brefusal_for_failed_round\s*\("),
             ] {
-                let stop_at = Regex::new(&format!(r"\bParkStop\s*::\s*{stop}\s*\("))
+                let stop_at = Regex::new(&format!(r"\bParkStop\s*::\s*{stop}\b"))
                     .expect("pattern")
                     .find(&rounds)
                     .map(|found| found.start());
@@ -1685,7 +1693,7 @@ fn park_writer_violations(
             }
             // A resume must have a round left: the decision is fed the rounds the run has
             // CHARGED (its own, the failed one included, and its delegates') against its OWN
-            // budget, and the three stops hand it exactly those.
+            // budget, and the four stops hand it exactly those.
             let flat: String = body.split_whitespace().collect();
             let need = "rounds_used:point.rounds_executed.saturating_add(point.delegated_rounds),max_rounds,";
             if !flat.contains(need) {
@@ -4876,8 +4884,8 @@ fn the_in_place_resume_is_seeded_fenced_and_reserved_in_order() {
     ));
 }
 
-/// The park is written by one function, behind one decision, from three stops, and a parked run
-/// returns before it is finalized (WS03 S8-A, S8-5).
+/// The park is written by one function, behind one decision, from three stops (four since
+/// F-f05-15b's credential park), and a parked run returns before it is finalized (WS03 S8-A, S8-5).
 #[test]
 fn the_park_is_written_by_one_function_from_three_stops_and_returns_before_finalize() {
     let mut every = Vec::new();
@@ -5281,7 +5289,7 @@ fn the_park_writer_guard_goes_red_when_the_code_it_guards_regresses() {
             "&super::park::ParkStop::Deadline(cause),",
             "&super::park::ParkStop::Deadline(cause),\n            )\n            .await;\n            let _ = park_at_boundary(\n                ctx,\n                &mut folds,\n                fold_authority.as_ref(),\n                &fold_prompt_digest,\n                &park_gate,\n                max_rounds,\n                ParkPoint {\n                    rounds_executed,\n                    delegated_rounds,\n                    step_seq,\n                    children_started: 0,\n                    grounded,\n                    compaction_triggered,\n                    attempted_retrievals: &attempted_retrievals,\n                    messages: &messages,\n                },\n                &super::park::ParkStop::Deadline(cause),",
         )),
-        "the loop parks from exactly three stops",
+        "the loop parks from exactly four stops",
     );
     must_flag(
         broken_agent(mutate(
@@ -5301,7 +5309,7 @@ fn the_park_writer_guard_goes_red_when_the_code_it_guards_regresses() {
     );
     must_flag(
         broken_agent(mutate(&agent, "outcome: RoundsOutcome::Parked(parked),", "outcome: RoundsOutcome::Exhausted,")),
-        "other than three times",
+        "other than four times",
     );
     // A site that reaches try_park another way.
     must_flag(

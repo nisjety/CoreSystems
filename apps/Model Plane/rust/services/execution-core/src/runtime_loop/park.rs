@@ -262,6 +262,10 @@ pub(crate) enum ParkStop<'a> {
     /// Site C, the failed round of a pinned run (the refusal the run reports for it). The
     /// failed round stays charged.
     FailedRound(&'a Refusal),
+    /// Site D, a loop top (F-f05-15b): a browser or thread-sandbox bearer the run holds expires
+    /// within the bearer guard's margin ([`credential_expiring_now`]). Only a run
+    /// [`credential_parkable`] admits parks here.
+    CredentialExpiring,
 }
 
 /// The closed decision table: why a stop parks, or `None` and the committed return.
@@ -292,6 +296,7 @@ pub(crate) fn park_reason_for(stop: &ParkStop<'_>) -> Option<ParkReason> {
             SUBSCRIPTION_REAUTH_REQUIRED => Some(ParkReason::ReauthRequired),
             _ => None,
         },
+        ParkStop::CredentialExpiring => Some(ParkReason::CredentialExpiring),
     }
 }
 
@@ -331,9 +336,165 @@ pub(crate) fn park_until_for(
             .unwrap_or_else(|| after_secs(now, lf::PARK_DEFAULT_WAIT_SECS)),
         ParkReason::UpstreamUnavailable => after_hint(now, retry_after_ms)
             .unwrap_or_else(|| after_secs(now, lf::PARK_SHORT_WAIT_SECS)),
-        ParkReason::CredentialWindow | ParkReason::ReauthRequired | ParkReason::CrashInterrupted => {
-            now
-        }
+        ParkReason::CredentialWindow
+        | ParkReason::ReauthRequired
+        | ParkReason::CrashInterrupted
+        | ParkReason::CredentialExpiring => now,
+    }
+}
+
+// --- the credential park (F-f05-15b, owner answer D-F05-4) ------------------------------
+//
+// Design note. A Do run whose browser bearer or thread-sandbox bearer would expire mid-turn parks
+// and is resumed with freshly minted bearers, instead of meeting F-f05-15's typed refusal.
+//
+// * Trigger (site D, `ParkStop::CredentialExpiring`): at a loop top, after sites A and B and
+//   before the next round starts, so never inside a tool call. It fires when
+//   [`credential_park_active`] (`EXECUTION_CORE_BEARER_EXPIRY_GUARD` and
+//   `EXECUTION_CORE_BEARER_EXPIRY_PARK`, each the literal `true`, and [`parking_active`]) and the
+//   held browser bearer or sandbox bearer expires within `auth::BEARER_EXPIRY_MARGIN_SECS`
+//   ([`credential_expiring_now`], the guard's own question). A call this round refused by the guard
+//   needs no signal of its own: time only moves forward, so the same bearer is still inside the
+//   margin at the boundary.
+// * Who: [`credential_parkable`], which is [`run_parkable`] with one widening: an offer that is the
+//   derivable set plus the deployment's browser family (`browser_derivable`) counts as derivable.
+//   Only site D reads that widening; every other stop keeps `run_parkable`, so a browser run still
+//   never parks for any other reason. A ZDR, waived, Space, delegated or unpinned run, or one that
+//   holds a release, never parks here either.
+// * Fold: the ordinary park fold under the closed word `credential_expiring`. No bearer is ever
+//   written: a fold has no credential field, and its extension keys are ids and counts.
+// * Resume: the park resume is a `RunAgent`, so its boundary already verifies an optional
+//   `x-browser-authorization` and `x-sandbox-authorization` exactly as at entry (user, tenant,
+//   audience, ZDR posture). A claimed fold whose tool names are the derived set plus the browser
+//   family is a credential park (no other park admits a browser offer) and is accepted only while
+//   credential parking is on ([`credential_park_offer`]). With a browser bearer the resumed segment
+//   is offered the family again; without one it runs on the derived set, browser tools out. Every
+//   other park keeps the rule that a parked run holds no browser bearer.
+// * Browser page: not re-attached. The run's `RunRelease` guard ends the page when the parked call
+//   returns (grant revoked, Quarry run closed, under the still-valid bearer), and the resumed
+//   segment starts with a fresh `browser.open`. No new Quarry contract.
+// * The gateway's `/continue` mints no browser or sandbox bearer today; token minting is unchanged
+//   here, so until the gateway forwards them a credential park resumes without browser tools.
+// * A pinned run's credential deadline (`run_budget`, 60 s margin) already covers the sandbox
+//   bearer and parks it as `credential_window` first; site D catches what that does not.
+
+/// The switch of the credential park. Default off: the bearer guard's typed refusal stays, and no
+/// run parks for an expiring bearer. Only the literal `true` turns it on.
+const BEARER_EXPIRY_PARK_ENV: &str = "EXECUTION_CORE_BEARER_EXPIRY_PARK";
+
+#[cfg(test)]
+thread_local! {
+    /// A test's override of both credential-park switches (the bearer guard and the park switch).
+    static TEST_CREDENTIAL_PARK: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Holds both credential-park switches at a fixed value for the current test thread, then puts back
+/// what it found.
+#[cfg(test)]
+pub(crate) struct CredentialParkSwitch(Option<bool>);
+
+#[cfg(test)]
+impl CredentialParkSwitch {
+    pub(crate) fn set(on: bool) -> Self {
+        Self(TEST_CREDENTIAL_PARK.with(|cell| cell.replace(Some(on))))
+    }
+}
+
+#[cfg(test)]
+impl Drop for CredentialParkSwitch {
+    fn drop(&mut self) {
+        TEST_CREDENTIAL_PARK.with(|cell| cell.set(self.0));
+    }
+}
+
+/// Whether the credential park's own switch is on. Read once per process, as the guard's is.
+fn bearer_expiry_park_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| lf::switch_from(std::env::var(BEARER_EXPIRY_PARK_ENV).ok().as_deref()))
+}
+
+/// Whether both switches of the credential park are on: the bearer guard (F-f05-15) and its park.
+fn credential_park_switches() -> bool {
+    #[cfg(test)]
+    if let Some(forced) = TEST_CREDENTIAL_PARK.with(std::cell::Cell::get) {
+        return forced;
+    }
+    crate::auth::bearer_expiry_guard_enabled() && bearer_expiry_park_enabled()
+}
+
+/// Whether this process parks a run for an expiring bearer: both credential-park switches and
+/// everything an ordinary park needs ([`parking_active`]).
+pub(crate) fn credential_park_active() -> bool {
+    credential_park_switches() && parking_active()
+}
+
+/// Whether the run may take the credential park: [`run_parkable`], with an offer that is the derivable
+/// set plus the deployment's browser family (`browser_derivable`) read as derivable, and only while
+/// [`credential_park_active`]. Read once, when the loop starts, beside `run_parkable`.
+pub(crate) fn credential_parkable(facts: &StaticFacts, browser_derivable: bool) -> bool {
+    credential_park_active()
+        && run_parkable(&StaticFacts {
+            tools_derivable: facts.tools_derivable || browser_derivable,
+            ..*facts
+        })
+}
+
+/// Whether a bearer the run holds expires within the bearer guard's margin at `now_unix`: the browser
+/// bearer, or the thread-sandbox bearer. Each is asked the one question its guard asks. Content-free:
+/// only each bearer's `exp` is read, and nothing is kept.
+#[must_use]
+pub(crate) fn credential_expiring_now(
+    browser_bearer: Option<&str>,
+    sandbox_bearer: Option<&str>,
+    now_unix: u64,
+) -> bool {
+    browser_bearer.is_some_and(|bearer| {
+        crate::browser_session::browser_bearer_expiring(true, bearer, now_unix)
+    }) || sandbox_bearer.is_some_and(|bearer| {
+        crate::sandbox_lease::workspace_sync::thread_bearer_expiring(true, bearer, now_unix)
+    })
+}
+
+/// `derived` with the browser `family` inserted right after the base set, where an offer appends it
+/// (`merged_tool_defs_governed`): the offer a credential park of a browser run was made with.
+fn with_browser_family(
+    derived: &[pb::ToolDefinition],
+    family: &[pb::ToolDefinition],
+) -> Vec<pb::ToolDefinition> {
+    let base = super::agent::base_tool_defs(false).len().min(derived.len());
+    let mut tools = derived[..base].to_vec();
+    tools.extend(family.iter().cloned());
+    tools.extend(derived[base..].iter().cloned());
+    tools
+}
+
+/// The tools a claimed park resumes with when [`check_park_fold`] refused it with `rule`, or that
+/// refusal. A fold whose tools are the derived set plus the browser `family` is a credential park of a
+/// browser run (no other stop parks a browser offer) and passes every check of `check_park_fold`
+/// against that wider set. It is accepted only while both credential-park switches are on (with them
+/// off it is refused exactly as before; the parking switch itself is not read, as no park resume reads
+/// it) and only when the family is offerable (`family` is empty while the browser tools are switched
+/// off). The answer is that wider set; the caller offers it only to a resume that carries a browser
+/// bearer.
+///
+/// # Errors
+///
+/// `rule` when the fold is not such a park, or the first rule the wider set fails.
+pub(crate) fn credential_park_offer(
+    claimed: &ClaimedFold,
+    run_id: &str,
+    derived: &[pb::ToolDefinition],
+    family: &[pb::ToolDefinition],
+    rule: &'static str,
+) -> Result<Vec<pb::ToolDefinition>, &'static str> {
+    if rule != "tools_drift" || family.is_empty() || !credential_park_switches() {
+        return Err(rule);
+    }
+    let with = with_browser_family(derived, family);
+    match check_park_fold(claimed, run_id, &with) {
+        Ok(()) => Ok(with),
+        Err("tools_drift") => Err(rule),
+        Err(other) => Err(other),
     }
 }
 
@@ -432,7 +593,7 @@ pub(crate) async fn try_park(
         ParkStop::LatchedRefusal(refusal) | ParkStop::FailedRound(refusal) => {
             (refusal.retry_after_ms, refusal.resets_at)
         }
-        ParkStop::Deadline(_) => (None, None),
+        ParkStop::Deadline(_) | ParkStop::CredentialExpiring => (None, None),
     };
     let park_until = park_until_for(reason, retry_after_ms, resets_at, Utc::now());
     let n = facts.parks_so_far.saturating_add(1);
@@ -1419,6 +1580,8 @@ mod tests {
             effect_ledger: true,
             connector_taint: false,
             connector_scope: &[],
+            context_document_ids: &[],
+            context_skill_ids: &[],
             offered_tools: None,
         }
     }
@@ -1815,5 +1978,251 @@ mod tests {
         assert_eq!(route_request(&narrower, &fold).max_subagents, 5);
         let wider = pb::RunAgentRequest { max_subagents: 50, ..park_request() };
         assert_eq!(route_request(&wider, &fold).max_subagents, 20, "never wider than the fold");
+    }
+
+    // ---- F-f05-15b: the credential park ----
+
+    /// Site D parks with the closed word `credential_expiring`, due at once (the resume carries fresh
+    /// bearers), and the word is a typed reason: it round-trips and nothing else maps to it.
+    #[test]
+    fn the_credential_stop_parks_with_its_own_closed_word_due_now() {
+        assert_eq!(
+            park_reason_for(&ParkStop::CredentialExpiring),
+            Some(ParkReason::CredentialExpiring)
+        );
+        assert_eq!(
+            ParkReason::CredentialExpiring.as_str(),
+            "credential_expiring"
+        );
+        assert_eq!(
+            ParkReason::parse("credential_expiring"),
+            Some(ParkReason::CredentialExpiring)
+        );
+        for code in ALL_CODES {
+            for stop in [
+                ParkStop::LatchedRefusal(&refusal(code)),
+                ParkStop::FailedRound(&refusal(code)),
+            ] {
+                assert_ne!(
+                    park_reason_for(&stop),
+                    Some(ParkReason::CredentialExpiring),
+                    "{code}"
+                );
+            }
+        }
+        let now = at("2026-11-24T12:00:00Z");
+        assert_eq!(
+            park_until_for(
+                ParkReason::CredentialExpiring,
+                Some(5_000),
+                Some(at("2099-01-01T00:00:00Z")),
+                now
+            ),
+            now
+        );
+    }
+
+    /// The credential park's gate: `run_parkable` with an offer of the derivable set plus the browser
+    /// family read as derivable, and only with both of its switches on. Every exclusion of
+    /// `run_parkable` still holds, ZDR and waived first.
+    #[test]
+    fn credential_parkable_widens_only_the_tool_set_and_needs_its_switches() {
+        let _on = all_on();
+        let browser_run = StaticFacts {
+            tools_derivable: false,
+            ..parkable_run()
+        };
+        {
+            let _credential = CredentialParkSwitch::set(true);
+            assert!(
+                credential_parkable(&browser_run, true),
+                "a browser run with the family only"
+            );
+            assert!(
+                credential_parkable(&parkable_run(), false),
+                "a derivable run (a sandbox bearer)"
+            );
+            assert!(
+                !credential_parkable(&browser_run, false),
+                "an offer nothing derives"
+            );
+            assert!(
+                !run_parkable(&browser_run),
+                "no other stop parks a browser run"
+            );
+            for (facts, why) in [
+                (
+                    StaticFacts {
+                        zdr: true,
+                        ..browser_run
+                    },
+                    "a zero-retention run",
+                ),
+                (
+                    StaticFacts {
+                        waived: true,
+                        ..browser_run
+                    },
+                    "a waived run",
+                ),
+                (
+                    StaticFacts {
+                        space: true,
+                        ..browser_run
+                    },
+                    "a Space run",
+                ),
+                (
+                    StaticFacts {
+                        depth: 1,
+                        ..browser_run
+                    },
+                    "a delegated loop",
+                ),
+                (
+                    StaticFacts {
+                        holds_release: true,
+                        ..browser_run
+                    },
+                    "a release holder",
+                ),
+                (
+                    StaticFacts {
+                        seed: SeedKind::InPlace,
+                        ..browser_run
+                    },
+                    "an approval resume",
+                ),
+                (
+                    StaticFacts {
+                        pinned: false,
+                        ..browser_run
+                    },
+                    "an unpinned run",
+                ),
+            ] {
+                assert!(
+                    !credential_parkable(&facts, true),
+                    "{why} never takes the credential park"
+                );
+            }
+        }
+        {
+            let _credential_off = CredentialParkSwitch::set(false);
+            assert!(!credential_park_active());
+            assert!(
+                !credential_parkable(&browser_run, true),
+                "the credential park's switches off"
+            );
+            assert!(!credential_parkable(&parkable_run(), false));
+            assert!(
+                run_parkable(&parkable_run()),
+                "the other stops are unchanged"
+            );
+        }
+        // Parking itself off: no credential park either (this drops the held parking switch last).
+        let _credential = CredentialParkSwitch::set(true);
+        let _parking_off = ParkSwitch::set(false);
+        assert!(!credential_parkable(&browser_run, true), "parking off");
+    }
+
+    /// The trigger asks the bearer guard's own question of each bearer the run holds, and of nothing else.
+    #[test]
+    fn the_trigger_reads_the_browser_and_sandbox_bearers_expiry_only() {
+        let now = crate::run_budget::now_epoch_secs();
+        let soon = crate::run_budget::unsigned_test_token_expiring_at(now + 5);
+        let far = crate::run_budget::unsigned_test_token_expiring_at(now + 3600);
+        assert!(
+            credential_expiring_now(Some(&soon), None, now),
+            "the browser bearer"
+        );
+        assert!(
+            credential_expiring_now(None, Some(&soon), now),
+            "the sandbox bearer"
+        );
+        assert!(credential_expiring_now(Some(&far), Some(&soon), now));
+        assert!(!credential_expiring_now(Some(&far), Some(&far), now));
+        assert!(
+            !credential_expiring_now(None, None, now),
+            "a run that holds neither"
+        );
+        assert!(
+            !credential_expiring_now(Some("opaque"), Some("opaque"), now),
+            "no readable exp"
+        );
+    }
+
+    fn tool(name: &str) -> pb::ToolDefinition {
+        pb::ToolDefinition {
+            name: name.to_owned(),
+            description: format!("{name} does one thing"),
+            parameters_json: "{}".to_owned(),
+        }
+    }
+
+    /// A claimed fold whose tools are the derived set plus the browser family is a credential park of a
+    /// browser run: it is proven against that wider set, only with the switches on and the family
+    /// offerable, and any other refusal of `check_park_fold` stands as it was.
+    #[tokio::test]
+    async fn a_credential_park_of_a_browser_run_is_proven_against_the_wider_set() {
+        let derived = super::super::agent::base_tool_defs(false);
+        let family = vec![tool("browser.open"), tool("browser.observe")];
+        let offered = with_browser_family(&derived, &family);
+        assert_eq!(offered.len(), derived.len() + family.len());
+        assert_eq!(
+            &offered[derived.len()..],
+            family.as_slice(),
+            "appended after the base set"
+        );
+        let claimed = park_claim(written_park(&offered));
+        assert_eq!(
+            check_park_fold(&claimed, "run-1", &derived),
+            Err("tools_drift")
+        );
+
+        let on = CredentialParkSwitch::set(true);
+        assert_eq!(
+            credential_park_offer(&claimed, "run-1", &derived, &family, "tools_drift"),
+            Ok(offered.clone())
+        );
+        assert_eq!(
+            credential_park_offer(&claimed, "run-1", &derived, &[], "tools_drift"),
+            Err("tools_drift"),
+            "the browser tools switched off: refused as before"
+        );
+        assert_eq!(
+            credential_park_offer(
+                &claimed,
+                "run-1",
+                &derived,
+                &[tool("browser.open")],
+                "tools_drift"
+            ),
+            Err("tools_drift"),
+            "another family is not the one the fold was offered"
+        );
+        let reworded = vec![
+            tool("browser.open"),
+            pb::ToolDefinition {
+                description: "x".to_owned(),
+                ..tool("browser.observe")
+            },
+        ];
+        assert_eq!(
+            credential_park_offer(&claimed, "run-1", &derived, &reworded, "tools_drift"),
+            Err("prompt_drift")
+        );
+        assert_eq!(
+            credential_park_offer(&claimed, "run-2", &derived, &family, "fold_run_mismatch"),
+            Err("fold_run_mismatch"),
+            "only a tool drift is looked at again"
+        );
+        drop(on);
+        let _off = CredentialParkSwitch::set(false);
+        assert_eq!(
+            credential_park_offer(&claimed, "run-1", &derived, &family, "tools_drift"),
+            Err("tools_drift"),
+            "with the switches off the fold is refused exactly as before"
+        );
     }
 }

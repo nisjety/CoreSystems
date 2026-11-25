@@ -39,6 +39,11 @@ pub(crate) const REFUSAL_CONTRACT_REQUIRED: &str = "scheduled_contract_required"
 /// The closed token a step is refused with when the Control decision names a contract its run does not hold, or
 /// names one for a run that holds none.
 pub(crate) const REFUSAL_CONTRACT_MISMATCH: &str = "scheduled_contract_mismatch";
+/// The closed token a step is refused with when the stored contract text is missing, does not hash to the digest the
+/// Control decision signed, or is recorded under another digest or expiry than the signed ones.
+pub(crate) const REFUSAL_CONTRACT_INVALID: &str = "scheduled_contract_invalid";
+/// The closed token a step is refused with when the contract the Control decision signed has expired.
+pub(crate) const REFUSAL_CONTRACT_EXPIRED: &str = "scheduled_contract_expired";
 pub(crate) const REQUIRED_PERMISSION: &str = "schedule:step";
 const MAX_TOKEN_BYTES: usize = 16_384;
 const MAX_FUTURE_ISSUED_SKEW: Duration = Duration::from_secs(60);
@@ -70,11 +75,14 @@ pub(crate) struct ScheduledStepDecisionVerifier {
     key: VerifyingKey,
 }
 
-/// What a verified step decision binds: the digest of the contract Control signed over, when the decision names one.
+/// What a verified step decision binds: the digest and expiry of the contract Control signed over, when the decision
+/// names one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VerifiedStep {
     /// The contract digest, shape-checked by `check_contract`. `None` for a decision issued without a contract.
     pub contract_digest: Option<String>,
+    /// The contract expiry the decision names with its digest. `None` exactly when `contract_digest` is `None`.
+    pub contract_expires_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -266,6 +274,7 @@ impl ScheduledStepDecisionVerifier {
         }
         Ok(VerifiedStep {
             contract_digest: claims.contract_digest,
+            contract_expires_at: claims.contract_expires_at,
         })
     }
 }
@@ -300,6 +309,51 @@ pub(crate) fn check_run_contract(
     }
 }
 
+/// Re-checks the stored contract a step's run carries against the one the Control decision signed (F-f10-28). A decision
+/// that names no contract has nothing stored to re-check, and whether its run must hold one is [`check_run_contract`]'s
+/// question. A run that carries a contract, in any part of its stored view, is re-checked whatever the switch says: its
+/// text must hash to the signed digest, its recorded digest and expiry must be the signed ones, and the contract must
+/// still be live. A run that carries no contract at all is the switch's case (P2-ec-07-rel1): an execution-core build
+/// deployed before Session Core serves the stored view sees every run that way, so with the switch off a
+/// contract-bearing step is not refused here, and with it on this function refuses the step as invalid when called
+/// directly (the caller's binding check, [`check_run_contract`], refuses it first as `scheduled_contract_mismatch`).
+/// The refusals are closed tokens, and the text is held for this call only.
+#[allow(clippy::result_large_err)]
+pub(crate) fn verify_stored_contract(
+    claims_digest: Option<&str>,
+    claims_expiry: Option<DateTime<Utc>>,
+    ctx: &mp_contracts::model_plane::v1::ScheduledStepContext,
+    now: DateTime<Utc>,
+    required: bool,
+) -> Result<(), Status> {
+    let (Some(signed_digest), Some(signed_expiry)) = (claims_digest, claims_expiry) else {
+        return Ok(());
+    };
+    let carries_no_contract = ctx.contract_json.is_empty()
+        && ctx.contract_digest.is_empty()
+        && ctx.contract_expires_at.is_empty();
+    if carries_no_contract && !required {
+        return Ok(());
+    }
+    let invalid = || Status::failed_precondition(REFUSAL_CONTRACT_INVALID);
+    if ctx.contract_json.is_empty()
+        || mp_contracts::scheduled_contract::digest(&ctx.contract_json) != signed_digest
+        || ctx.contract_digest != signed_digest
+    {
+        return Err(invalid());
+    }
+    let recorded_expiry = DateTime::parse_from_rfc3339(&ctx.contract_expires_at)
+        .map_err(|_| invalid())?
+        .with_timezone(&Utc);
+    if recorded_expiry != signed_expiry {
+        return Err(invalid());
+    }
+    if signed_expiry <= now {
+        return Err(Status::failed_precondition(REFUSAL_CONTRACT_EXPIRED));
+    }
+    Ok(())
+}
+
 fn first_env(names: &[&str]) -> Option<String> {
     names.iter().find_map(|name| {
         std::env::var(name)
@@ -317,14 +371,14 @@ fn check_contract(claims: &Claims, now: DateTime<Utc>) -> Result<(), Status> {
         (None, None) => Ok(()),
         (Some(digest), Some(expires_at)) => {
             if !is_sha256_digest(digest) {
-                return Err(Status::failed_precondition("scheduled_contract_invalid"));
+                return Err(Status::failed_precondition(REFUSAL_CONTRACT_INVALID));
             }
             if expires_at <= now {
-                return Err(Status::failed_precondition("scheduled_contract_expired"));
+                return Err(Status::failed_precondition(REFUSAL_CONTRACT_EXPIRED));
             }
             Ok(())
         }
-        _ => Err(Status::failed_precondition("scheduled_contract_invalid")),
+        _ => Err(Status::failed_precondition(REFUSAL_CONTRACT_INVALID)),
     }
 }
 

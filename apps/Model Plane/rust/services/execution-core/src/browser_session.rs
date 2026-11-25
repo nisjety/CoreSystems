@@ -79,6 +79,10 @@ const MAX_TEXT_CHARS: usize = 200;
 const MAX_OBSERVATION_BYTES: usize = 64 * 1024;
 /// The reason BrowserBroker attaches to a site-policy refusal.
 const SITE_DENIED_REASON: &str = "BROWSER_SITE_DENIED";
+/// The reason BrowserBroker attaches when every requested host is an ask: the member can allow
+/// them, so nothing was denied. The model still reads SITE_DENIED for it until the consent path
+/// exists; this reason only lets the run tell the two apart.
+const SITE_ASK_REASON: &str = "BROWSER_SITE_ASK";
 
 /// A refusal the model reads. The code is from the closed list below; the message names no id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -581,7 +585,28 @@ pub(crate) async fn revalidate_after_handback(
     dispatch: &BrowserDispatch<'_>,
     quarry: Option<&QuarryAgentClient>,
 ) -> Option<Refusal> {
+    revalidate_after_handback_with(dispatch, quarry, crate::auth::bearer_expiry_guard_enabled())
+        .await
+}
+
+/// [`revalidate_after_handback`] with the bearer guard (F-f05-15) given, so a test can run both states; the switch
+/// is read once per process. With the guard on, a click-time bearer about to expire is refused before the grant is
+/// read back, and the page the run holds is kept.
+async fn revalidate_after_handback_with(
+    dispatch: &BrowserDispatch<'_>,
+    quarry: Option<&QuarryAgentClient>,
+    bearer_guard: bool,
+) -> Option<Refusal> {
     let session = dispatch.state.browser_session(dispatch.run_id)?;
+    // The bearer guard (F-f05-15): a bearer about to expire is not sent to the broker. The session is kept, as
+    // a read-back the broker refuses for an expired credential keeps it.
+    if browser_bearer_expiring(
+        bearer_guard,
+        dispatch.bearer,
+        crate::run_budget::now_epoch_secs(),
+    ) {
+        return Some(BrokerError::CredentialRefused.refusal());
+    }
     let lost = match dispatch
         .broker
         .validate_grant(dispatch.bearer, &session.grant_id)
@@ -820,6 +845,10 @@ pub(crate) struct BrowserSession {
 pub(crate) enum BrokerError {
     /// The site policy does not allow this host for this member.
     SiteDenied,
+    /// The site policy asks the member about this host, and the member has not decided yet. The
+    /// member can allow it, so it is not a denial. The refusal the model reads is still
+    /// [`SITE_DENIED`]: the consent that lets the run ask is a later unit.
+    SiteAsk,
     /// The user's browser bearer was refused: expired, revoked or for another audience.
     CredentialRefused,
     /// The broker did not answer in time, or could not be reached.
@@ -831,12 +860,21 @@ pub(crate) enum BrokerError {
 impl BrokerError {
     fn refusal(self) -> Refusal {
         match self {
-            Self::SiteDenied => SITE_DENIED,
+            Self::SiteDenied | Self::SiteAsk => SITE_DENIED,
             Self::CredentialRefused => CREDENTIAL_EXPIRED,
             Self::Unavailable => UNAVAILABLE,
             Self::Refused => GRANT_REFUSED,
         }
     }
+}
+
+/// Whether the browser bearer `bearer` expires within the bearer guard's margin at `now_unix`, with the guard on
+/// (`guard_on`, F-f05-15). Every browser call that would send the bearer asks this one question, and the park
+/// trigger of F-f05-15b reads the same answer.
+#[must_use]
+pub(crate) fn browser_bearer_expiring(guard_on: bool, bearer: &str, now_unix: u64) -> bool {
+    guard_on
+        && crate::auth::expires_within(bearer, crate::auth::BEARER_EXPIRY_MARGIN_SECS, now_unix)
 }
 
 /// One run grant to mint: the host it may visit, the session key the broker records it under, and
@@ -1075,6 +1113,9 @@ fn map_status(status: &Status) -> BrokerError {
         Code::PermissionDenied if carries_reason(status, SITE_DENIED_REASON) => {
             BrokerError::SiteDenied
         }
+        // BROWSER_SITE_ASK and BROWSER_SITE_DENIED do not contain each other, so the substring
+        // match picks exactly one of them.
+        Code::PermissionDenied if carries_reason(status, SITE_ASK_REASON) => BrokerError::SiteAsk,
         Code::Unauthenticated => BrokerError::CredentialRefused,
         Code::Unavailable | Code::DeadlineExceeded => BrokerError::Unavailable,
         _ => BrokerError::Refused,
@@ -1370,7 +1411,14 @@ pub(crate) async fn open(
     quarry: &QuarryAgentClient,
     raw_url: &str,
 ) -> Result<String, Refusal> {
-    open_with(dispatch, quarry, raw_url, takeover_pause_enabled()).await
+    open_with(
+        dispatch,
+        quarry,
+        raw_url,
+        takeover_pause_enabled(),
+        crate::auth::bearer_expiry_guard_enabled(),
+    )
+    .await
 }
 
 /// [`open`] with the takeover pause given. With it on, an open while the person holds the run's
@@ -1381,6 +1429,7 @@ async fn open_with(
     quarry: &QuarryAgentClient,
     raw_url: &str,
     takeover_pause: bool,
+    bearer_guard: bool,
 ) -> Result<String, Refusal> {
     let target = parse_target(raw_url)?;
     if takeover_pause
@@ -1401,6 +1450,20 @@ async fn open_with(
             .is_some_and(|session| session.host == target.host)
     {
         return observe(dispatch, quarry).await;
+    }
+    // The bearer guard (F-f05-15): a bearer about to expire is not used to end the page the run holds or to
+    // mint a grant. The page is kept, and the refusal is the one a dead credential gets.
+    if browser_bearer_expiring(
+        bearer_guard,
+        dispatch.bearer,
+        crate::run_budget::now_epoch_secs(),
+    ) {
+        warn!(
+            run_id = %dispatch.run_id,
+            reason = "bearer_expiring",
+            "browser open refused: the browser bearer is about to expire"
+        );
+        return Err(BrokerError::CredentialRefused.refusal());
     }
     if let Some(previous) = dispatch.state.take_browser_session(dispatch.run_id) {
         end_session(&previous, dispatch, Some(quarry), "replaced by a new page").await;
@@ -2168,6 +2231,38 @@ mod tests {
         );
     }
 
+    /// A broker status that carries one reason the way BrowserBroker encodes it: a plain string
+    /// inside the status details.
+    fn broker_status(reason: &str) -> Status {
+        Status::with_details(
+            Code::PermissionDenied,
+            "refused",
+            reason.as_bytes().to_vec().into(),
+        )
+    }
+
+    #[test]
+    fn a_broker_ask_is_told_apart_from_a_denial() {
+        // An all-ask refusal is an ask: the member can allow the host. The model still reads
+        // SITE_DENIED for it until the consent path exists.
+        assert_eq!(
+            map_status(&broker_status(SITE_ASK_REASON)),
+            BrokerError::SiteAsk
+        );
+        assert_eq!(BrokerError::SiteAsk.refusal(), SITE_DENIED);
+        // A denial, and a mixed refusal that names both kinds of host under the denial reason,
+        // stay denials.
+        assert_eq!(
+            map_status(&broker_status(SITE_DENIED_REASON)),
+            BrokerError::SiteDenied
+        );
+        let mixed = broker_status("BROWSER_SITE_DENIED ask_domains example.com");
+        assert_eq!(map_status(&mixed), BrokerError::SiteDenied);
+        // The two reasons never contain each other, so a status carries at most one of them.
+        assert!(!SITE_ASK_REASON.contains(SITE_DENIED_REASON));
+        assert!(!SITE_DENIED_REASON.contains(SITE_ASK_REASON));
+    }
+
     #[tokio::test]
     async fn a_second_open_ends_the_first_page() {
         let server = MockServer::start().await;
@@ -2877,6 +2972,7 @@ mod tests {
             &quarry(&server),
             "https://example.com/second",
             true,
+            false,
         )
         .await
         .expect_err("no new run is started around a takeover");
@@ -2895,10 +2991,191 @@ mod tests {
             &quarry(&server),
             "https://example.com/second",
             false,
+            false,
         )
         .await
         .expect("with the switch off an open replaces the page as before");
         assert_eq!(revoked(&broker), ["grant-1"]);
+    }
+
+    /// A broker that counts every call it is asked and grants nothing. A guard that refuses before the broker
+    /// is reached leaves every count at zero.
+    #[derive(Default)]
+    struct CountingBroker {
+        calls: Mutex<u32>,
+    }
+
+    #[tonic::async_trait]
+    impl BrowserBroker for CountingBroker {
+        async fn acquire_run_grant(
+            &self,
+            _bearer: &str,
+            _grant: RunGrant<'_>,
+        ) -> Result<String, BrokerError> {
+            *self.calls.lock().unwrap() += 1;
+            Err(BrokerError::Unavailable)
+        }
+
+        async fn validate_grant(
+            &self,
+            _bearer: &str,
+            _grant_id: &str,
+        ) -> Result<ValidateGrantResponse, BrokerError> {
+            *self.calls.lock().unwrap() += 1;
+            Err(BrokerError::Unavailable)
+        }
+
+        async fn revoke_grant(
+            &self,
+            _bearer: &str,
+            _grant_id: &str,
+            _reason: &str,
+        ) -> Result<(), BrokerError> {
+            *self.calls.lock().unwrap() += 1;
+            Ok(())
+        }
+    }
+
+    /// F-f05-15: with the guard on, a browser bearer about to expire opens nothing. The open is refused as an
+    /// expired sign-in before the broker is asked anything, and the page the run already holds is kept.
+    #[tokio::test]
+    async fn an_open_with_an_expiring_bearer_is_refused_before_the_broker() {
+        let server = MockServer::start().await;
+        let state = StateStore::new();
+        state.replace_browser_session(
+            "run-1",
+            BrowserSession {
+                grant_id: "grant-held".to_owned(),
+                quarry_run_id: "run-q-held".to_owned(),
+                lease_id: "lease-held".to_owned(),
+                host: "example.com".to_owned(),
+                fence: vec!["example.com".to_owned()],
+            },
+        );
+        let broker = CountingBroker::default();
+        let bearer = crate::run_budget::unsigned_test_token_expiring_at(
+            crate::run_budget::now_epoch_secs() + 5,
+        );
+        let dispatch = BrowserDispatch {
+            state: &state,
+            broker: &broker,
+            bearer: &bearer,
+            org_id: "org-1",
+            run_id: "run-1",
+        };
+
+        let refusal = open_with(
+            &dispatch,
+            &quarry(&server),
+            "https://example.com/second",
+            false,
+            true,
+        )
+        .await
+        .expect_err("an expiring bearer opens nothing");
+
+        assert_eq!(refusal, CREDENTIAL_EXPIRED);
+        assert_eq!(
+            *broker.calls.lock().unwrap(),
+            0,
+            "the broker was never asked"
+        );
+        assert_eq!(
+            state
+                .browser_session("run-1")
+                .map(|session| session.grant_id),
+            Some("grant-held".to_owned()),
+            "the page the run holds is kept"
+        );
+    }
+
+    /// With the guard off the same expiring bearer is used as it always was: the open mints its grant.
+    #[tokio::test]
+    async fn with_the_guard_off_an_expiring_bearer_opens_as_before() {
+        let server = MockServer::start().await;
+        mount_quarry(&server, "https://example.com/", "https://example.com/").await;
+        let state = StateStore::new();
+        let broker = FakeBroker::default();
+        let bearer = crate::run_budget::unsigned_test_token_expiring_at(
+            crate::run_budget::now_epoch_secs() + 5,
+        );
+        let dispatch = BrowserDispatch {
+            state: &state,
+            broker: &broker,
+            bearer: &bearer,
+            org_id: "org-1",
+            run_id: "run-1",
+        };
+
+        open_with(
+            &dispatch,
+            &quarry(&server),
+            "https://example.com/",
+            false,
+            false,
+        )
+        .await
+        .expect("with the guard off the page opens");
+        assert_eq!(*broker.minted.lock().unwrap(), 1, "the grant was minted");
+    }
+
+    /// The guard refuses only a bearer it can read as expiring inside the margin, and only with the switch on.
+    #[test]
+    fn a_browser_bearer_is_expiring_only_inside_the_margin_and_with_the_guard_on() {
+        let now = 1_800_000_000;
+        let soon = crate::run_budget::unsigned_test_token_expiring_at(now + 5);
+        let far = crate::run_budget::unsigned_test_token_expiring_at(now + 3600);
+        assert!(browser_bearer_expiring(true, &soon, now));
+        assert!(
+            !browser_bearer_expiring(false, &soon, now),
+            "the switch off leaves every bearer alone"
+        );
+        assert!(!browser_bearer_expiring(true, &far, now));
+        assert!(
+            !browser_bearer_expiring(true, "opaque", now),
+            "an opaque bearer is not known to expire"
+        );
+    }
+
+    /// F-f05-15: a released call's read-back is not sent a bearer about to expire. With the guard on, the page the
+    /// person handed back is kept and the broker is asked nothing; with it off, the same bearer is read back as it
+    /// always was, and the broker's own answer decides.
+    #[tokio::test]
+    async fn a_released_call_with_an_expiring_bearer_is_refused_before_the_read_back() {
+        let bearer = crate::run_budget::unsigned_test_token_expiring_at(
+            crate::run_budget::now_epoch_secs() + 5,
+        );
+        let held = BrowserSession {
+            grant_id: "grant-handback".to_owned(),
+            quarry_run_id: "run-q-handback".to_owned(),
+            lease_id: "lease-handback".to_owned(),
+            host: "example.com".to_owned(),
+            fence: vec!["example.com".to_owned()],
+        };
+        let cases = [(true, CREDENTIAL_EXPIRED, 0), (false, UNAVAILABLE, 1)];
+        for (bearer_guard, refusal, asked) in cases {
+            let state = StateStore::new();
+            state.replace_browser_session("run-handback", held.clone());
+            let broker = CountingBroker::default();
+            let dispatch = BrowserDispatch {
+                state: &state,
+                broker: &broker,
+                bearer: &bearer,
+                org_id: "org-1",
+                run_id: "run-handback",
+            };
+
+            let answer = revalidate_after_handback_with(&dispatch, None, bearer_guard).await;
+
+            let calls = *broker.calls.lock().unwrap();
+            assert_eq!(answer, Some(refusal), "guard {bearer_guard}");
+            assert_eq!(calls, asked, "guard {bearer_guard}");
+            assert_eq!(
+                state.browser_session("run-handback"),
+                Some(held.clone()),
+                "guard {bearer_guard}: the page is kept"
+            );
+        }
     }
 
     #[tokio::test]

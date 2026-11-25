@@ -261,8 +261,9 @@ impl ExecutionService {
     async fn execute_scheduled_step_runtime(
         &self,
         req: pb::ExecuteScheduledStepRequest,
-        // The contract digest the verified Control decision names, if it names one (F-f02-17).
-        decision_contract_digest: Option<&str>,
+        // The facts the verified Control decision binds: the contract digest and expiry it names, if it names one
+        // (F-f02-17, F-f10-28).
+        verified: &scheduled_step_decision::VerifiedStep,
         // Whether the decision must name the contract the run holds: the switch, read by the caller (F-f02-17).
         contract_required: bool,
     ) -> Result<Response<pb::ExecuteScheduledStepResponse>, Status> {
@@ -416,16 +417,28 @@ impl ExecutionService {
                 ..Default::default()
             }));
         }
-        // The Control decision must name exactly the contract the run holds, once the switch asks for it
-        // (F-f02-17). The refusal is decided on the loaded run, before any model call, and it closes the claim
-        // with a failed receipt that carries the closed token: nothing is left claimed, and no contract text
-        // reaches the receipt or the message.
-        if let Err(refusal) = scheduled_step_decision::check_run_contract(
-            decision_contract_digest,
+        // The Control decision must name exactly the contract the run holds, once the switch asks for it, and the
+        // run's stored contract must still be the one the decision signed (F-f02-17, F-f10-28): whatever the switch
+        // says for a run that carries a contract, and under the switch for a run that carries none (P2-ec-07-rel1).
+        // Both are decided on the loaded run, before any model call, and a refusal closes the claim with a failed
+        // receipt that carries the closed token: nothing is left claimed, and no contract text reaches the receipt or
+        // the message.
+        let bound = scheduled_step_decision::check_run_contract(
+            verified.contract_digest.as_deref(),
             !run.contract_json.is_empty(),
             &run.contract_digest,
             contract_required,
-        ) {
+        )
+        .and_then(|()| {
+            scheduled_step_decision::verify_stored_contract(
+                verified.contract_digest.as_deref(),
+                verified.contract_expires_at,
+                &run,
+                chrono::Utc::now(),
+                contract_required,
+            )
+        });
+        if let Err(refusal) = bound {
             let token = refusal.message().to_owned();
             self.record_scheduled_step_receipt(
                 &req,
@@ -495,11 +508,15 @@ impl ExecutionService {
                         .await?;
                     (receipt.receipt_id, receipt.status)
                 };
+                // No content in Temporal history (F-f03-05): the answer never travels back to the
+                // orchestrator, whose activity result is recorded in workflow history. The answer
+                // reaches the thread through `record_scheduled_run_result` when that switch is on,
+                // and otherwise only its digest is recorded above. The agent lane answers empty too.
                 Ok(Response::new(pb::ExecuteScheduledStepResponse {
                     step_id: req.step_id,
                     status,
                     receipt_id,
-                    output,
+                    output: String::new(),
                     error: String::new(),
                     unknown_outcome: false,
                     ..Default::default()
@@ -614,6 +631,7 @@ impl ExecutionService {
                 runtime_loop::agent::base_tool_defs(!req.space_id.is_empty()),
             ),
             derivable: false,
+            browser_derivable: false,
             // A scheduled run is offered its contract's tools and nothing else, so it is not indexed.
             deferred: runtime_loop::tool_index::DeferredIndex::default(),
         };
@@ -775,9 +793,20 @@ impl ExecutionService {
 /// `RecordScheduledRunResult` (build plan WS20 S1). It reads the name Session Core
 /// reads, so one deploy setting drives both sides. Only the literal `true` enables.
 fn scheduled_result_persist_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(forced) = PERSIST_FORCED.with(std::cell::Cell::get) {
+        return forced;
+    }
     mp_contracts::loop_fold::switch_from(
         std::env::var(SCHEDULED_RESULT_PERSIST_ENV).ok().as_deref(),
     )
+}
+
+// A test's answer for the persistence switch, held on the test's own thread (F-f03-05), so a test
+// that needs the switch on never changes the environment another test reads.
+#[cfg(test)]
+thread_local! {
+    static PERSIST_FORCED: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
 const SCHEDULED_RESULT_PERSIST_ENV: &str = "SESSION_CORE_SCHEDULED_RESULT_PERSIST";
@@ -1259,6 +1288,45 @@ fn enforce_persistence_free_execution(
     Ok(())
 }
 
+/// How a request's sandbox-manager bearer is demanded (F-f05-13).
+///
+/// * `Required`: a Space-scoped run, or a Space step's workspace tool. Its bearer is verified, and a
+///   missing one refuses the request, exactly as before.
+/// * `Optional`: a thread-only run or thread-scope step. A bearer that came is verified as before; one
+///   that did not leaves the thread's files running ephemerally, which the loop already degrades to.
+/// * `None`: nothing demands it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunSandboxDemand {
+    None,
+    Optional,
+    Required,
+}
+
+/// The demand of a run (`run_agent`): Space-scoped runs require the bearer, a thread-only run takes it
+/// when it came, and any other run takes none. Absence never widens anything, it only removes the
+/// durable workspace, so the Space rules are unchanged.
+fn run_sandbox_demand(space_id: &str, thread_workspace: bool) -> RunSandboxDemand {
+    if !space_id.is_empty() {
+        RunSandboxDemand::Required
+    } else if thread_workspace {
+        RunSandboxDemand::Optional
+    } else {
+        RunSandboxDemand::None
+    }
+}
+
+/// The demand of a step (`execute_step`): the Space part stays required, and a thread-scope step with
+/// no Space takes the bearer only when one came.
+fn step_sandbox_demand(space_bearer_demanded: bool, thread_scope: bool) -> RunSandboxDemand {
+    if space_bearer_demanded {
+        RunSandboxDemand::Required
+    } else if thread_scope {
+        RunSandboxDemand::Optional
+    } else {
+        RunSandboxDemand::None
+    }
+}
+
 /// The thread a step's `code_interpreter` workspace is kept in, when the step takes the thread path
 /// (WS22-S2). Only such a step demands the user-bound sandbox bearer, so with the switch off no step
 /// does, and each request is handled as it was before the switch existed.
@@ -1278,6 +1346,24 @@ fn thread_workspace_thread<'a>(
         space_id,
         thread_id,
     )
+}
+
+// A test's answer for the thread-workspace switch, held on the test's own thread (F-f05-13), so a gRPC test of a
+// thread-only run needs no environment change and no other test sees it.
+#[cfg(test)]
+thread_local! {
+    static THREAD_WORKSPACE_FORCED: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Whether thread-scope workspaces are switched on for a request (`EXECUTION_CORE_THREAD_WORKSPACE`, read
+/// through `workspace_sync::switched_on`). Only the literal `true` enables them. A test may force it on its own
+/// thread.
+fn thread_workspace_switch() -> bool {
+    #[cfg(test)]
+    if let Some(forced) = THREAD_WORKSPACE_FORCED.with(std::cell::Cell::get) {
+        return forced;
+    }
+    crate::sandbox_lease::workspace_sync::switched_on()
 }
 
 #[allow(clippy::result_large_err)]
@@ -1612,27 +1698,33 @@ impl ExecutionCore for ExecutionService {
         // thread's own lease. Only with the switch on, and only for a step that is neither
         // Space-scoped nor persistence-free, does that path apply.
         let thread_scope_id = thread_workspace_thread(
-            crate::sandbox_lease::workspace_sync::switched_on(),
+            thread_workspace_switch(),
             &request.get_ref().tool_name,
             &request.get_ref().space_id,
             &request.get_ref().thread_id,
             request.get_ref().zdr || caller.zdr || caller.zdr_waiver.is_some(),
         )
         .map(str::to_owned);
-        let sandbox_bearer = if ((request.get_ref().tool_name == "code_interpreter"
+        // The Space part stays required. A thread-scope step (F-f05-13) takes the bearer only when one
+        // came: without it the step's thread files run ephemerally, as `thread` below already degrades.
+        let space_bearer_demanded = (request.get_ref().tool_name == "code_interpreter"
             || request.get_ref().tool_name == "shell"
             || crate::workspace_tools::is_workspace_tool(&request.get_ref().tool_name))
-            && !request.get_ref().space_id.is_empty())
-            || thread_scope_id.is_some()
-        {
-            Some(
-                self.auth
-                    .authenticate_delegated_sandbox_manager(&request, &caller)
-                    .await?,
-            )
-        } else {
-            None
-        };
+            && !request.get_ref().space_id.is_empty();
+        let sandbox_bearer =
+            match step_sandbox_demand(space_bearer_demanded, thread_scope_id.is_some()) {
+                RunSandboxDemand::None => None,
+                RunSandboxDemand::Optional => {
+                    self.auth
+                        .authenticate_run_sandbox_optional(&request, &caller)
+                        .await?
+                }
+                RunSandboxDemand::Required => Some(
+                    self.auth
+                        .authenticate_delegated_sandbox_manager(&request, &caller)
+                        .await?,
+                ),
+            };
         // The Space retrieval the gateway authorised for this step's knowledge search, read before
         // the request is consumed exactly as `run_agent` reads it. A header that is not valid text
         // is present-but-empty, so a Space step withholds rather than searching the organisation.
@@ -2120,20 +2212,36 @@ impl ExecutionCore for ExecutionService {
         // code_interpreter calls use for the thread's own lease. With the switch off, or for a run that
         // is persistence-free, nothing changes.
         let thread_workspace = crate::sandbox_lease::workspace_sync::thread_for_step(
-            crate::sandbox_lease::workspace_sync::switched_on(),
+            thread_workspace_switch(),
             request.get_ref().zdr || caller.zdr || caller.zdr_waiver.is_some(),
             &request.get_ref().space_id,
             &request.get_ref().thread_id,
         )
         .is_some();
-        let sandbox_bearer = if request.get_ref().space_id.is_empty() && !thread_workspace {
-            None
-        } else {
-            Some(
+        // A Space-scoped run keeps the required bearer. A thread-only run (F-f05-13) takes one only when
+        // it came: without it the run's thread keeps no durable workspace and its files run ephemerally.
+        // A present bearer is verified exactly as before.
+        let sandbox_bearer = match run_sandbox_demand(&request.get_ref().space_id, thread_workspace)
+        {
+            RunSandboxDemand::None => None,
+            RunSandboxDemand::Optional => {
+                let bearer = self
+                    .auth
+                    .authenticate_run_sandbox_optional(&request, &caller)
+                    .await?;
+                if bearer.is_none() {
+                    info!(
+                        run_id = %request.get_ref().run_id,
+                        "thread workspace unavailable, running ephemeral"
+                    );
+                }
+                bearer
+            }
+            RunSandboxDemand::Required => Some(
                 self.auth
                     .authenticate_delegated_sandbox_manager(&request, &caller)
                     .await?,
-            )
+            ),
         };
         // The browser bearer names the user's broker grants, so it is read only while the Do
         // loop's browser tools are switched on (WS21-S2). With the switch off the header is never
@@ -2236,7 +2344,7 @@ impl ExecutionCore for ExecutionService {
         let verified = verifier.verify(&req, chrono::Utc::now())?;
         self.execute_scheduled_step_runtime(
             req,
-            verified.contract_digest.as_deref(),
+            &verified,
             scheduled_step_decision::contract_required(),
         )
         .await
@@ -3725,6 +3833,27 @@ mod run_attachment_tests {
         );
     }
 
+    /// F-f05-13: who demands a sandbox bearer. A Space run and a Space step always require it, so a Space run with
+    /// no bearer is refused as before. A thread-only run or thread-scope step takes the bearer only when one came,
+    /// and any other run takes none. The bearer's own verification is pinned in `auth`.
+    #[test]
+    fn a_thread_only_run_takes_its_bearer_when_one_came_and_a_space_run_requires_it() {
+        assert_eq!(
+            run_sandbox_demand("space_01", false),
+            RunSandboxDemand::Required
+        );
+        assert_eq!(
+            run_sandbox_demand("space_01", true),
+            RunSandboxDemand::Required
+        );
+        assert_eq!(run_sandbox_demand("", true), RunSandboxDemand::Optional);
+        assert_eq!(run_sandbox_demand("", false), RunSandboxDemand::None);
+        assert_eq!(step_sandbox_demand(true, false), RunSandboxDemand::Required);
+        assert_eq!(step_sandbox_demand(true, true), RunSandboxDemand::Required);
+        assert_eq!(step_sandbox_demand(false, true), RunSandboxDemand::Optional);
+        assert_eq!(step_sandbox_demand(false, false), RunSandboxDemand::None);
+    }
+
     #[tokio::test]
     async fn thread_workspace_refused_under_zdr() {
         // A zero-retention or waived step never takes the thread path, whatever the switch says.
@@ -3844,6 +3973,8 @@ mod scheduled_agent_lane_tests {
         context: pb::ScheduledStepContext,
         /// Whether the managed-run lifecycle refuses the loop's heartbeat.
         heartbeat_refused: bool,
+        /// The content the fake model answers with, or `None` for an Unimplemented inference.
+        inference_answer: Option<String>,
     }
 
     impl Lane {
@@ -3863,7 +3994,20 @@ mod scheduled_agent_lane_tests {
                     seen.heartbeats_before_first_inference = Some(sent);
                 }
                 seen.inference_calls += 1;
-                return unimplemented_response();
+                drop(seen);
+                // A scripted answer is the content the fake model returns; without one the call is Unimplemented.
+                return match &self.inference_answer {
+                    Some(answer) => {
+                        let answer = answer.clone();
+                        unary(request, move |_: pb::InferRequest| {
+                            Ok(pb::InferResponse {
+                                content: answer.clone(),
+                                ..Default::default()
+                            })
+                        })
+                    }
+                    None => unimplemented_response(),
+                };
             }
             self.seen.lock().unwrap().session_paths.push(path.clone());
             match path.as_str() {
@@ -4091,6 +4235,15 @@ mod scheduled_agent_lane_tests {
         context: pb::ScheduledStepContext,
         heartbeat_refused: bool,
     ) -> Harness {
+        harness_with_lane(context, heartbeat_refused, None).await
+    }
+
+    /// As [`harness_with_heartbeat`], with the fake model answering `inference_answer` as its content when set.
+    async fn harness_with_lane(
+        context: pb::ScheduledStepContext,
+        heartbeat_refused: bool,
+        inference_answer: Option<String>,
+    ) -> Harness {
         use wiremock::{
             matchers::{method, path},
             Mock, MockServer, ResponseTemplate,
@@ -4100,6 +4253,7 @@ mod scheduled_agent_lane_tests {
             seen: Arc::clone(&seen),
             context,
             heartbeat_refused,
+            inference_answer,
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -4176,6 +4330,22 @@ mod scheduled_agent_lane_tests {
         }
     }
 
+    /// The verified facts of a decision that names no contract.
+    fn unbound() -> scheduled_step_decision::VerifiedStep {
+        scheduled_step_decision::VerifiedStep {
+            contract_digest: None,
+            contract_expires_at: None,
+        }
+    }
+
+    /// The verified facts of a decision that names `digest`, live for an hour.
+    fn named(digest: &str) -> scheduled_step_decision::VerifiedStep {
+        scheduled_step_decision::VerifiedStep {
+            contract_digest: Some(digest.to_owned()),
+            contract_expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+        }
+    }
+
     /// The agent lane is reached only with its switch on; it is read on every step.
     fn switch_on() {
         std::env::set_var(runtime_loop::scheduled_agent::SWITCH_ENV, "true");
@@ -4186,7 +4356,7 @@ mod scheduled_agent_lane_tests {
         let harness = harness(zdr, zdr_waived).await;
         let response = harness
             .service
-            .execute_scheduled_step_runtime(step(), None, false)
+            .execute_scheduled_step_runtime(step(), &unbound(), false)
             .await
             .expect("the lane answers with a recorded outcome")
             .into_inner();
@@ -4303,17 +4473,29 @@ mod scheduled_agent_lane_tests {
     /// The stored contract the F-f03-04 tests serve: one read-only web search, unexpired in 2099.
     const VERIFYING_CONTRACT: &str = r#"{"expires_at":"2099-01-01T00:00:00Z","max_rounds":4,"max_tokens_per_round":512,"tools":[{"approved_at":"2026-10-24T10:00:00Z","capability":"cap.tool.web_search","class":"read","tool":"web_search"}],"v":1}"#;
 
+    /// The verified facts of a decision that names [`VERIFYING_CONTRACT`], with the expiry that contract records.
+    fn names_verifying_contract() -> scheduled_step_decision::VerifiedStep {
+        scheduled_step_decision::VerifiedStep {
+            contract_digest: Some(mp_contracts::scheduled_contract::digest(VERIFYING_CONTRACT)),
+            contract_expires_at: Some(
+                chrono::DateTime::parse_from_rfc3339("2099-01-01T00:00:00Z")
+                    .expect("a fixed expiry parses")
+                    .with_timezone(&chrono::Utc),
+            ),
+        }
+    }
+
     /// F-f03-04: the stored contract Session Core serves whole, its text hashing to its digest, passes the
-    /// lane's admission. A persistent, unexpired step with the switch on therefore reaches the agent loop, and
-    /// neither contract refusal is recorded. The loop renews the run's managed deadline as the execution agent
-    /// before its first model call, and then asks the model.
+    /// lane's admission. A persistent, unexpired step whose decision names that contract, with the switch on,
+    /// therefore reaches the agent loop, and neither contract refusal is recorded. The loop renews the run's managed
+    /// deadline as the execution agent before its first model call, and then asks the model.
     #[tokio::test]
     async fn a_served_contract_that_verifies_is_admitted_by_the_lane() {
         switch_on();
         let harness = harness_with_context(contract_run(VERIFYING_CONTRACT)).await;
         let response = harness
             .service
-            .execute_scheduled_step_runtime(step(), None, false)
+            .execute_scheduled_step_runtime(step(), &names_verifying_contract(), false)
             .await
             .expect("the lane answers with a recorded outcome")
             .into_inner();
@@ -4353,7 +4535,7 @@ mod scheduled_agent_lane_tests {
         let harness = harness_with_heartbeat(contract_run(VERIFYING_CONTRACT), true).await;
         let response = harness
             .service
-            .execute_scheduled_step_runtime(step(), None, false)
+            .execute_scheduled_step_runtime(step(), &names_verifying_contract(), false)
             .await
             .expect("the lane answers with a recorded outcome")
             .into_inner();
@@ -4444,7 +4626,7 @@ mod scheduled_agent_lane_tests {
         let other = format!("sha256:{}", "e".repeat(64));
         let refused = harness
             .service
-            .execute_scheduled_step_runtime(step(), Some(other.as_str()), true)
+            .execute_scheduled_step_runtime(step(), &named(other.as_str()), true)
             .await
             .expect_err("a decision over another contract is refused");
         assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
@@ -4461,7 +4643,7 @@ mod scheduled_agent_lane_tests {
         let harness = harness_with_context(contract_run(r#"{"v":1}"#)).await;
         let refused = harness
             .service
-            .execute_scheduled_step_runtime(step(), None, true)
+            .execute_scheduled_step_runtime(step(), &unbound(), true)
             .await
             .expect_err("a decision naming no contract is refused");
         assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
@@ -4476,10 +4658,10 @@ mod scheduled_agent_lane_tests {
     #[tokio::test]
     async fn a_decision_naming_a_contract_is_refused_for_a_run_that_holds_none() {
         let harness = harness_with_context(legacy_run()).await;
-        let named = format!("sha256:{}", "d".repeat(64));
+        let held_by_decision = format!("sha256:{}", "d".repeat(64));
         let refused = harness
             .service
-            .execute_scheduled_step_runtime(step(), Some(named.as_str()), true)
+            .execute_scheduled_step_runtime(step(), &named(held_by_decision.as_str()), true)
             .await
             .expect_err("a decision naming a contract is refused for a run without one");
         assert_eq!(
@@ -4496,7 +4678,7 @@ mod scheduled_agent_lane_tests {
         let harness = harness_with_context(legacy_run()).await;
         let response = harness
             .service
-            .execute_scheduled_step_runtime(step(), None, true)
+            .execute_scheduled_step_runtime(step(), &unbound(), true)
             .await
             .expect("a legacy step is not refused by the binding")
             .into_inner();
@@ -4508,33 +4690,369 @@ mod scheduled_agent_lane_tests {
         );
     }
 
-    /// F-f02-17: with the switch off the decision is not bound to the run, so a decision over another contract is
-    /// not refused by the binding. The digest below does not match the text, so if the agent lane runs it refuses
-    /// the step at admission, before any work.
+    /// F-f03-05: the legacy lane answers no content on its response. With persistence off only the answer's digest is
+    /// recorded, as it always was; with it on the answer reaches the thread through the result hop, and the response
+    /// still carries none. The step's history never holds the answer.
+    #[tokio::test]
+    async fn the_legacy_lane_answers_no_content_and_records_the_answer_only_where_it_always_did() {
+        const ANSWER: &str = "the scheduled answer that must stay out of the step's history";
+        let digest = format!("sha256:{:x}", Sha256::digest(ANSWER.as_bytes()));
+
+        let _off = PersistGuard::set(Some(false));
+        let harness = harness_with_lane(legacy_run(), false, Some(ANSWER.to_owned())).await;
+        let response = harness
+            .service
+            .execute_scheduled_step_runtime(step(), &unbound(), true)
+            .await
+            .expect("the legacy step completes")
+            .into_inner();
+        assert_eq!(response.status, "completed", "{response:?}");
+        assert!(
+            response.output.is_empty(),
+            "the answer is not the response's output"
+        );
+        {
+            let seen = harness.seen.lock().unwrap();
+            assert_eq!(seen.inference_calls, 1, "the legacy step reaches the model");
+            assert!(
+                seen.results.is_empty(),
+                "no result hop while persistence is off"
+            );
+            assert_eq!(seen.receipts.len(), 1, "one receipt for the step");
+            assert_eq!(
+                seen.receipts[0].output_digest, digest,
+                "the receipt keeps the digest of the answer, as before"
+            );
+        }
+
+        let _on = PersistGuard::set(Some(true));
+        let harness = harness_with_lane(legacy_run(), false, Some(ANSWER.to_owned())).await;
+        let response = harness
+            .service
+            .execute_scheduled_step_runtime(step(), &unbound(), true)
+            .await
+            .expect("the legacy step completes")
+            .into_inner();
+        assert!(
+            response.output.is_empty(),
+            "the answer is not the response's output"
+        );
+        let seen = harness.seen.lock().unwrap();
+        assert_eq!(
+            seen.results.len(),
+            1,
+            "the answer reaches the thread through the result hop"
+        );
+        assert_eq!(
+            seen.results[0].output, ANSWER,
+            "the result hop carries the answer"
+        );
+    }
+
+    /// Holds this test thread's answer for the persistence switch until it drops (F-f03-05).
+    struct PersistGuard;
+
+    impl PersistGuard {
+        fn set(forced: Option<bool>) -> Self {
+            PERSIST_FORCED.with(|cell| cell.set(forced));
+            Self
+        }
+    }
+
+    impl Drop for PersistGuard {
+        fn drop(&mut self) {
+            PERSIST_FORCED.with(|cell| cell.set(None));
+        }
+    }
+
+    /// F-f02-17 and F-f10-28: with the switch off the decision is not bound to the run, so a decision over another
+    /// contract is not refused by the binding. The stored text does not hash to the digest the decision names, so the
+    /// stored-contract check refuses the step as invalid whatever the switch says, before any model call.
     #[tokio::test]
     async fn the_switch_off_does_not_bind_the_decision_to_the_run() {
         let mut context = contract_run(r#"{"v":1}"#);
         context.contract_digest = "sha256:none".to_owned();
         let harness = harness_with_context(context).await;
         let other = format!("sha256:{}", "e".repeat(64));
-        let refused_by_binding = match harness
+        let refused = harness
             .service
-            .execute_scheduled_step_runtime(step(), Some(other.as_str()), false)
+            .execute_scheduled_step_runtime(step(), &named(other.as_str()), false)
             .await
-        {
-            Ok(response) => {
-                let error = response.into_inner().error;
-                error == scheduled_step_decision::REFUSAL_CONTRACT_REQUIRED
-                    || error == scheduled_step_decision::REFUSAL_CONTRACT_MISMATCH
-            }
-            Err(status) => {
-                status.message() == scheduled_step_decision::REFUSAL_CONTRACT_REQUIRED
-                    || status.message() == scheduled_step_decision::REFUSAL_CONTRACT_MISMATCH
-            }
+            .expect_err("the stored text does not hash to the digest the decision signed");
+        assert_eq!(
+            refused.message(),
+            scheduled_step_decision::REFUSAL_CONTRACT_INVALID,
+            "with the switch off the binding does not refuse; the stored-contract check does"
+        );
+        assert_refused_after_claim(&harness, scheduled_step_decision::REFUSAL_CONTRACT_INVALID);
+    }
+
+    /// P2-ec-07-rel1: an execution-core build deployed before Session Core serves the stored contract sees no contract on
+    /// any run. With the contract-required switch off, a contract-bearing decision for such a run is not refused by the
+    /// stored-contract check, so the step takes the legacy single-inference lane and reaches the model as it did before
+    /// the check existed. The fake inference answers Unimplemented, so the step ends `inference_failed` after the call.
+    #[tokio::test]
+    async fn a_contract_bearing_step_passes_a_run_serving_no_contract_with_the_switch_off() {
+        let harness = harness_with_context(legacy_run()).await;
+        let other = format!("sha256:{}", "e".repeat(64));
+        let response = harness
+            .service
+            .execute_scheduled_step_runtime(step(), &named(other.as_str()), false)
+            .await
+            .expect("a step whose run serves no contract is not refused with the switch off")
+            .into_inner();
+        assert_eq!(response.error, "inference_failed", "{response:?}");
+        assert_eq!(
+            harness.seen.lock().unwrap().inference_calls,
+            1,
+            "the legacy step reaches the model"
+        );
+    }
+}
+
+/// F-f05-13 at the gRPC boundary: a thread-only run with the thread-workspace switch on and no sandbox-manager
+/// credential passes the sandbox gate, while a Space run with none is refused there. Every credential here is a
+/// real RS256 token the verifier checks against a JWKS this test publishes.
+#[cfg(test)]
+mod thread_bearer_tests {
+    use super::*;
+    use crate::session_terminal_auth::SessionTerminalTokenError;
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+    use serde_json::{json, Value};
+
+    /// The key id this test's tokens and JWKS share.
+    const KID: &str = "thread-bearer-key";
+
+    /// Holds this test thread's thread-workspace switch until it drops.
+    struct ThreadWorkspaceSwitch;
+
+    impl ThreadWorkspaceSwitch {
+        fn set(forced: Option<bool>) -> Self {
+            THREAD_WORKSPACE_FORCED.with(|cell| cell.set(forced));
+            Self
+        }
+    }
+
+    impl Drop for ThreadWorkspaceSwitch {
+        fn drop(&mut self) {
+            THREAD_WORKSPACE_FORCED.with(|cell| cell.set(None));
+        }
+    }
+
+    /// An RS256 key of this test, with the public half the JWKS publishes.
+    struct TestKey {
+        encoding: EncodingKey,
+        n: String,
+        e: String,
+    }
+
+    fn test_key() -> TestKey {
+        use base64::Engine;
+        use rsa::pkcs8::{EncodePrivateKey, LineEnding};
+        use rsa::traits::PublicKeyParts;
+        let mut rng = rand::thread_rng();
+        let private = rsa::RsaPrivateKey::new(&mut rng, 2048).expect("RSA key generation");
+        let public = rsa::RsaPublicKey::from(&private);
+        let pem = private.to_pkcs8_pem(LineEnding::LF).expect("private PEM");
+        TestKey {
+            encoding: EncodingKey::from_rsa_pem(pem.as_bytes()).expect("encoding key"),
+            n: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(public.n().to_bytes_be()),
+            e: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(public.e().to_bytes_be()),
+        }
+    }
+
+    fn now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_secs()
+    }
+
+    /// A credential of `audience` for org-1 and user-1, with no zero-retention posture.
+    fn credential(key: &TestKey, audience: &str) -> String {
+        let claims: Value = json!({
+            "sub": "user-1",
+            "iss": "auth-core",
+            "aud": audience,
+            "exp": now() + 3600,
+            "nbf": now() - 5,
+            "org_id": "org-1",
+            "user_id": "user-1",
+            "principal_type": "user",
+            "zdr": false
+        });
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(KID.to_owned());
+        encode(&header, &claims, &key.encoding).expect("JWT")
+    }
+
+    /// A verifier for the execution-core audience whose JWKS publishes `key`.
+    async fn verifier(key: &TestKey) -> JwtVerifier {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
         };
-        assert!(
-            !refused_by_binding,
-            "with the switch off the run's contract is not compared with the decision"
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "keys": [{
+                    "kty": "RSA", "use": "sig", "alg": "RS256",
+                    "kid": KID, "n": key.n, "e": key.e
+                }]
+            })))
+            .mount(&server)
+            .await;
+        JwtVerifier::from_config(crate::auth::AuthConfig {
+            jwks_url: format!("{}/jwks", server.uri()),
+            issuer: "auth-core".to_owned(),
+            audience: "execution-core".to_owned(),
+            jwks_ttl: Duration::from_secs(300),
+            leeway_secs: 0,
+        })
+        .await
+        .expect("test verifier")
+    }
+
+    /// A capability policy that allows every tool. No test reaches a tool: each run stops before one.
+    struct AllowEverything;
+
+    #[tonic::async_trait]
+    impl crate::capability_policy::CapabilityPolicy for AllowEverything {
+        async fn evaluate(
+            &self,
+            _tool_name: &str,
+            _run_id: &str,
+            _org_id: &str,
+        ) -> Result<crate::capability_policy::CapabilityDecision, Status> {
+            Ok(crate::capability_policy::CapabilityDecision::Allow)
+        }
+    }
+
+    struct NoManagedTokens;
+
+    #[tonic::async_trait]
+    impl ManagedRunTokenProvider for NoManagedTokens {
+        async fn terminalize_token(
+            &self,
+            _org_id: &str,
+        ) -> Result<String, SessionTerminalTokenError> {
+            Ok("unused-terminalize-token".to_owned())
+        }
+
+        async fn heartbeat_token(
+            &self,
+            _org_id: &str,
+        ) -> Result<String, SessionTerminalTokenError> {
+            Ok("unused-heartbeat-token".to_owned())
+        }
+
+        async fn scheduled_step_token(
+            &self,
+            _org_id: &str,
+        ) -> Result<String, SessionTerminalTokenError> {
+            Ok("unused-scheduled-step-token".to_owned())
+        }
+    }
+
+    /// The service over `key`, with every session, inference and sandbox-manager endpoint unreachable.
+    async fn service(key: &TestKey) -> ExecutionService {
+        let unreachable =
+            tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        ExecutionService::new_with_scheduled_step_runtime(
+            StateStore::new(),
+            verifier(key).await,
+            unreachable.clone(),
+            unreachable.clone(),
+            unreachable,
+            Arc::new(AllowEverything),
+            Arc::new(NoManagedTokens),
+            None,
+            None,
+            None,
+            SandboxManagerClient::from_env().expect("default sandbox-manager endpoint"),
+            None,
+            "test-backend".to_owned(),
+            Arc::new(
+                crate::sandbox_lease::SandboxManagerTokenProvider::new_for_test(
+                    "http://127.0.0.1:1",
+                    "execution-core",
+                    "test-service-secret-at-least-32-bytes",
+                ),
+            ),
+            None,
+        )
+    }
+
+    /// A RunAgent request for run-1 on thread-1, carrying the caller, session, Data Plane and inference
+    /// credentials a run needs and no sandbox-manager credential. `space_id` is empty for a thread-only run.
+    fn run_request(key: &TestKey, space_id: &str) -> Request<pb::RunAgentRequest> {
+        let mut request = Request::new(pb::RunAgentRequest {
+            run_id: "run-1".to_owned(),
+            thread_id: "thread-1".to_owned(),
+            org_id: "org-1".to_owned(),
+            user_id: "user-1".to_owned(),
+            space_id: space_id.to_owned(),
+            goal: "summarise the week".to_owned(),
+            ..Default::default()
+        });
+        let metadata = request.metadata_mut();
+        metadata.insert(
+            "authorization",
+            format!("Bearer {}", credential(key, "execution-core"))
+                .parse()
+                .expect("metadata"),
+        );
+        metadata.insert(
+            "x-session-authorization",
+            format!("Bearer {}", credential(key, "session-core"))
+                .parse()
+                .expect("metadata"),
+        );
+        metadata.insert(
+            "x-data-plane-authorization",
+            format!("Bearer {}", credential(key, "data-plane"))
+                .parse()
+                .expect("metadata"),
+        );
+        metadata.insert(
+            "x-inference-authorization",
+            format!("Bearer {}", credential(key, "inference-core"))
+                .parse()
+                .expect("metadata"),
+        );
+        request
+    }
+
+    /// With the thread-workspace switch on, a thread-only run needs no sandbox-manager credential to pass the
+    /// sandbox gate, and a Space run still needs one (F-f05-13). The thread-only run then stops at its session's
+    /// ownership lookup, which nothing answers here, so it reaches no tool and dispatches nothing.
+    #[tokio::test]
+    async fn a_thread_only_run_passes_the_sandbox_gate_without_a_bearer_and_a_space_run_does_not() {
+        let key = test_key();
+        let service = service(&key).await;
+        let _switch = ThreadWorkspaceSwitch::set(Some(true));
+
+        let refused = service
+            .run_agent(run_request(&key, "space_01"))
+            .await
+            .expect_err("a Space run with no sandbox bearer is refused");
+        assert_eq!(refused.code(), tonic::Code::Unauthenticated, "{refused:?}");
+        assert_eq!(
+            refused.message(),
+            "verified delegated credential required",
+            "{refused:?}"
+        );
+
+        let stopped = service
+            .run_agent(run_request(&key, ""))
+            .await
+            .expect_err("the thread-only run stops at its session's ownership lookup");
+        assert_eq!(stopped.code(), tonic::Code::Unavailable, "{stopped:?}");
+        assert_eq!(
+            stopped.message(),
+            "run ownership unavailable",
+            "the run got past the sandbox gate: {stopped:?}"
         );
     }
 }
