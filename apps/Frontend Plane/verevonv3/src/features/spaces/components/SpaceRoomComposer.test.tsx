@@ -6,6 +6,7 @@ import { reloadGuardCount } from '@/app/chunk-recovery'
 import { ApiError } from '@/shared/api/http'
 import { hasUnsavedWork, hasUnsavedWorkProbes } from '@/shared/build/unsaved-work'
 import { translateApiError } from '@/shared/i18n/errors'
+import { I18nProvider, localeStorageKey } from '@/shared/i18n'
 import { CATALOGUE_TIER_WAIT_MS } from '@/features/dashboard/home/submit-privacy-tier'
 import type { SpaceRunLiveHandlers } from '@/shared/api/space-run-live-client'
 import { publishSpaceThreads, resetLiveWorkForTests } from '../lib/space-live-work'
@@ -2595,6 +2596,19 @@ describe('SpaceRoomComposer — platform commands (WS13-S7)', () => {
     flush()
 
     expect(await screen.findByRole('listbox', { name: 'Velg en ferdighet eller kommando' })).toBeTruthy()
+  })
+
+  it('under an English locale the picker is named "Pick a skill or command"', async () => {
+    window.localStorage.setItem(localeStorageKey, 'en')
+    render(() => (
+      <I18nProvider>
+        <SpaceRoomComposer spaceRef="room-1" roster={() => []} agents={() => []} threads={() => []} />
+      </I18nProvider>
+    ))
+    fireEvent.input(document.querySelector('textarea') as HTMLTextAreaElement, { target: { value: '/' } })
+    flush()
+
+    expect(await screen.findByRole('listbox', { name: 'Pick a skill or command' })).toBeTruthy()
   })
 })
 
