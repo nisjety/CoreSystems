@@ -837,6 +837,7 @@ export function SpacesExpandedSidebarPanel(props: { onCollapse: () => void }) {
         <Show when={spaceRoomDirectoryListed() && !spaces.loading && !spacesLoadFailed()}>
           <a
             href="/spaces/directory"
+            link
             class={cn(
               'core-sidebar-panel-link core-sidebar-new-room',
               location.pathname === '/spaces/directory' && 'verevon-sidebar-panel-active core-sidebar-panel-link--active',

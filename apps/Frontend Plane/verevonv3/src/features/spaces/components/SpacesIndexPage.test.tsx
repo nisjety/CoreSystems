@@ -124,4 +124,41 @@ describe('SpacesIndexPage room directory link (A-REC-02)', () => {
     await screen.findByText('Gjør klar organisasjonens rom')
     expect(screen.queryByRole('link', { name: 'Finn rom' })).toBeNull()
   })
+
+  it('marks the link for the in-app router, so a click does not reload the page', async () => {
+    client.spaceRoomDirectoryListed.mockReturnValue(true)
+    render(() => <SpacesIndexPage />)
+    const link = await screen.findByRole('link', { name: 'Finn rom' })
+    expect(link.hasAttribute('link')).toBe(true)
+  })
+
+  // WS04-S8: the real listing call and flag, with only the gateway answer stubbed, so the
+  // listing's features.room_directory is what turns the link on or off.
+  describe('with the real listing', () => {
+    async function stubListing(features: { room_directory: boolean }) {
+      const actual = await vi.importActual<typeof import('@/shared/api/spaces-client')>('@/shared/api/spaces-client')
+      client.listSpaces.mockImplementation(actual.listSpaces)
+      client.spaceRoomDirectoryListed.mockImplementation(actual.spaceRoomDirectoryListed)
+      vi.stubGlobal('fetch', vi.fn(async () => new Response(
+        JSON.stringify({ spaces: [], features }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )))
+    }
+
+    afterEach(() => vi.unstubAllGlobals())
+
+    it('offers Browse rooms when the listing reports room_directory', async () => {
+      await stubListing({ room_directory: true })
+      render(() => <SpacesIndexPage />)
+      const link = await screen.findByRole('link', { name: 'Finn rom' })
+      expect(link.getAttribute('href')).toBe('/spaces/directory')
+    })
+
+    it('hides Browse rooms when the listing leaves room_directory off', async () => {
+      await stubListing({ room_directory: false })
+      render(() => <SpacesIndexPage />)
+      await screen.findByText('Gjør klar organisasjonens rom')
+      expect(screen.queryByRole('link', { name: 'Finn rom' })).toBeNull()
+    })
+  })
 })

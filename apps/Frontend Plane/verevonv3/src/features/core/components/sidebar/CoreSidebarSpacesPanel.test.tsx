@@ -542,7 +542,10 @@ describe('SpacesExpandedSidebarPanel', () => {
 
       await stubListing({ room_directory: true })
       renderSpacesSidebar()
-      expect((await screen.findByRole('link', { name: /Finn rom|Browse rooms/ })).getAttribute('href')).toBe('/spaces/directory')
+      const browse = await screen.findByRole('link', { name: /Finn rom|Browse rooms/ })
+      expect(browse.getAttribute('href')).toBe('/spaces/directory')
+      // The router runs with explicitLinks, so only a `link` anchor navigates in-app.
+      expect(browse.hasAttribute('link')).toBe(true)
     })
 
     // WS04-S8: /spaces/directory is the directory page; it is never loaded as a Space.

@@ -239,7 +239,7 @@ export default function SpacesIndexPage() {
                     flag is presentation only, and the directory route decides for itself. */}
                 <Show when={spaceRoomDirectoryListed()}>
                   <p>
-                    <a href="/spaces/directory">{i18n.tr('Finn rom', 'Browse rooms')}</a>
+                    <a href="/spaces/directory" link>{i18n.tr('Finn rom', 'Browse rooms')}</a>
                   </p>
                 </Show>
               </div>
