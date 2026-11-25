@@ -395,6 +395,19 @@ func TestProvisionControlSharedRuntimeIsIdempotent(t *testing.T) {
 		}
 	}
 
+	wantedNotificationErasure := notificationCoreOrgErasureConsumerConfig()
+	notificationErasure, err := js.ConsumerInfo(ControlSharedStreamName, wantedNotificationErasure.Durable)
+	if err != nil {
+		t.Fatalf("notification-core org-erasure consumer missing: %v", err)
+	}
+	if notificationErasure.Config.DeliverSubject != wantedNotificationErasure.DeliverSubject ||
+		notificationErasure.Config.DeliverGroup != wantedNotificationErasure.DeliverGroup ||
+		notificationErasure.Config.FilterSubject != GDPRErasureRequestedSubject ||
+		notificationErasure.Config.AckPolicy != nats.AckExplicitPolicy ||
+		notificationErasure.Config.MaxDeliver != 20 {
+		t.Fatalf("unexpected notification-core org-erasure consumer: %+v", notificationErasure.Config)
+	}
+
 	// The eight Data Plane v2 / Model Plane GDPR org-erasure consumers added
 	// alongside documents-api-gdpr/session-core-gdpr/conversation-core-gdpr/
 	// quarry-control-gdpr/notification-core-gdpr above. Four are PULL
@@ -614,7 +627,99 @@ func TestEnsureOrgErasureConsumerRejectsAnUnknownDurable(t *testing.T) {
 	}
 }
 
-// TestOrgErasureConsumerConfigsCoversAllFifteen pins the map's size against
+func TestEnsureNotificationCoreOrgErasureConsumerCreatesAndIsIdempotent(t *testing.T) {
+	natsServer, err := server.NewServer(&server.Options{JetStream: true, StoreDir: t.TempDir(), Port: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go natsServer.Start()
+	if !natsServer.ReadyForConnections(10 * time.Second) {
+		t.Fatal("NATS server did not become ready")
+	}
+	t.Cleanup(func() { natsServer.Shutdown(); natsServer.WaitForShutdown() })
+	nc, err := nats.Connect(natsServer.ClientURL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(nc.Close)
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := js.AddStream(&nats.StreamConfig{
+		Name:     ControlSharedStreamName,
+		Subjects: []string{GDPRErasureRequestedSubject},
+		Storage:  nats.FileStorage,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for run := 0; run < 2; run++ {
+		if err := EnsureOrgErasureConsumer(js, ControlSharedStreamName, NotificationCoreOrgErasureConsumerName); err != nil {
+			t.Fatalf("run %d: %v", run+1, err)
+		}
+	}
+	info, err := js.ConsumerInfo(ControlSharedStreamName, NotificationCoreOrgErasureConsumerName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Config.DeliverSubject != NotificationCoreOrgErasureDelivery ||
+		info.Config.DeliverGroup != NotificationCoreOrgErasureConsumerName ||
+		info.Config.FilterSubject != GDPRErasureRequestedSubject ||
+		info.Config.AckPolicy != nats.AckExplicitPolicy ||
+		info.Config.MaxDeliver != 20 {
+		t.Fatalf("unexpected notification-core org-erasure consumer: %+v", info.Config)
+	}
+}
+
+func TestEnsureNotificationCoreOrgErasureConsumerRefusesDrift(t *testing.T) {
+	natsServer, err := server.NewServer(&server.Options{JetStream: true, StoreDir: t.TempDir(), Port: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go natsServer.Start()
+	if !natsServer.ReadyForConnections(10 * time.Second) {
+		t.Fatal("NATS server did not become ready")
+	}
+	t.Cleanup(func() { natsServer.Shutdown(); natsServer.WaitForShutdown() })
+	nc, err := nats.Connect(natsServer.ClientURL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(nc.Close)
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := js.AddStream(&nats.StreamConfig{
+		Name:     ControlSharedStreamName,
+		Subjects: []string{GDPRErasureRequestedSubject},
+		Storage:  nats.FileStorage,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A pre-existing durable with a different delivery subject must be refused,
+	// never silently rewritten: the consumer binds to its delivery subject.
+	drifted := notificationCoreOrgErasureConsumerConfig()
+	drifted.DeliverSubject = "_VEREVON.CONTROL.SHARED.DELIVER.application.notification.drifted"
+	if _, err := js.AddConsumer(ControlSharedStreamName, drifted); err != nil {
+		t.Fatal(err)
+	}
+	err = EnsureOrgErasureConsumer(js, ControlSharedStreamName, NotificationCoreOrgErasureConsumerName)
+	if err == nil || !strings.Contains(err.Error(), "refusing destructive replacement") {
+		t.Fatalf("expected a refusing-destructive-replacement error for a drifted consumer, got: %v", err)
+	}
+	info, err := js.ConsumerInfo(ControlSharedStreamName, NotificationCoreOrgErasureConsumerName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Config.DeliverSubject != drifted.DeliverSubject {
+		t.Fatalf("the drifted consumer was mutated: %+v", info.Config)
+	}
+}
+
+// TestOrgErasureConsumerConfigsCoversAllSeventeen pins the map's size against
 // the doc comment on ProvisionControlSharedRuntime's consumer block ("The
 // eight Data Plane v2 / Model Plane... consumers added alongside
 // documents-api-gdpr/session-core-gdpr/conversation-core-gdpr/
@@ -622,13 +727,19 @@ func TestEnsureOrgErasureConsumerRejectsAnUnknownDurable(t *testing.T) {
 // org-DELETION consumers are excluded on purpose: they are not org-ERASURE
 // consumers and are not in provisioner.orgErasureConsumerConfigs.
 //
+// 17 since F-f05-11: notification-core's org-erasure consumer joined (its three
+// org-deletion consumers stay out of this map).
+//
 // 15 since 2026-08-10: the Frontend Plane's verevon-gateway-rs joined. It is
 // the first non-plane-service consumer here — the BFF keeps its own copy of
 // conversation content in Dragonfly, so erasure has to reach it too.
-func TestOrgErasureConsumerConfigsCoversAllFifteen(t *testing.T) {
+func TestOrgErasureConsumerConfigsCoversAllSeventeen(t *testing.T) {
 	configs := orgErasureConsumerConfigs()
-	if len(configs) != 16 {
-		t.Fatalf("orgErasureConsumerConfigs has %d entries, want 16: %v", len(configs), configs)
+	if len(configs) != 17 {
+		t.Fatalf("orgErasureConsumerConfigs has %d entries, want 17: %v", len(configs), configs)
+	}
+	if _, ok := configs[NotificationCoreOrgErasureConsumerName]; !ok {
+		t.Fatalf("notification-core's org-erasure consumer is missing from the map")
 	}
 	if _, ok := configs[VerevonGatewayOrgErasureConsumerName]; !ok {
 		t.Fatalf("the Frontend Plane gateway's erasure consumer is missing from the map")

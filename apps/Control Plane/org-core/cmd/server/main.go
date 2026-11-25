@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/browsersites"
+	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/clients"
 	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/config"
 	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/database"
 	grpcserver "github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/grpc"
@@ -176,8 +177,8 @@ func main() {
 	// ORG_PURGE_DAYS days ago (default 30) by calling the
 	// purge_old_deleted_organizations stored procedure. Runs once at startup,
 	// then daily, and exits when ctx is cancelled. Mirrors audit-core's
-	// retention cron shape.
-	go runOrgPurge(ctx, orgService, orgPurgeDays())
+	// retention cron shape. Started below, once the retention service that
+	// records a held organisation's skip (F-f10-06) is wired.
 
 	// Flow C reminder sweep: 7-day and 1-day-out reminders for organizations
 	// pending deletion. Runs once at startup, then every
@@ -207,15 +208,25 @@ func main() {
 	server.SetBrowserSpaceFloor()
 	// A membership that ends takes its remembered site choices with it (F-f02-16).
 	orgService.SetBrowserSiteChoiceEraser(browserSites)
-	// Retention policy and legal holds (EP-9 C1); read by session-core's sweeper. No thread
-	// retention reader yet: thread holds are placed without the ZDR receipt check.
+	// Retention policy and legal holds (EP-9 C1); read by session-core's sweeper. Thread holds ask
+	// session-core's thread receipt first when ORG_RETENTION_THREAD_RECEIPT_CHECK is the literal true
+	// (F-f10-03); off, they are placed without the check, as before. The reader is nil unless the
+	// switch is on, so the service never calls a client it was not given.
 	// The typed-nil guard matters: a nil *nats.Client inside the interface is non-nil.
+	threadReceipts, err := threadReceiptFromEnvironment(os.Getenv)
+	if err != nil {
+		log.Fatalf("[org-core startup] %v", err)
+	}
 	var retentionPublisher retention.AuditPublisher
 	if natsClient != nil {
 		retentionPublisher = natsClient
 	}
-	retentionService := retention.NewService(retention.NewRepository(db), nil, retentionPublisher)
+	retentionService := retention.NewService(retention.NewRepository(db), threadReceipts, retentionPublisher)
 	server.SetRetention(retentionService)
+	// The purge sweep (see above) records each organisation it skips for a legal hold
+	// (ERASURE_HOLD_CHECK, F-f10-06), so it starts only after its auditor is set.
+	orgService.SetErasureRefusalAuditor(retentionService)
+	go runOrgPurge(ctx, orgService, orgPurgeDays())
 	if natsClient != nil {
 		go runRetentionAuditOutbox(ctx, retentionService, 5*time.Second)
 	}
@@ -405,6 +416,59 @@ func runRetentionAuditOutbox(ctx context.Context, service *retention.Service, in
 			flush()
 		}
 	}
+}
+
+// threadReceiptFromEnvironment builds session-core's thread receipt reader for the thread hold check
+// (F-f10-03). Off, the switch returns a nil reader and builds and calls nothing, as before. On, it refuses to
+// start unless the reader can be built: a thread hold must never be placed without the check the switch asked
+// for. The reader calls SessionRetentionService.GetThreadRetention (F-f10-02) on the Model Plane session-core
+// at SESSION_CORE_RETENTION_ADDR, with a session-core token minted for each organisation read from org-core's
+// own service API key. A refusal names the switch and no value.
+func threadReceiptFromEnvironment(getenv func(string) string) (retention.ThreadRetention, error) {
+	return threadReceiptReader(getenv, clients.NewSessionCoreTokenSource, clients.NewSessionThreadRetentionClient)
+}
+
+// The variables the reader is built from. The API key is a service credential: it is read here and never logged.
+const (
+	envSessionCoreRetentionAddr = "SESSION_CORE_RETENTION_ADDR"
+	envOrgCoreSessionAPIKey     = "ORG_CORE_SESSION_SERVICE_API_KEY"
+	envAuthCoreURL              = "AUTH_CORE_URL"
+)
+
+// tokenSourceBuilder and clientBuilder are the two constructors the reader is built from. Tests substitute
+// counting fakes to show that a switch that is off builds neither.
+type tokenSourceBuilder func(authCoreURL, serviceID, credential string) (clients.TokenSource, error)
+
+type clientBuilder func(addr string, tokens clients.TokenSource) (*clients.SessionThreadRetentionClient, error)
+
+// threadReceiptReader is threadReceiptFromEnvironment with its constructors passed in.
+func threadReceiptReader(getenv func(string) string, newTokens tokenSourceBuilder, newClient clientBuilder) (retention.ThreadRetention, error) {
+	if !retention.ThreadReceiptCheckEnabled(getenv) {
+		return nil, nil
+	}
+	refuse := func(reason string) error {
+		return fmt.Errorf("%s is on but %s; refusing to start", retention.EnvThreadReceiptCheck, reason)
+	}
+	addr := strings.TrimSpace(getenv(envSessionCoreRetentionAddr))
+	authCoreURL := strings.TrimSpace(getenv(envAuthCoreURL))
+	apiKey := strings.TrimSpace(getenv(envOrgCoreSessionAPIKey))
+	switch {
+	case addr == "":
+		return nil, refuse(envSessionCoreRetentionAddr + " is unset")
+	case authCoreURL == "":
+		return nil, refuse(envAuthCoreURL + " is unset")
+	case apiKey == "":
+		return nil, refuse(envOrgCoreSessionAPIKey + " is unset")
+	}
+	tokens, err := newTokens(authCoreURL, clients.OrgCoreServiceID, apiKey)
+	if err != nil {
+		return nil, refuse(fmt.Sprintf("the session-core token source could not be built (%v)", err))
+	}
+	client, err := newClient(addr, tokens)
+	if err != nil {
+		return nil, refuse(fmt.Sprintf("the session-core thread receipt client could not be built (%v)", err))
+	}
+	return client, nil
 }
 
 // runIdentityAuditOutbox publishes the audit rows of identity changes (domain added, verified,

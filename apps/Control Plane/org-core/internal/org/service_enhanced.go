@@ -10,6 +10,7 @@ import (
 	"time"
 
 	rediscache "github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/redis"
+	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/retention"
 )
 
 var ErrNotFound = errors.New("not found")
@@ -66,6 +67,10 @@ type Service struct {
 	// ends (F-f02-16). Nil until SetBrowserSiteChoiceEraser; a removal refuses to run
 	// without it, so no membership ends with its choices left behind.
 	browserSiteChoices BrowserSiteChoiceEraser
+	// erasureRefusals records each organisation the purge sweep skips for a legal hold
+	// (F-f10-06). Nil until SetErasureRefusalAuditor; the skip happens in the database
+	// either way.
+	erasureRefusals ErasureRefusalAuditor
 }
 
 // BrowserSiteChoiceEraser erases one member's remembered agent-browser site choices in
@@ -1218,8 +1223,68 @@ func (s *Service) enqueueGDPRErrorAudit(
 // gdprPurgeReceipt mirrors the purge_old_deleted_organizations($1) stored
 // proc's JSONB shape (migrations/003_gdpr_hard_delete.up.sql) closely enough
 // to recover the purged org ids for the cross-plane erasure fan-out below.
+// HeldOrgIDs is set only with ERASURE_HOLD_CHECK on (migration 037): the
+// organisations the sweep skipped because a legal hold is active.
 type gdprPurgeReceipt struct {
-	OrgIDs []string `json:"org_ids"`
+	OrgIDs     []string `json:"org_ids"`
+	HeldOrgIDs []string `json:"held_org_ids"`
+}
+
+// envErasureHoldCheck is the legal-hold switch the HTTP erasure routes read too
+// (internal/http/gdpr_handlers.go). Only the literal "true" turns it on.
+const envErasureHoldCheck = "ERASURE_HOLD_CHECK"
+
+// ErasureRefusalAuditor counts an organisation's active legal holds and records a
+// refused erasure in the retention audit outbox (F-f10-06, decision D-C1).
+// *retention.Service satisfies it.
+type ErasureRefusalAuditor interface {
+	Holds(ctx context.Context, orgID string) (retention.HoldList, error)
+	AuditRefusedErasure(ctx context.Context, orgID string, actor retention.Actor, op string, orgHolds, threadHolds int) error
+}
+
+// SetErasureRefusalAuditor wires the auditor the purge sweep records each held
+// organisation with. Call it before the sweep starts. Pass a nil interface, never
+// a typed nil.
+func (s *Service) SetErasureRefusalAuditor(auditor ErasureRefusalAuditor) {
+	s.erasureRefusals = auditor
+}
+
+// auditHeldPurges records one refusal row per organisation the sweep skipped for a
+// legal hold. The actor is the cron's fixed id. A failure is logged with a closed
+// word and never changes the sweep's receipt; the held organisation is skipped
+// either way, because the database decided that.
+func (s *Service) auditHeldPurges(ctx context.Context, heldOrgIDs []string) {
+	if len(heldOrgIDs) == 0 {
+		return
+	}
+	if s.erasureRefusals == nil {
+		log.Printf("org-core: purge sweep: erasure_refusal_audit_unwired held=%d", len(heldOrgIDs))
+		return
+	}
+	actor := retention.Actor{ID: gdprPurgeCronActorID, Role: "system"}
+	for _, orgID := range heldOrgIDs {
+		if strings.TrimSpace(orgID) == "" {
+			continue
+		}
+		orgHolds, threadHolds := retention.HoldCountUnknown, retention.HoldCountUnknown
+		if list, err := s.erasureRefusals.Holds(ctx, orgID); err != nil {
+			log.Print("org-core: purge sweep: hold_count_unavailable")
+		} else {
+			orgHolds, threadHolds = 0, 0
+			for _, hold := range list.Holds {
+				switch {
+				case !hold.Active():
+				case hold.Scope == retention.ScopeOrg:
+					orgHolds++
+				default:
+					threadHolds++
+				}
+			}
+		}
+		if err := s.erasureRefusals.AuditRefusedErasure(ctx, orgID, actor, retention.ErasureOpPurge, orgHolds, threadHolds); err != nil {
+			log.Print("org-core: purge sweep: erasure_refusal_audit_failed")
+		}
+	}
 }
 
 // PurgeDeletedOrganizations hard-deletes organizations soft-deleted more than
@@ -1253,6 +1318,7 @@ func (s *Service) PurgeDeletedOrganizations(ctx context.Context, daysThreshold i
 			_ = s.cache.Del(ctx, "org:id:"+orgID, "org:ent:"+orgID)
 		}
 	}
+	s.auditHeldPurges(ctx, parsed.HeldOrgIDs)
 	return receipt, nil
 }
 

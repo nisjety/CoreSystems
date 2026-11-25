@@ -87,8 +87,8 @@ type Decision struct {
 	// ImportSourceType is present only for the import action family. It binds a
 	// durable connector intent without turning Control into a connector owner.
 	ImportSourceType string `json:"import_source_type,omitempty"`
-	// HistoryFloorRevision (WS04-S11) is present only on a shared thread-read
-	// decision for a since_join room while SPACE_HISTORY_WINDOW_CLAIM is on:
+	// HistoryFloorRevision (WS04-S11) is present only on a shared thread-read or
+	// thread-revise decision for a since_join room while SPACE_HISTORY_WINDOW_CLAIM is on:
 	// the first recipient-audience revision the reader may see. It is signed
 	// with the rest of the decision and is in no payload digest. A consumer that
 	// does not know it shows full history (presentation rule, never authority).

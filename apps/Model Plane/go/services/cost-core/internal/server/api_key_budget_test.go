@@ -203,14 +203,14 @@ func TestAPIKeyBudgetCheck_OffIsUnchanged(t *testing.T) {
 	}
 }
 
-// Both principals agree: a service with cost:read asking for the key's scope and
-// the key principal asking for itself read the same ledger row.
+// Both principals agree: a service holding cost:budget:check asking for the key's
+// scope and the key principal asking for itself read the same ledger row.
 func TestAPIKeyBudgetCheck_AgreesWithTheServiceCheckForTheSamePrincipal(t *testing.T) {
 	handler, key := keyBudgetServer(t, true)
 	keyToken := keyBudgetToken(t, key, nil)
 	service := costToken(t, key, costTestClaims{
 		OrgID: "org-a", ServiceID: "service:model-gateway", PrincipalType: "service",
-		Scopes: []string{"cost:read"},
+		Scopes: []string{ScopeBudgetCheck},
 	})
 	body := `{"org_id":"org-a","user_id":"apikey:key-1","max_cost_usd":10}`
 	viaKey := costRequest(handler, http.MethodPost, "/api/v1/budget/check", body, keyToken, "", "")

@@ -11,6 +11,7 @@ const (
 	cpUserCoreHandlers = "apps/Control Plane/user-core/internal/http/handlers.go"
 	cpUserCoreAudit    = "apps/Control Plane/user-core/internal/spaces/decision_audit.go"
 	cpAuditCoreMain    = "apps/Control Plane/audit-core/cmd/server/main.go"
+	cpAuditSiemMain    = "apps/Control Plane/audit-core/cmd/siem-exporter/main.go"
 )
 
 // cpSwitchPin is one Control Plane switch that the registry describes. Each stays a dark,
@@ -28,8 +29,11 @@ type cpSwitchPin struct {
 }
 
 var cpSwitchPins = []cpSwitchPin{
-	{name: "AUDIT_ALLOW_NATS_TOKEN_FALLBACK", source: SourceCode, codePath: cpAuditCoreMain, strict: "1", def: "0"},
-	{name: "AUDIT_CHAIN_PRUNE_DRYRUN", source: SourceCompose, service: "audit-core", codePath: cpAuditCoreMain, strict: "1", def: "0"},
+	{name: "AUDIT_ALLOW_NATS_TOKEN_FALLBACK", source: SourceCode, codePath: cpAuditCoreMain, strict: "true", def: "false"},
+	{name: "AUDIT_CHAIN_ENABLED", source: SourceCompose, service: "audit-core", codePath: cpAuditCoreMain, strict: "true", def: "false"},
+	{name: "AUDIT_CHAIN_PRUNE_DRYRUN", source: SourceCompose, service: "audit-core", codePath: cpAuditCoreMain, strict: "true", def: "false"},
+	{name: "AUDIT_CHAIN_PRUNE_ENABLED", source: SourceCompose, service: "audit-core", codePath: cpAuditCoreMain, strict: "true", def: "false"},
+	{name: "AUDIT_SIEM_EXPORT_ENABLED", source: SourceCompose, service: "audit-siem-exporter", codePath: cpAuditSiemMain, strict: "true", def: "false"},
 	{name: "CONTROL_OWNER_ASSERTED_GRANTS", source: SourceCompose, service: "user-core", codePath: cpUserCoreMain, strict: "true", def: "false"},
 	{name: "CONTROL_SPACE_SHARED_IMPORT", source: SourceCompose, service: "user-core", codePath: cpUserCoreMain, strict: "true", def: "false"},
 	{name: "CONTROL_SPACE_SUBJECT_GRANTS", source: SourceCompose, service: "user-core", codePath: cpUserCoreMain, strict: "true", def: "false"},
@@ -102,6 +106,35 @@ func TestAuditTokenFallbackSwitchSaysItRelaxesSecurity(t *testing.T) {
 	}
 	if !strings.Contains(f.Purpose, "Security-relaxing") {
 		t.Errorf("purpose must say the switch relaxes security: %q", f.Purpose)
+	}
+}
+
+// TestAuditSIEMPrivateDestinationSwitchIsDevOnlyAndExact pins the one dev-only audit switch. It is a
+// dark, default-off, devOnly switch that reads only the literal true, and audit-siem-exporter is its
+// single compose declaration. It cannot sit in cpSwitchPins, which requires a switch that is not devOnly.
+func TestAuditSIEMPrivateDestinationSwitchIsDevOnlyAndExact(t *testing.T) {
+	const name = "AUDIT_SIEM_ALLOW_PRIVATE_DESTINATIONS"
+	f, ok := loadShipped(t).Flag(name)
+	if !ok {
+		t.Fatalf("%s is not registered", name)
+	}
+	if f.Kind != KindSwitch || f.Owner != PlaneControl || f.EffectiveStage() != StageDark {
+		t.Errorf("%s: kind %q owner %q stage %q, want switch/control-plane/dark", name, f.Kind, f.Owner, f.EffectiveStage())
+	}
+	if !f.DevOnly || f.OrgOverridable || f.KillSwitch {
+		t.Errorf("%s: must be devOnly, and neither orgOverridable nor a kill switch", name)
+	}
+	if f.OnLiteral != "true" || f.OnLiteralAnyCase != "" {
+		t.Errorf("%s: onLiteral %q and onLiteralAnyCase %q, want the exact literal true only", name, f.OnLiteral, f.OnLiteralAnyCase)
+	}
+	if f.Default != "false" {
+		t.Errorf("%s: default %q, want false", name, f.Default)
+	}
+	if want := "Only the literal true turns it on; with ENVIRONMENT=production the exporter refuses to start."; !strings.HasSuffix(f.Purpose, want) {
+		t.Errorf("%s: purpose must end with %q, got %q", name, want, f.Purpose)
+	}
+	if len(f.Declarations) != 1 || f.Declarations[0].Service != "audit-siem-exporter" || f.Declarations[0].Default != "false" {
+		t.Errorf("%s: declarations %+v, want one audit-siem-exporter entry with default false", name, f.Declarations)
 	}
 }
 

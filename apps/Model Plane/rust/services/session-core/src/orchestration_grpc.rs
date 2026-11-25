@@ -36,7 +36,7 @@ use tracing::warn;
 
 use crate::auth::{
     authorize_operation, authorize_owner_row, authorize_thread_owner_row, identity, OwnerIntent,
-    VerifiedIdentity,
+    VerifiedIdentity, QUESTION_SERVICE_ORIGIN_SCOPE,
 };
 use crate::orchestration_store as store;
 use crate::retention_receipt;
@@ -357,21 +357,14 @@ struct DecisionFields {
 }
 
 fn decision_fields(approval: &store::ApprovalRow) -> DecisionFields {
-    let decision = &approval.metadata["decision"];
+    // The stored record is read by the store's one reader, which the run event (F-f10-34) reads too.
+    let stored = store::stored_decision(&approval.metadata);
     DecisionFields {
-        cause_code: approval.metadata["cause"]["code"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned(),
-        rule_id: approval.metadata["cause"]["rule_id"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned(),
-        scope: approval_scope_from_str(stored_decision_scope(approval)),
-        decision_source: approval_decision_source_from_str(
-            decision["source"].as_str().unwrap_or_default(),
-        ),
-        step_up_verified: decision["step_up_verified"].as_bool().unwrap_or(false),
+        cause_code: stored.cause_code,
+        rule_id: stored.rule_id,
+        scope: approval_scope_from_str(&stored.scope),
+        decision_source: approval_decision_source_from_str(&stored.source),
+        step_up_verified: stored.step_up_verified,
     }
 }
 
@@ -1219,6 +1212,13 @@ fn approved_authority(offered_json: &str) -> Option<proto::ApprovedAuthority> {
     let connector_taint = value
         .get("connector_taint")
         .map(|taint| taint.as_bool().unwrap_or(true));
+    // The documents and skills the paused Do turn attached (F-f09-05). A malformed list refuses the whole
+    // descriptor, as an unreadable snapshot does: read as none, it would widen the continuation to the
+    // whole organisation.
+    let context_document_ids =
+        mp_contracts::loop_fold::context_ids_from_value(value.get("context_document_ids"))?;
+    let context_skill_ids =
+        mp_contracts::loop_fold::context_ids_from_value(value.get("context_skill_ids"))?;
     Some(proto::ApprovedAuthority {
         mode: text(authority, "mode"),
         plan_mode: authority
@@ -1244,6 +1244,8 @@ fn approved_authority(offered_json: &str) -> Option<proto::ApprovedAuthority> {
         coordinator_tools,
         connector_scope,
         connector_taint,
+        context_document_ids,
+        context_skill_ids,
     })
 }
 
@@ -1276,6 +1278,63 @@ fn connector_scope_of_offered(offered: &JsonValue) -> Vec<String> {
         ids.push(id.to_owned());
     }
     ids
+}
+
+#[cfg(test)]
+mod attached_refs_descriptor {
+    use super::approved_authority;
+    use serde_json::json;
+
+    /// A descriptor with the minimal authority part and the given extra top-level keys.
+    fn descriptor(extra: serde_json::Value) -> String {
+        let mut value = json!({
+            "tools": [],
+            "authority": {
+                "mode": "ask",
+                "plan_mode": false,
+                "autonomy_rung": "",
+                "space_id": "",
+                "min_privacy_tier": 0,
+                "provider_hint": "",
+                "max_rounds": 4,
+                "tool_names": [],
+                "digest": "",
+            },
+        });
+        for (key, item) in extra.as_object().expect("an object") {
+            value[key] = item.clone();
+        }
+        value.to_string()
+    }
+
+    #[test]
+    fn a_descriptor_carries_the_attached_ids_and_none_when_it_predates_them() {
+        let bare = approved_authority(&descriptor(json!({})))
+            .expect("a descriptor that predates the keys");
+        assert!(bare.context_document_ids.is_empty() && bare.context_skill_ids.is_empty());
+        let carried = approved_authority(&descriptor(json!({
+            "context_document_ids": ["doc-1", "doc.2:a_b"],
+            "context_skill_ids": ["skill.a"],
+        })))
+        .expect("well-formed ids are carried");
+        assert_eq!(carried.context_document_ids, vec!["doc-1", "doc.2:a_b"]);
+        assert_eq!(carried.context_skill_ids, vec!["skill.a"]);
+    }
+
+    #[test]
+    fn a_malformed_attached_list_refuses_the_descriptor_and_never_reads_as_none() {
+        for bad in [
+            json!({"context_document_ids": "doc-1"}),
+            json!({"context_document_ids": ["doc 1"]}),
+            json!({"context_skill_ids": ["skill.a", 3]}),
+            json!({"context_document_ids": [""]}),
+        ] {
+            assert!(
+                approved_authority(&descriptor(bad.clone())).is_none(),
+                "{bad}"
+            );
+        }
+    }
 }
 
 /// The wire answer to a consume. A spend-only consume (`omit_call`) carries the
@@ -2870,6 +2929,37 @@ fn require_persistent_run_for_question(
 /// able to dress its own question as a named server's.
 const QUESTION_ORIGIN_SERVICE: &str = "service:execution-core";
 
+/// Whether the caller may name a server's question: execution-core, holding the narrow service-origin
+/// scope (EP-4 S7, DEC-F08-05). `require_service_scope` also demands a service identity, so a person
+/// holding the scope is refused like every other caller.
+fn may_name_a_server(caller: &VerifiedIdentity) -> bool {
+    caller.is_service()
+        && caller.principal_id() == QUESTION_ORIGIN_SERVICE
+        && caller
+            .require_service_scope(QUESTION_SERVICE_ORIGIN_SCOPE)
+            .is_ok()
+}
+
+/// Whether a create request names an MCP server as its origin. That origin, and only that one, is
+/// authorized by [`may_name_a_server`] instead of `orchestration:write`; the model's origin and every
+/// other value keep the `orchestration:write` gate exactly as before.
+fn names_mcp_server(origin: &str) -> bool {
+    origin == user_question::ORIGIN_MCP_ELICITATION
+}
+
+/// The zero-retention refusal `authorize_operation` gives every question write, which a server's question keeps.
+/// The narrow service-origin scope replaces `orchestration:write` for that origin, never this refusal: a ZDR
+/// service is refused here before the origin gate and any lookup.
+#[allow(clippy::result_large_err)]
+fn refuse_zdr_server_question(caller: &VerifiedIdentity) -> Result<(), Status> {
+    if caller.zdr() {
+        return Err(
+            Refusal::DURABLE_MUTATION_FORBIDDEN.grpc_status(tonic::Code::FailedPrecondition)
+        );
+    }
+    Ok(())
+}
+
 /// Check a create request's origin and who sent it, and return the origin token to store. Pure:
 /// it runs before any lookup. An empty origin is the model's, which any caller may state.
 #[allow(clippy::result_large_err)]
@@ -2879,9 +2969,7 @@ fn question_origin(
 ) -> Result<&'static str, Status> {
     let origin = user_question::validate_origin(&req.origin, &req.origin_label)
         .map_err(|problem| invalid_question(&problem))?;
-    if origin != user_question::ORIGIN_MODEL
-        && !(caller.is_service() && caller.principal_id() == QUESTION_ORIGIN_SERVICE)
-    {
+    if origin != user_question::ORIGIN_MODEL && !may_name_a_server(caller) {
         return Err(Status::permission_denied("question_origin_not_allowed"));
     }
     Ok(origin)
@@ -3128,11 +3216,26 @@ fn prepare_question(req: &proto::CreateRunQuestionRequest) -> Result<PreparedQue
     })
 }
 
+/// The most characters an answer's summary may carry, the same bound the model gateway and the BFF check (O-15). It
+/// is this route's own bound, not the bound of a normal send (the model gateway holds a send to 100 KiB of UTF-8,
+/// `normalize.rs` `MAX_CONTENT_BYTES`). A linked answer stores the summary as the message it names.
+pub(crate) const ANSWER_SUMMARY_MAX_CHARS: usize = 32_000;
+
 /// An answer checked against its question and shaped for the store.
 #[derive(Debug)]
 struct PreparedAnswer {
     answers: JsonValue,
     digest: String,
+    /// The message that carries the answer, when the answer names one (O-15). Never for a skip.
+    link: Option<AnswerLink>,
+}
+
+/// The message an answer names and the text it is stored as (O-15). The message is appended under `message_id`
+/// in the same transaction as the answer, so the answer's link and its message exist together or not at all.
+#[derive(Debug, PartialEq, Eq)]
+struct AnswerLink {
+    message_id: String,
+    summary: String,
 }
 
 /// Check an answer request against the stored question's items. Pure.
@@ -3141,12 +3244,6 @@ fn prepare_answer(
     row: &store::RunQuestionRow,
     req: &proto::AnswerRunQuestionRequest,
 ) -> Result<PreparedAnswer, Status> {
-    if req.answered_message_id.len() > 256 {
-        return Err(invalid_answer(&user_question::Problem {
-            field: "answered_message_id".to_owned(),
-            reason: "text_too_long",
-        }));
-    }
     let items: Vec<user_question::Item> = serde_json::from_value(row.spec.clone())
         .map_err(|_| Status::internal("stored question is malformed"))?;
     let answers = question_answers_from_proto(&req.answers);
@@ -3156,7 +3253,155 @@ fn prepare_answer(
         digest: user_question::answers_digest(&answers, req.skip),
         answers: serde_json::to_value(&answers)
             .map_err(|_| Status::internal("answer is not JSON"))?,
+        link: answer_link_of(req)?,
     })
+}
+
+/// The link an answer names, checked (O-15). A skip names no message and carries no summary. An answer names a
+/// message only together with its summary: the id must have the shape of a client message id, and the summary must
+/// be non-empty and within [`ANSWER_SUMMARY_MAX_CHARS`]. An answer that names neither has no link. Pure.
+#[allow(clippy::result_large_err)]
+fn answer_link_of(req: &proto::AnswerRunQuestionRequest) -> Result<Option<AnswerLink>, Status> {
+    let message_id = req.answered_message_id.as_str();
+    let summary = req.answer_summary.trim();
+    let problem = |field: &str, reason: &'static str| {
+        invalid_answer(&user_question::Problem {
+            field: field.to_owned(),
+            reason,
+        })
+    };
+    if req.skip {
+        return if message_id.is_empty() && summary.is_empty() {
+            Ok(None)
+        } else {
+            Err(problem("answered_message_id", "skip_names_no_message"))
+        };
+    }
+    if message_id.is_empty() {
+        return if summary.is_empty() {
+            Ok(None)
+        } else {
+            Err(problem("answer_summary", "without_message"))
+        };
+    }
+    if !crate::grpc::valid_client_message_id(message_id) {
+        return Err(problem("answered_message_id", "not_a_message_id"));
+    }
+    if summary.is_empty() {
+        return Err(problem("answer_summary", "empty"));
+    }
+    if summary.chars().count() > ANSWER_SUMMARY_MAX_CHARS {
+        return Err(problem("answer_summary", "text_too_long"));
+    }
+    Ok(Some(AnswerLink {
+        message_id: message_id.to_owned(),
+        summary: summary.to_owned(),
+    }))
+}
+
+/// Records the answer and appends the message that carries it, in one transaction (O-15). The thread the
+/// question was asked in must be the caller's, and the id must not name a message of another thread. An answer
+/// on a Space thread is recorded without its link: the message there needs a signed Space decision this route
+/// does not carry, so that answer names no message. An answer on a conversation-only thread is recorded without
+/// its link too: every user message there must carry the conversation source scope, which the answer's message
+/// does not, so the send that follows stores the message with its scope. Returns the outcome and the memory the
+/// message extracted, which the caller mirrors once this transaction has committed.
+#[allow(clippy::result_large_err)]
+async fn answer_with_message(
+    pool: &Pool,
+    stored: &store::RunQuestionRow,
+    req: &proto::AnswerRunQuestionRequest,
+    user_id: &str,
+    prepared: &PreparedAnswer,
+    link: &AnswerLink,
+) -> Result<
+    (
+        store::AnsweredRunQuestion,
+        Option<crate::grpc::AppendedMemory>,
+    ),
+    Status,
+> {
+    let storage = |error: anyhow::Error| Status::internal(error.to_string());
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+    // Another owner's thread, and one that does not exist, answer the same.
+    let thread = store::owned_thread_kind(&mut tx, &stored.thread_id, &req.org_id, user_id)
+        .await
+        .map_err(storage)?
+        .ok_or_else(|| Status::not_found("question_not_found"))?;
+    let linked = !thread.is_space && !thread.conversation_only;
+    if linked
+        && store::client_message_held_elsewhere(&mut tx, &link.message_id, &stored.thread_id)
+            .await
+            .map_err(storage)?
+    {
+        return Err(invalid_answer(&user_question::Problem {
+            field: "answered_message_id".to_owned(),
+            reason: "names_another_thread",
+        }));
+    }
+    let message_id = if linked { link.message_id.as_str() } else { "" };
+    let outcome = store::answer_run_question_in_tx(
+        &mut tx,
+        &req.question_id,
+        &req.org_id,
+        user_id,
+        &prepared.answers,
+        &prepared.digest,
+        req.skip,
+        message_id,
+    )
+    .await
+    .map_err(storage)?;
+    // The message is appended when this answer won the compare-and-set, or when a repeat of the same answer names
+    // the message the answer already holds: that append stores nothing again, and refuses a different text under
+    // the same id.
+    let carries_message = linked
+        && match &outcome {
+            store::AnsweredRunQuestion::Answered(_) => true,
+            store::AnsweredRunQuestion::Replay(row) => row.answered_message_id == link.message_id,
+            _ => false,
+        };
+    let memory = if carries_message {
+        append_answer_message(&mut tx, &stored.thread_id, user_id, link).await?
+    } else {
+        None
+    };
+    tx.commit()
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+    Ok((outcome, memory))
+}
+
+/// The user message that carries an answer, appended under the id the answer named, inside the answer's
+/// transaction (O-15). It is the ordinary append, so the message is stored as a send stores it. A different text
+/// under the same id is refused as an invalid answer, and that refusal drops the answer with it.
+#[allow(clippy::result_large_err)]
+async fn append_answer_message(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    thread_id: &str,
+    user_id: &str,
+    link: &AnswerLink,
+) -> Result<Option<crate::grpc::AppendedMemory>, Status> {
+    let request = proto::AppendMessageRequest {
+        thread_id: thread_id.to_owned(),
+        role: "user".to_owned(),
+        content: link.summary.clone(),
+        client_message_id: link.message_id.clone(),
+        ..Default::default()
+    };
+    match crate::grpc::append_message_in_tx(tx, &request, user_id).await {
+        Ok(appended) => Ok(appended.memory),
+        Err(status) if status.code() == tonic::Code::AlreadyExists => {
+            Err(invalid_answer(&user_question::Problem {
+                field: "answered_message_id".to_owned(),
+                reason: "names_a_different_message",
+            }))
+        }
+        Err(status) => Err(status),
+    }
 }
 
 fn question_asked_event(row: &store::RunQuestionRow) -> proto::OrchestrationEvent {
@@ -4623,8 +4868,15 @@ impl OrchestrationCoreService for OrchestrationGrpc {
         let result: Result<Response<proto::CreateRunQuestionResponse>, Status> = async {
             let caller = identity(&request)?;
             refuse_zdr_or_waived_question_caller(&caller)?;
-            authorize_operation(&caller, "orchestration:write")?;
             let req = request.into_inner();
+            // A server's question is authorized by its narrow scope in `question_origin` below (EP-4 S7), after
+            // the zero-retention refusal every question write takes. The model's question, and any other origin,
+            // keep the `orchestration:write` gate unchanged.
+            if names_mcp_server(&req.origin) {
+                refuse_zdr_server_question(&caller)?;
+            } else {
+                authorize_operation(&caller, "orchestration:write")?;
+            }
             if req.run_id.is_empty() {
                 return Err(Status::invalid_argument("run_id is required"));
             }
@@ -4759,18 +5011,35 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                     .ok_or_else(|| Status::not_found("question_not_found"))?;
             let prepared = prepare_answer(&stored, &req)?;
 
-            let outcome = store::answer_run_question(
+            let (outcome, memory) = match prepared.link.as_ref() {
+                None => (
+                    store::answer_run_question(
+                        &self.pool,
+                        &req.question_id,
+                        &req.org_id,
+                        user_id,
+                        &prepared.answers,
+                        &prepared.digest,
+                        req.skip,
+                        "",
+                    )
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?,
+                    None,
+                ),
+                Some(link) => {
+                    answer_with_message(&self.pool, &stored, &req, user_id, &prepared, link).await?
+                }
+            };
+            // The memory the linked message extracted is mirrored once its transaction has committed.
+            crate::grpc::sync_appended_memory(
                 &self.pool,
-                &req.question_id,
-                &req.org_id,
-                user_id,
-                &prepared.answers,
-                &prepared.digest,
-                req.skip,
-                &req.answered_message_id,
+                None,
+                crate::grpc::MemoryRetention::of(&caller),
+                &stored.thread_id,
+                memory,
             )
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .await;
             let row = match outcome {
                 store::AnsweredRunQuestion::Answered(row) => {
                     // Only the answer that won the compare-and-set is announced.
@@ -5170,6 +5439,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 rule_proposed: req.rule_proposed,
                 authz_audit: crate::audit_publisher::authz_decision_audit_enabled(),
                 step_up_verified: recorded_step_up_verified(new_status, req.step_up_verified),
+                run_events: crate::approval_events::enabled(),
             };
             let decision_write = match (member_space.as_deref(), edit.as_ref()) {
                 (None, Some((patch, base_fingerprint))) => {
@@ -5223,6 +5493,16 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             if updated {
                 metrics::counter!("mp_session_approval_decisions_total", "source" => source)
                     .increment(1);
+            }
+            // F-f10-34: the decision's run event, counted after its transaction committed.
+            match decision_write.run_event {
+                store::RunEventWrite::Enqueued => {
+                    metrics::counter!("mp_session_approval_events_enqueued_total").increment(1);
+                }
+                store::RunEventWrite::SkippedZdr => {
+                    metrics::counter!("mp_session_approval_events_skipped_zdr_total").increment(1);
+                }
+                store::RunEventWrite::NotRequested | store::RunEventWrite::Replayed => {}
             }
 
             let after = store::get_approval_for_org(
@@ -7845,6 +8125,84 @@ mod tests {
         );
     }
 
+    /// O-15: an answer names the message that carries it only together with its summary, and a skip names
+    /// neither. The id has the client-message-id shape, and the summary is non-empty and bounded.
+    #[test]
+    fn run_question_an_answer_links_its_message_only_with_a_checked_summary() {
+        let item = |options: &[&str]| proto::AnswerRunQuestionRequest {
+            question_id: "q_1".to_owned(),
+            org_id: "org_q".to_owned(),
+            answers: vec![proto::QuestionAnswerItem {
+                item_id: "scope".to_owned(),
+                option_ids: options.iter().map(|o| (*o).to_owned()).collect(),
+                text: String::new(),
+            }],
+            ..Default::default()
+        };
+        let with = |message: &str, summary: &str| proto::AnswerRunQuestionRequest {
+            answered_message_id: message.to_owned(),
+            answer_summary: summary.to_owned(),
+            ..item(&["a"])
+        };
+
+        // No id and no summary: an answer with no link, as it always was.
+        assert_eq!(answer_link_of(&item(&["a"])).expect("no link"), None);
+        // A linked answer keeps its id, and its summary trimmed.
+        assert_eq!(
+            answer_link_of(&with("msg-7", "  Svar: a  ")).expect("linked"),
+            Some(AnswerLink {
+                message_id: "msg-7".to_owned(),
+                summary: "Svar: a".to_owned(),
+            })
+        );
+        let message = |id: &str| answer_link_of(&with(id, "Svar")).expect_err("a refused id");
+        assert_eq!(
+            message("msg 7").message(),
+            "invalid_answer: answered_message_id: not_a_message_id"
+        );
+        assert_eq!(
+            message(&"a".repeat(129)).message(),
+            "invalid_answer: answered_message_id: not_a_message_id"
+        );
+        // A summary without its message, and a message without its summary, are both refused.
+        assert_eq!(
+            answer_link_of(&with("", "Svar"))
+                .expect_err("summary alone")
+                .message(),
+            "invalid_answer: answer_summary: without_message"
+        );
+        assert_eq!(
+            answer_link_of(&with("msg-7", "   "))
+                .expect_err("empty summary")
+                .message(),
+            "invalid_answer: answer_summary: empty"
+        );
+        let long = "a".repeat(ANSWER_SUMMARY_MAX_CHARS + 1);
+        assert_eq!(
+            answer_link_of(&with("msg-7", &long))
+                .expect_err("too long")
+                .message(),
+            "invalid_answer: answer_summary: text_too_long"
+        );
+        assert!(answer_link_of(&with("msg-7", &"a".repeat(ANSWER_SUMMARY_MAX_CHARS))).is_ok());
+
+        // A skip names no message and carries no summary.
+        let skip = |message: &str, summary: &str| proto::AnswerRunQuestionRequest {
+            skip: true,
+            ..with(message, summary)
+        };
+        assert_eq!(answer_link_of(&skip("", "")).expect("a plain skip"), None);
+        for (message, summary) in [("msg-7", ""), ("", "Svar"), ("msg-7", "Svar")] {
+            assert_eq!(
+                answer_link_of(&skip(message, summary))
+                    .expect_err("a skip names no message")
+                    .message(),
+                "invalid_answer: answered_message_id: skip_names_no_message",
+                "{message:?} {summary:?}"
+            );
+        }
+    }
+
     #[test]
     fn run_question_a_stored_question_reads_back_as_it_was_written() {
         let prepared = prepare_question(&create_question_request(vec![
@@ -8187,8 +8545,13 @@ mod tests {
     #[test]
     fn run_question_origin_is_checked_and_only_execution_core_may_name_a_server() {
         let user = VerifiedIdentity::user_for_test("org_q", "user_q");
-        let execution =
-            VerifiedIdentity::service_for_test_as("org_q", QUESTION_ORIGIN_SERVICE, &["orchestration:write"], false);
+        // EP-4 S7: execution-core names a server with the narrow service-origin scope, not orchestration:write.
+        let execution = VerifiedIdentity::service_for_test_as(
+            "org_q",
+            QUESTION_ORIGIN_SERVICE,
+            &[QUESTION_SERVICE_ORIGIN_SCOPE],
+            false,
+        );
         let with = |origin: &str, label: &str| {
             let mut req = create_question_request(vec![question_item("scope", "single")]);
             req.origin = origin.to_owned();
@@ -8214,6 +8577,132 @@ mod tests {
             assert_eq!(refused.code(), tonic::Code::InvalidArgument);
             assert_eq!(refused.message(), message);
         }
+        // The narrow scope is what names a server. Execution-core without it, a model-gateway holding it, and a
+        // person even holding it are each refused, and the model's origin still reads as the model's.
+        let write_only = VerifiedIdentity::service_for_test_as(
+            "org_q",
+            QUESTION_ORIGIN_SERVICE,
+            &["orchestration:write"],
+            false,
+        );
+        let gateway = VerifiedIdentity::service_for_test_as(
+            "org_q",
+            "service:model-gateway",
+            &[QUESTION_SERVICE_ORIGIN_SCOPE],
+            false,
+        );
+        let person = VerifiedIdentity::user_for_test_with_scopes(
+            "org_q",
+            "user_q",
+            &[QUESTION_SERVICE_ORIGIN_SCOPE],
+        );
+        for caller in [&write_only, &gateway, &person] {
+            let refused = question_origin(caller, &with("mcp_elicitation", "Fixture"))
+                .expect_err("a server origin needs execution-core and the narrow scope");
+            assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+            assert_eq!(refused.message(), "question_origin_not_allowed");
+        }
+        assert_eq!(
+            question_origin(&write_only, &with("model", "")).expect("model"),
+            "model"
+        );
+    }
+
+    // EP-4 S7 (DEC-F08-05): a server's question needs execution-core AND the narrow service-origin scope. The
+    // refusals below are decided before any lookup, so the unreachable pool answers the typed code, never Internal.
+    #[tokio::test]
+    async fn run_question_service_origin_scope_gates_a_server_origin_before_any_lookup() {
+        let (svc, _rx) = lazy_unreachable_service();
+        let narrow = QUESTION_SERVICE_ORIGIN_SCOPE;
+        let mut server = create_question_request(vec![question_item("scope", "single")]);
+        server.origin = "mcp_elicitation".to_owned();
+        server.origin_label = "Fixture".to_owned();
+        for (caller, why) in [
+            (
+                VerifiedIdentity::service_for_test_as(
+                    "org_q",
+                    QUESTION_ORIGIN_SERVICE,
+                    &["orchestration:write"],
+                    false,
+                ),
+                "execution-core with orchestration:write but not the narrow scope",
+            ),
+            (
+                VerifiedIdentity::service_for_test_as(
+                    "org_q",
+                    "service:model-gateway",
+                    &[narrow],
+                    false,
+                ),
+                "model-gateway with the narrow scope",
+            ),
+            (
+                VerifiedIdentity::user_for_test_with_scopes("org_q", "user_q", &[narrow]),
+                "a person with the narrow scope",
+            ),
+        ] {
+            let refused = svc
+                .create_run_question(with_caller(server.clone(), caller))
+                .await
+                .expect_err(why);
+            assert_eq!(refused.code(), tonic::Code::PermissionDenied, "{why}");
+            assert_eq!(refused.message(), "question_origin_not_allowed", "{why}");
+        }
+        // The narrow scope never authorizes a model question: that keeps the orchestration:write gate.
+        let narrow_only = VerifiedIdentity::service_for_test_as(
+            "org_q",
+            QUESTION_ORIGIN_SERVICE,
+            &[narrow],
+            false,
+        );
+        let refused = svc
+            .create_run_question(with_caller(
+                create_question_request(vec![question_item("scope", "single")]),
+                narrow_only,
+            ))
+            .await
+            .expect_err("a model question needs orchestration:write");
+        assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+        assert_eq!(refused.message(), "service scope required");
+        // A ZDR caller is refused by the ZDR gate, before the origin gate and any lookup. Execution-core holding
+        // the narrow scope under a ZDR credential gets the durable-mutation refusal, never a scope or origin answer.
+        let zdr = VerifiedIdentity::service_for_test_as(
+            "org_q",
+            QUESTION_ORIGIN_SERVICE,
+            &[narrow],
+            true,
+        );
+        let refused = svc
+            .create_run_question(with_caller(server.clone(), zdr))
+            .await
+            .expect_err("a ZDR server question is refused");
+        assert_ne!(
+            refused.code(),
+            tonic::Code::Internal,
+            "the create reached the database"
+        );
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            Refusal::from_status(&refused).expect("typed").code(),
+            mp_contracts::zdr_refusal::code::DURABLE_MUTATION_FORBIDDEN
+        );
+        // A waived caller is refused by the waiver gate, before the origin gate and any lookup.
+        let waived =
+            VerifiedIdentity::user_for_test_with_waiver("org_q", "user_q", "conn-1", "ack-1");
+        let refused = svc
+            .create_run_question(with_caller(server.clone(), waived))
+            .await
+            .expect_err("a waived server question is refused");
+        assert_ne!(
+            refused.code(),
+            tonic::Code::Internal,
+            "the create reached the database"
+        );
+        assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+        assert_eq!(
+            Refusal::from_status(&refused).expect("typed").code(),
+            mp_contracts::zdr_refusal::code::WAIVER_ROUTE_MISMATCH
+        );
     }
 
     #[test]
@@ -10871,6 +11360,599 @@ mod tests {
                 .await
                 .expect("a persistent owner decides a persistent run's plan");
             assert_eq!(db.status_of(&plan.id).await, "approved");
+            db.cleanup().await;
+        }
+
+        // EP-4 S7 (DEC-F08-05): execution-core, holding the narrow service-origin scope and not orchestration:write,
+        // asks an MCP server's question of a persistent run. The question is stored with its origin and label; the
+        // same origin from execution-core without the narrow scope is refused (question_origin_not_allowed) before
+        // any lookup or write.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires DATABASE_URL to a SCRATCH Postgres (name contains \"test\")"]
+        async fn execution_core_with_the_narrow_scope_asks_a_server_question() {
+            let db = PlanGateDb::connect().await;
+            let run = db.new_run(&db.thread).await;
+            let mut create = create_question_request(vec![question_item("scope", "single")]);
+            create.run_id = run;
+            create.org_id = db.org.clone();
+            create.origin = "mcp_elicitation".to_owned();
+            create.origin_label = "Fixture".to_owned();
+            let server = VerifiedIdentity::service_for_test_as(
+                &db.org,
+                QUESTION_ORIGIN_SERVICE,
+                &[QUESTION_SERVICE_ORIGIN_SCOPE],
+                false,
+            );
+            let question = db
+                .svc
+                .create_run_question(with_caller(create.clone(), server))
+                .await
+                .expect("execution-core asks a server question of a persistent run")
+                .into_inner()
+                .question
+                .expect("the stored question");
+            assert_eq!(
+                (question.origin.as_str(), question.origin_label.as_str()),
+                ("mcp_elicitation", "Fixture")
+            );
+            let write_only = VerifiedIdentity::service_for_test_as(
+                &db.org,
+                QUESTION_ORIGIN_SERVICE,
+                &["orchestration:write"],
+                false,
+            );
+            let refused = db
+                .svc
+                .create_run_question(with_caller(create, write_only))
+                .await
+                .expect_err("the narrow scope is required for a server origin");
+            assert_eq!(refused.message(), "question_origin_not_allowed");
+            db.cleanup().await;
+        }
+
+        // F-f07-01b: an answer stores the message id it names in the same row as the answer, and the row reads back as
+        // it was written. The gateway names a message only while send receipts store its id, so the id is an equality
+        // with a stored message, not a claim this store makes about the message.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires DATABASE_URL to a SCRATCH Postgres (name contains \"test\")"]
+        async fn an_answer_stores_the_message_that_carries_it_and_reads_back_as_written() {
+            let db = PlanGateDb::connect().await;
+            let run = db.new_run(&db.thread).await;
+            let owner = || VerifiedIdentity::user_for_test(&db.org, &db.user);
+            let mut create = create_question_request(vec![question_item("scope", "single")]);
+            create.run_id = run;
+            create.org_id = db.org.clone();
+            let question = db
+                .svc
+                .create_run_question(with_caller(create, owner()))
+                .await
+                .expect("the owner asks a question of a persistent run")
+                .into_inner()
+                .question
+                .expect("the stored question");
+            let answer = proto::AnswerRunQuestionRequest {
+                question_id: question.id.clone(),
+                org_id: db.org.clone(),
+                answers: vec![proto::QuestionAnswerItem {
+                    item_id: "scope".to_owned(),
+                    option_ids: vec!["a".to_owned()],
+                    text: String::new(),
+                }],
+                skip: false,
+                answered_message_id: "msg-link-1".to_owned(),
+                answer_summary: "Svar: a".to_owned(),
+            };
+            let answered = db
+                .svc
+                .answer_run_question(with_caller(answer, owner()))
+                .await
+                .expect("the owner answers, naming the message that carries the answer")
+                .into_inner()
+                .question
+                .expect("the answered question");
+            assert_eq!(answered.answered_message_id, "msg-link-1");
+            let stored = store::get_run_question(&db.pool, &question.id, &db.org, &db.user)
+                .await
+                .expect("the question reads back")
+                .expect("the stored row");
+            assert_eq!(
+                stored.answered_message_id, "msg-link-1",
+                "the link is kept in the answer's own row"
+            );
+            // O-15: the message is stored under the id in the question's thread, with the summary, in the same commit.
+            let (content, thread): (String, String) = sqlx::query_as(
+                "SELECT content, thread_id FROM messages WHERE client_message_id = $1",
+            )
+            .bind("msg-link-1")
+            .fetch_one(&db.pool)
+            .await
+            .expect("the answer's message is stored with the answer");
+            assert_eq!(
+                (content.as_str(), thread.as_str()),
+                ("Svar: a", db.thread.as_str())
+            );
+            db.cleanup().await;
+        }
+
+        /// Asks a persistent run's owner one question and returns the question's id.
+        async fn ask_owner(db: &PlanGateDb, run: &str) -> String {
+            let mut create = create_question_request(vec![question_item("scope", "single")]);
+            create.run_id = run.to_owned();
+            create.org_id = db.org.clone();
+            db.svc
+                .create_run_question(with_caller(
+                    create,
+                    VerifiedIdentity::user_for_test(&db.org, &db.user),
+                ))
+                .await
+                .expect("the owner asks a question of a persistent run")
+                .into_inner()
+                .question
+                .expect("the stored question")
+                .id
+        }
+
+        /// One answer to `question`, naming `message` with `summary` (empty for none), or a skip.
+        fn answer_to(
+            question: &str,
+            org: &str,
+            message: &str,
+            summary: &str,
+            skip: bool,
+        ) -> proto::AnswerRunQuestionRequest {
+            proto::AnswerRunQuestionRequest {
+                question_id: question.to_owned(),
+                org_id: org.to_owned(),
+                answers: if skip {
+                    Vec::new()
+                } else {
+                    vec![proto::QuestionAnswerItem {
+                        item_id: "scope".to_owned(),
+                        option_ids: vec!["a".to_owned()],
+                        text: String::new(),
+                    }]
+                },
+                skip,
+                answered_message_id: message.to_owned(),
+                answer_summary: summary.to_owned(),
+            }
+        }
+
+        /// O-15: a linked answer commits its message and its link together, and a repeat of the same answer and
+        /// message stores nothing again. A different text under the same id is refused, and the refusal leaves
+        /// the question open.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires DATABASE_URL to a SCRATCH Postgres (name contains \"test\")"]
+        async fn a_linked_answer_is_one_commit_and_its_repeat_stores_nothing_again() {
+            let db = PlanGateDb::connect().await;
+            let run = db.new_run(&db.thread).await;
+            let question = ask_owner(&db, &run).await;
+            let owner = || VerifiedIdentity::user_for_test(&db.org, &db.user);
+            let answer = || answer_to(&question, &db.org, "msg-repeat-1", "Svar: a", false);
+
+            db.svc
+                .answer_run_question(with_caller(answer(), owner()))
+                .await
+                .expect("the first answer links its message");
+            db.svc
+                .answer_run_question(with_caller(answer(), owner()))
+                .await
+                .expect("an identical repeat is accepted again");
+            let stored: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM messages WHERE thread_id = $1 AND client_message_id = $2",
+            )
+            .bind(&db.thread)
+            .bind("msg-repeat-1")
+            .fetch_one(&db.pool)
+            .await
+            .expect("the messages of the thread");
+            assert_eq!(stored, 1, "a repeat stores no second message");
+
+            let other_text = answer_to(&question, &db.org, "msg-repeat-1", "Svar: b", false);
+            let refused = db
+                .svc
+                .answer_run_question(with_caller(other_text, owner()))
+                .await
+                .expect_err("a different text under the same id is refused");
+            assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+            assert!(
+                refused.message().contains("names_a_different_message"),
+                "{refused}"
+            );
+            db.cleanup().await;
+        }
+
+        /// O-15: an id that names a message of another thread is refused, and the refusal leaves the question
+        /// open, so the person can answer again with a message of their own.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires DATABASE_URL to a SCRATCH Postgres (name contains \"test\")"]
+        async fn an_id_naming_another_threads_message_is_refused_and_the_question_stays_open() {
+            let db = PlanGateDb::connect().await;
+            let run = db.new_run(&db.thread).await;
+            let question = ask_owner(&db, &run).await;
+            let owner = || VerifiedIdentity::user_for_test(&db.org, &db.user);
+            let other = db.new_thread().await;
+            sqlx::query(
+                "INSERT INTO messages (id, thread_id, role, content, client_message_id)
+                 VALUES ($1, $2, 'user', 'elsewhere', 'msg-foreign-1')",
+            )
+            .bind(format!("msg-row-{}", lower_ulid()))
+            .bind(&other)
+            .execute(&db.pool)
+            .await
+            .expect("a message of another thread");
+
+            let refused = db
+                .svc
+                .answer_run_question(with_caller(
+                    answer_to(&question, &db.org, "msg-foreign-1", "Svar: a", false),
+                    owner(),
+                ))
+                .await
+                .expect_err("an id of another thread's message is refused");
+            assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+            assert!(
+                refused.message().contains("names_another_thread"),
+                "{refused}"
+            );
+            let open = store::get_run_question(&db.pool, &question, &db.org, &db.user)
+                .await
+                .expect("the question reads back")
+                .expect("the stored row");
+            assert_eq!(
+                open.state, "requested",
+                "the refused link leaves the question open"
+            );
+            assert_eq!(open.answered_message_id, "");
+
+            db.svc
+                .answer_run_question(with_caller(
+                    answer_to(&question, &db.org, "msg-own-1", "Svar: a", false),
+                    owner(),
+                ))
+                .await
+                .expect("the person answers with a message of their own");
+            db.cleanup().await;
+        }
+
+        /// O-15: a first linked answer whose id already holds other text in the thread is refused as a whole. The
+        /// compare-and-set that recorded the answer is in the same transaction as the append, so it rolls back with
+        /// the refused append: the question stays open and keeps no link, and a fresh id answers it.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires DATABASE_URL to a SCRATCH Postgres (name contains \"test\")"]
+        async fn a_first_linked_answer_whose_message_clashes_rolls_its_answer_back() {
+            let db = PlanGateDb::connect().await;
+            let run = db.new_run(&db.thread).await;
+            let question = ask_owner(&db, &run).await;
+            let owner = || VerifiedIdentity::user_for_test(&db.org, &db.user);
+            sqlx::query(
+                "INSERT INTO messages (id, thread_id, role, content, client_message_id)
+                 VALUES ($1, $2, 'user', 'Seeded before the answer', 'msg-clash-1')",
+            )
+            .bind(format!("msg-row-{}", lower_ulid()))
+            .bind(&db.thread)
+            .execute(&db.pool)
+            .await
+            .expect("a message of this thread under the id");
+
+            let refused = db
+                .svc
+                .answer_run_question(with_caller(
+                    answer_to(&question, &db.org, "msg-clash-1", "Svar: a", false),
+                    owner(),
+                ))
+                .await
+                .expect_err("a first answer whose id holds other text is refused");
+            assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+            assert!(
+                refused.message().contains("names_a_different_message"),
+                "{refused}"
+            );
+            let open = store::get_run_question(&db.pool, &question, &db.org, &db.user)
+                .await
+                .expect("the question reads back")
+                .expect("the stored row");
+            assert_eq!(
+                open.state, "requested",
+                "the refused answer leaves the question open"
+            );
+            assert_eq!(
+                open.answered_message_id, "",
+                "the refused answer keeps no link"
+            );
+            let contents: Vec<String> = sqlx::query_scalar(
+                "SELECT content FROM messages WHERE thread_id = $1 AND client_message_id = $2",
+            )
+            .bind(&db.thread)
+            .bind("msg-clash-1")
+            .fetch_all(&db.pool)
+            .await
+            .expect("the messages of the thread under the id");
+            assert_eq!(
+                contents,
+                vec!["Seeded before the answer"],
+                "the id still holds the seeded message only"
+            );
+
+            let answered = db
+                .svc
+                .answer_run_question(with_caller(
+                    answer_to(&question, &db.org, "msg-fresh-1", "Svar: a", false),
+                    owner(),
+                ))
+                .await
+                .expect("a fresh id answers the question")
+                .into_inner()
+                .question
+                .expect("the answered question");
+            assert_eq!(answered.answered_message_id, "msg-fresh-1");
+            db.cleanup().await;
+        }
+
+        /// O-15: a skip never names a message, and a skip that does is refused before anything is written.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires DATABASE_URL to a SCRATCH Postgres (name contains \"test\")"]
+        async fn a_skip_names_no_message_and_a_named_skip_is_refused() {
+            let db = PlanGateDb::connect().await;
+            let run = db.new_run(&db.thread).await;
+            let question = ask_owner(&db, &run).await;
+            let owner = || VerifiedIdentity::user_for_test(&db.org, &db.user);
+            let refused = db
+                .svc
+                .answer_run_question(with_caller(
+                    answer_to(&question, &db.org, "msg-skip-1", "", true),
+                    owner(),
+                ))
+                .await
+                .expect_err("a skip that names a message is refused");
+            assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+            let open = store::get_run_question(&db.pool, &question, &db.org, &db.user)
+                .await
+                .expect("the question reads back")
+                .expect("the stored row");
+            assert_eq!(open.state, "requested");
+
+            let skipped = db
+                .svc
+                .answer_run_question(with_caller(
+                    answer_to(&question, &db.org, "", "", true),
+                    owner(),
+                ))
+                .await
+                .expect("a plain skip")
+                .into_inner()
+                .question
+                .expect("the skipped question");
+            assert_eq!(skipped.state, proto::QuestionState::Skipped as i32);
+            let stored: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM messages WHERE thread_id = $1 AND client_message_id = $2",
+            )
+            .bind(&db.thread)
+            .bind("msg-skip-1")
+            .fetch_one(&db.pool)
+            .await
+            .expect("the messages of the thread");
+            assert_eq!(stored, 0, "a refused skip writes no message");
+            db.cleanup().await;
+        }
+
+        /// The summary send that follows an answer: a user turn under `message` with `summary`, the optional
+        /// gateway connection and metadata, appended as the send path appends it.
+        #[allow(clippy::result_large_err)]
+        async fn send_summary(
+            db: &PlanGateDb,
+            thread: &str,
+            message: &str,
+            summary: &str,
+            model_connection_id: &str,
+            metadata: &serde_json::Value,
+        ) -> Result<crate::grpc::AppendedMessage, Status> {
+            let request = proto::AppendMessageRequest {
+                thread_id: thread.to_owned(),
+                role: "user".to_owned(),
+                content: summary.to_owned(),
+                client_message_id: message.to_owned(),
+                model_connection_id: model_connection_id.to_owned(),
+                metadata: json_to_struct(metadata),
+                ..Default::default()
+            };
+            let mut tx = db.pool.begin().await.expect("begin");
+            let appended = crate::grpc::append_message_in_tx(&mut tx, &request, &db.user).await;
+            if appended.is_ok() {
+                tx.commit().await.expect("commit");
+            }
+            appended
+        }
+
+        /// O-15: on a conversation-only thread every user message must carry the conversation source scope, which
+        /// the answer route's message does not. The answer is recorded without its link and appends no message;
+        /// the summary send that follows stores the message with its scope.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires DATABASE_URL to a SCRATCH Postgres (name contains \"test\")"]
+        async fn a_conversation_only_linked_answer_is_answered_and_the_send_stores_it() {
+            let db = PlanGateDb::connect().await;
+            let thread = db.new_thread().await;
+            sqlx::query("UPDATE threads SET source_scope = 'conversation' WHERE id = $1")
+                .bind(&thread)
+                .execute(&db.pool)
+                .await
+                .expect("a conversation-only thread");
+            let run = db.new_run(&thread).await;
+            let question = ask_owner(&db, &run).await;
+            let owner = || VerifiedIdentity::user_for_test(&db.org, &db.user);
+
+            let answered = db
+                .svc
+                .answer_run_question(with_caller(
+                    answer_to(&question, &db.org, "msg-conv-1", "Svar: a", false),
+                    owner(),
+                ))
+                .await
+                .expect("a linked answer on a conversation-only thread is answered")
+                .into_inner()
+                .question
+                .expect("the answered question");
+            assert_eq!(answered.state, proto::QuestionState::Answered as i32);
+            assert_eq!(
+                answered.answered_message_id, "",
+                "the answer keeps no link on a conversation-only thread"
+            );
+            let held: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM messages WHERE thread_id = $1 AND client_message_id = $2",
+            )
+            .bind(&thread)
+            .bind("msg-conv-1")
+            .fetch_one(&db.pool)
+            .await
+            .expect("the messages of the thread");
+            assert_eq!(held, 0, "the answer appends no message");
+
+            let sent = send_summary(
+                &db,
+                &thread,
+                "msg-conv-1",
+                "Svar: a",
+                "",
+                &serde_json::json!({"source_scope": "conversation"}),
+            )
+            .await
+            .expect("the summary send stores the message");
+            assert!(!sent.deduplicated, "the send stores the message itself");
+            let (content, scope): (String, Option<String>) = sqlx::query_as(
+                "SELECT content, metadata->>'source_scope' FROM messages \
+                 WHERE thread_id = $1 AND client_message_id = $2",
+            )
+            .bind(&thread)
+            .bind("msg-conv-1")
+            .fetch_one(&db.pool)
+            .await
+            .expect("the sent message");
+            assert_eq!(
+                (content.as_str(), scope.as_deref()),
+                ("Svar: a", Some("conversation"))
+            );
+            db.cleanup().await;
+        }
+
+        /// O-15: the answer route stores only the id and the summary, so the send that repeats it fills the
+        /// connection the turn is sent on and the send's metadata (fill-only), and a regenerate reads the stored
+        /// connection back through `ListConversation`.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires DATABASE_URL to a SCRATCH Postgres (name contains \"test\")"]
+        async fn a_byo_send_repeating_a_linked_answer_keeps_its_connection_for_a_regenerate() {
+            use mp_contracts::model_plane::v1::session_core_server::SessionCore as _;
+            let db = PlanGateDb::connect().await;
+            let run = db.new_run(&db.thread).await;
+            let question = ask_owner(&db, &run).await;
+            let owner = || VerifiedIdentity::user_for_test(&db.org, &db.user);
+            db.svc
+                .answer_run_question(with_caller(
+                    answer_to(&question, &db.org, "msg-byo-1", "Svar: a", false),
+                    owner(),
+                ))
+                .await
+                .expect("the answer links its message");
+
+            let sent = send_summary(
+                &db,
+                &db.thread,
+                "msg-byo-1",
+                "Svar: a",
+                "conn_gw-fixture",
+                &serde_json::json!({"retrieval_scope": "web"}),
+            )
+            .await
+            .expect("the summary send dedupes onto the answer's message");
+            assert!(sent.deduplicated, "the send repeats the answer's message");
+            // A later repeat naming another connection never replaces the one stored.
+            send_summary(
+                &db,
+                &db.thread,
+                "msg-byo-1",
+                "Svar: a",
+                "conn_other",
+                &serde_json::json!({"retrieval_scope": "files"}),
+            )
+            .await
+            .expect("a second repeat");
+            let (model, subscription, scope): (Option<String>, Option<String>, Option<String>) =
+                sqlx::query_as(
+                    "SELECT model_connection_id, subscription_connection_id, \
+                            metadata->>'retrieval_scope' FROM messages \
+                     WHERE thread_id = $1 AND client_message_id = $2",
+                )
+                .bind(&db.thread)
+                .bind("msg-byo-1")
+                .fetch_one(&db.pool)
+                .await
+                .expect("the answer's message");
+            assert_eq!(model.as_deref(), Some("conn_gw-fixture"));
+            assert_eq!(subscription, None);
+            assert_eq!(
+                scope.as_deref(),
+                Some("web"),
+                "fill-only: the first send's key stays"
+            );
+
+            let mut read = Request::new(proto::ListConversationRequest {
+                org_id: db.org.clone(),
+                thread_id: db.thread.clone(),
+                ..Default::default()
+            });
+            read.extensions_mut().insert(owner());
+            let conversation = crate::grpc::SessionService::for_pool_test(db.pool.clone())
+                .list_conversation(read)
+                .await
+                .expect("the regenerate reads the thread")
+                .into_inner();
+            let turn = conversation
+                .messages
+                .iter()
+                .find(|message| message.content == "Svar: a")
+                .expect("the answer's turn");
+            assert_eq!(
+                turn.model_connection_id, "conn_gw-fixture",
+                "the regenerate replays the turn on the connection it was sent on"
+            );
+            db.cleanup().await;
+        }
+
+        /// O-15: only the message a linked answer appended is filled by a repeat. A repeat of an ordinary send
+        /// still writes nothing, whatever connection or metadata it carries.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires DATABASE_URL to a SCRATCH Postgres (name contains \"test\")"]
+        async fn a_repeat_of_an_ordinary_send_fills_nothing() {
+            let db = PlanGateDb::connect().await;
+            send_summary(
+                &db,
+                &db.thread,
+                "msg-plain-1",
+                "Hei",
+                "",
+                &serde_json::json!({}),
+            )
+            .await
+            .expect("an ordinary send");
+            send_summary(
+                &db,
+                &db.thread,
+                "msg-plain-1",
+                "Hei",
+                "conn_gw-fixture",
+                &serde_json::json!({"retrieval_scope": "web"}),
+            )
+            .await
+            .expect("its repeat");
+            let (plain_model, plain_scope): (Option<String>, Option<String>) = sqlx::query_as(
+                "SELECT model_connection_id, metadata->>'retrieval_scope' FROM messages \
+                 WHERE thread_id = $1 AND client_message_id = $2",
+            )
+            .bind(&db.thread)
+            .bind("msg-plain-1")
+            .fetch_one(&db.pool)
+            .await
+            .expect("the ordinary message");
+            assert_eq!((plain_model, plain_scope), (None, None));
             db.cleanup().await;
         }
     }

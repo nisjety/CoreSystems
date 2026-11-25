@@ -1,8 +1,11 @@
 package retention
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
+	"strings"
 	"testing"
 )
 
@@ -111,6 +114,40 @@ func (p flakyPublisher) PublishAudit(_ context.Context, _, eventID string, _ map
 		return errors.New("nats down")
 	}
 	return nil
+}
+
+func TestAReceiptReaderErrorLogsTheClosedWordAndNoIds(t *testing.T) {
+	var logs bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previous) })
+
+	store := &recordingStore{}
+	threads := &fixedThreads{err: errors.New("session-core unreachable for thr-private-7")}
+	if _, err := NewService(store, threads, nil).PlaceHold(context.Background(), "org-private-7", owner, PlaceHoldRequest{Scope: ScopeThread, ThreadID: "thr-private-7", HoldRef: "Matter 1"}); err != nil {
+		t.Fatalf("an unknown receipt places the hold: %v", err)
+	}
+	if store.placed == nil || store.placed.TargetRef != "thr-private-7" {
+		t.Fatalf("an unknown receipt must place the thread hold: placed=%+v", store.placed)
+	}
+	out := logs.String()
+	if !strings.Contains(out, "thread_receipt_unavailable") {
+		t.Fatalf("the reader error must log the closed word: %q", out)
+	}
+	for _, leaked := range []string{"org-private-7", "thr-private-7", "session-core unreachable"} {
+		if strings.Contains(out, leaked) {
+			t.Fatalf("the log must carry no ids and no reader error text: %q in %q", leaked, out)
+		}
+	}
+}
+
+func TestTheThreadReceiptSwitchIsTheLiteralTrue(t *testing.T) {
+	for value, want := range map[string]bool{"true": true, "": false, "false": false, "1": false, "TRUE": false, " true": false} {
+		got := ThreadReceiptCheckEnabled(func(string) string { return value })
+		if got != want {
+			t.Fatalf("%q: got %v want %v", value, got, want)
+		}
+	}
 }
 
 func TestFlushPublishesAndRecordsFailures(t *testing.T) {

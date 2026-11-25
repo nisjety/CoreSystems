@@ -1193,6 +1193,58 @@ func TestFreshControlSharedBrokerAllowsOnlyThePreprovisionedConvexProjection(t *
 	assertMainPermissionDenied(t, conversationGDPR, conversationPermissionErrors, "conversation JetStream administration", func() error {
 		return conversationGDPR.Publish("$JS.API.STREAM.CREATE.FORGED", []byte(`{"name":"FORGED"}`))
 	})
+
+	notificationPermissionErrors := make(chan error, 4)
+	notification, err := nats.Connect(instance.ClientURL(),
+		nats.UserInfo("notification-core-gdpr", password),
+		nats.CustomInboxPrefix("_INBOX.NOTIFICATION_CORE_GDPR"),
+		nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, permissionErr error) {
+			notificationPermissionErrors <- permissionErr
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(notification.Close)
+	notificationJS, err := notification.JetStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	notificationGDPRReceived := make(chan struct{}, 1)
+	notificationGDPRSubscription, err := notificationJS.QueueSubscribe(
+		provisioner.GDPRErasureRequestedSubject,
+		provisioner.NotificationCoreOrgErasureConsumerName,
+		func(message *nats.Msg) {
+			_ = message.Ack()
+			select {
+			case notificationGDPRReceived <- struct{}{}:
+			default:
+			}
+		},
+		nats.Bind(provisioner.ControlSharedStreamName, provisioner.NotificationCoreOrgErasureConsumerName),
+		nats.ManualAck(),
+	)
+	if err != nil {
+		t.Fatalf("bind scoped notification-core org-erasure consumer: %v", err)
+	}
+	t.Cleanup(func() { _ = notificationGDPRSubscription.Unsubscribe() })
+	if err := userProducer.Publish(provisioner.GDPRErasureRequestedSubject, []byte(`{"event_id":"gdpr:org-fanout:notification","subject_type":"organization","subject_id":"org-1","org_id":"org-1"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := userProducer.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-notificationGDPRReceived:
+	case <-time.After(2 * time.Second):
+		t.Fatal("scoped notification-core org-erasure consumer did not receive the durable erasure event")
+	}
+	assertMainPermissionDenied(t, notification, notificationPermissionErrors, "notification GDPR request forgery", func() error {
+		return notification.Publish(provisioner.GDPRErasureRequestedSubject, []byte(`{"forged":true}`))
+	})
+	assertMainPermissionDenied(t, notification, notificationPermissionErrors, "notification JetStream administration", func() error {
+		return notification.Publish("$JS.API.STREAM.CREATE.FORGED", []byte(`{"name":"FORGED"}`))
+	})
 }
 
 func TestFreshApplicationBrokerSupportsScopedActiveClients(t *testing.T) {
@@ -1854,7 +1906,7 @@ func TestLoadConfigRequiresExplicitMigrationSwitchForTokenFallback(t *testing.T)
 	if _, err := loadConfig(); err == nil {
 		t.Fatal("implicit token fallback was accepted")
 	}
-	t.Setenv("AUDIT_ALLOW_NATS_TOKEN_FALLBACK", "1")
+	t.Setenv("AUDIT_ALLOW_NATS_TOKEN_FALLBACK", "true")
 	cfg, err := loadConfig()
 	if err != nil {
 		t.Fatalf("explicit migration fallback rejected: %v", err)
@@ -1867,13 +1919,34 @@ func TestLoadConfigRequiresExplicitMigrationSwitchForTokenFallback(t *testing.T)
 func TestLoadConfigPrefersScopedUserPasswordOverMigrationToken(t *testing.T) {
 	setMinimumConfig(t)
 	t.Setenv("NATS_TOKEN", "abcdef0123456789abcdef0123456789")
-	t.Setenv("AUDIT_ALLOW_NATS_TOKEN_FALLBACK", "1")
+	t.Setenv("AUDIT_ALLOW_NATS_TOKEN_FALLBACK", "true")
 	cfg, err := loadConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.NATSUser != "audit-core-control" || cfg.NATSPassword == "" || cfg.NATSToken != "" {
 		t.Fatalf("scoped credentials were not preferred: %+v", cfg)
+	}
+}
+
+// Only the exact literal true lets the migration token fallback in. Every other value
+// leaves the scoped credential required, and the token alone never connects.
+func TestLoadConfigTokenFallbackReadsOnlyTheLiteralTrue(t *testing.T) {
+	for raw, want := range map[string]bool{
+		"true": true,
+		"":     false, "false": false, "0": false, "TRUE": false, "True": false, " true": false,
+		"1": false, "on": false, "yes": false, "enabled": false,
+	} {
+		setMinimumConfig(t)
+		clearChainEnv(t)
+		t.Setenv("NATS_USER", "")
+		t.Setenv("NATS_PASSWORD", "")
+		t.Setenv("NATS_TOKEN", "0123456789abcdef0123456789abcdef")
+		t.Setenv("AUDIT_ALLOW_NATS_TOKEN_FALLBACK", raw)
+		_, err := loadConfig()
+		if accepted := err == nil; accepted != want {
+			t.Errorf("AUDIT_ALLOW_NATS_TOKEN_FALLBACK=%q: accepted=%v (err %v), want %v", raw, accepted, err, want)
+		}
 	}
 }
 
@@ -1894,10 +1967,13 @@ func TestLoadConfigParsesStableCredentialedExtraBuses(t *testing.T) {
 
 func TestLoadConfigAuditChainSwitchIsStrictAndOffByDefault(t *testing.T) {
 	for raw, want := range map[string]bool{
-		"": false, "0": false, "true": false, "TRUE": false, "yes": false, "on": false,
-		" 1": false, "1 ": false, "01": false, "1": true,
+		"": false, "0": false, "false": false, "off": false, "no": false,
+		"true": true,
+		"TRUE": false, "True": false, " true": false, "true ": false,
+		"1": false, "on": false, "yes": false, "enabled": false, "01": false,
 	} {
 		setMinimumConfig(t)
+		clearChainEnv(t)
 		t.Setenv("AUDIT_CHAIN_ENABLED", raw)
 		cfg, err := loadConfig()
 		if err != nil {
@@ -1910,7 +1986,7 @@ func TestLoadConfigAuditChainSwitchIsStrictAndOffByDefault(t *testing.T) {
 }
 
 // The chain switch must ship off: the compose block (once it carries the
-// variable) and the example env both default it to 0.
+// variable) and the example env both default it to false.
 func TestAuditChainSwitchShipsOff(t *testing.T) {
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
@@ -1925,15 +2001,15 @@ func TestAuditChainSwitchShipsOff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(block, "AUDIT_CHAIN_ENABLED") && !strings.Contains(block, "${AUDIT_CHAIN_ENABLED:-0}") {
-		t.Fatal("audit-core compose must default AUDIT_CHAIN_ENABLED to 0")
+	if strings.Contains(block, "AUDIT_CHAIN_ENABLED") && !strings.Contains(block, "${AUDIT_CHAIN_ENABLED:-false}") {
+		t.Fatal("audit-core compose must default AUDIT_CHAIN_ENABLED to false")
 	}
 	example, err := os.ReadFile(filepath.Join(controlRoot, "audit-core", ".env.example"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !regexp.MustCompile(`(?m)^AUDIT_CHAIN_ENABLED=0\r?$`).Match(example) {
-		t.Fatal("audit-core/.env.example must set AUDIT_CHAIN_ENABLED=0")
+	if !regexp.MustCompile(`(?m)^AUDIT_CHAIN_ENABLED=false\r?$`).Match(example) {
+		t.Fatal("audit-core/.env.example must set AUDIT_CHAIN_ENABLED=false")
 	}
 }
 
@@ -1945,14 +2021,16 @@ func TestLoadConfigAuditChainPruneSwitchesAreStrictAndOffByDefault(t *testing.T)
 	}{
 		{"", "", store.PruneOff},
 		{"0", "0", store.PruneOff},
-		{"true", "", store.PruneOff},
-		{"TRUE", "true", store.PruneOff},
-		{" 1", "yes", store.PruneOff},
-		{"1", "", store.PruneOn},
-		{"1", "0", store.PruneOn},
-		{"", "1", store.PruneDryRun},
+		{"false", "false", store.PruneOff},
+		// Former spellings and other misreads read as off; the enable switch only warns.
+		{"TRUE", "", store.PruneOff},
+		{"1", "", store.PruneOff},
+		{"yes", "", store.PruneOff},
+		{"true", "", store.PruneOn},
+		{"true", "false", store.PruneOn},
+		{"", "true", store.PruneDryRun},
 		// The dry run wins, so setting it can never delete.
-		{"1", "1", store.PruneDryRun},
+		{"true", "true", store.PruneDryRun},
 	} {
 		setMinimumConfig(t)
 		clearChainEnv(t)
@@ -1966,6 +2044,78 @@ func TestLoadConfigAuditChainPruneSwitchesAreStrictAndOffByDefault(t *testing.T)
 		}
 		if cfg.PruneMode != tc.want {
 			t.Errorf("enabled=%q dryrun=%q: PruneMode=%v, want %v", tc.enabled, tc.dryRun, cfg.PruneMode, tc.want)
+		}
+	}
+}
+
+// Every audit-core reader takes only the literal true: the chain, the prune enable and
+// the prune dry run, each read through the one parser.
+func TestEveryAuditCoreReaderTakesOnlyTheLiteralTrue(t *testing.T) {
+	for raw, want := range map[string]bool{
+		"true": true,
+		"":     false, "false": false, "0": false, "TRUE": false, "True": false, " true": false,
+		"1": false, "on": false, "yes": false, "enabled": false,
+	} {
+		if got := parseStrictSwitch(raw); got != want {
+			t.Errorf("parseStrictSwitch(%q) = %v, want %v", raw, got, want)
+		}
+		if got := parseChainEnabled(raw); got != want {
+			t.Errorf("parseChainEnabled(%q) = %v, want %v", raw, got, want)
+		}
+		if got := parsePruneMode(raw, ""); (got == store.PruneOn) != want {
+			t.Errorf("parsePruneMode(%q, blank) = %v, want prune on %v", raw, got, want)
+		}
+		if got := parsePruneMode("", raw); (got == store.PruneDryRun) != want {
+			t.Errorf("parsePruneMode(blank, %q) = %v, want dry run %v", raw, got, want)
+		}
+	}
+}
+
+// A misread dry run refuses boot in every environment. Read as off, it would let the
+// purge delete, so the typed refusal is the guard here, not a warning.
+func TestAuditChainDryRunMisreadRefusesBootInEveryEnvironment(t *testing.T) {
+	_, priv := chainTestKey(t)
+	for _, environment := range []string{"", "development", "production"} {
+		for _, raw := range []string{"1", "TRUE", "yes", "on", "ture"} {
+			setMinimumConfig(t)
+			clearChainEnv(t)
+			t.Setenv("ENVIRONMENT", environment)
+			t.Setenv("AUDIT_CHAIN_KEY_ID", "k1")
+			t.Setenv("AUDIT_CHAIN_PRIVATE_KEY_BASE64", priv)
+			t.Setenv("AUDIT_CHAIN_PRUNE_ENABLED", "true")
+			t.Setenv("AUDIT_CHAIN_PRUNE_DRYRUN", raw)
+			if _, err := loadConfig(); err == nil || err.Error() != "AUDIT_CHAIN_PRUNE_DRYRUN must be true or false" {
+				t.Errorf("ENVIRONMENT=%q AUDIT_CHAIN_PRUNE_DRYRUN=%q: err=%v, want the typed refusal", environment, raw, err)
+			}
+		}
+	}
+}
+
+// A former spelling of an audit-core switch refuses production boot with a typed error
+// that names the switch. Read as off, it would switch the chain, the pruning, the verifier
+// or the token fallback off without a trace, so production stops before anything runs.
+// Development boots with the switch off and only a warning.
+func TestFormerSpellingRefusesProductionBootWithATypedError(t *testing.T) {
+	for _, name := range []string{
+		"AUDIT_ALLOW_NATS_TOKEN_FALLBACK", "AUDIT_CHAIN_ENABLED", "AUDIT_CHAIN_PRUNE_ENABLED", "AUDIT_CHAIN_VERIFY_ENABLED",
+	} {
+		for _, raw := range []string{"1", "on", "yes", "True", "TRUE"} {
+			setMinimumConfig(t)
+			clearChainEnv(t)
+			t.Setenv(name, raw)
+			t.Setenv("ENVIRONMENT", "production")
+			if _, err := loadConfig(); err == nil || err.Error() != name+" must be true or false" {
+				t.Errorf("%s=%q in production: err=%v, want the typed refusal", name, raw, err)
+			}
+			t.Setenv("ENVIRONMENT", "development")
+			cfg, err := loadConfig()
+			if err != nil {
+				t.Errorf("%s=%q in development: boot refused: %v", name, raw, err)
+				continue
+			}
+			if cfg.ChainEnabled || cfg.PruneMode != store.PruneOff {
+				t.Errorf("%s=%q in development: a former spelling turned a switch on: chain=%v prune=%v", name, raw, cfg.ChainEnabled, cfg.PruneMode)
+			}
 		}
 	}
 }
@@ -1994,45 +2144,45 @@ func TestLoadConfigChainKeyRules(t *testing.T) {
 		canSign bool
 	}{
 		"production chain without a key fails boot": {
-			env:     map[string]string{"AUDIT_CHAIN_ENABLED": "1", "ENVIRONMENT": "production"},
+			env:     map[string]string{"AUDIT_CHAIN_ENABLED": "true", "ENVIRONMENT": "production"},
 			wantErr: true,
 		},
 		"production chain with a key id only fails boot": {
-			env:     map[string]string{"AUDIT_CHAIN_ENABLED": "1", "ENVIRONMENT": "production", "AUDIT_CHAIN_KEY_ID": "k1"},
+			env:     map[string]string{"AUDIT_CHAIN_ENABLED": "true", "ENVIRONMENT": "production", "AUDIT_CHAIN_KEY_ID": "k1"},
 			wantErr: true,
 		},
 		"production chain with a base64url key boots": {
-			env:     map[string]string{"AUDIT_CHAIN_ENABLED": "1", "ENVIRONMENT": "production", "AUDIT_CHAIN_KEY_ID": "k1", "AUDIT_CHAIN_PRIVATE_KEY_BASE64": priv},
+			env:     map[string]string{"AUDIT_CHAIN_ENABLED": "true", "ENVIRONMENT": "production", "AUDIT_CHAIN_KEY_ID": "k1", "AUDIT_CHAIN_PRIVATE_KEY_BASE64": priv},
 			canSign: true,
 		},
 		"production chain with a standard base64 key boots": {
-			env:     map[string]string{"AUDIT_CHAIN_ENABLED": "1", "ENVIRONMENT": "production", "AUDIT_CHAIN_KEY_ID": "k1", "AUDIT_CHAIN_PRIVATE_KEY_BASE64": std},
+			env:     map[string]string{"AUDIT_CHAIN_ENABLED": "true", "ENVIRONMENT": "production", "AUDIT_CHAIN_KEY_ID": "k1", "AUDIT_CHAIN_PRIVATE_KEY_BASE64": std},
 			canSign: true,
 		},
 		"development chain without a key boots unsigned": {
-			env: map[string]string{"AUDIT_CHAIN_ENABLED": "1", "ENVIRONMENT": "development"},
+			env: map[string]string{"AUDIT_CHAIN_ENABLED": "true", "ENVIRONMENT": "development"},
 		},
 		"chain with an undecodable key fails boot": {
-			env:     map[string]string{"AUDIT_CHAIN_ENABLED": "1", "AUDIT_CHAIN_KEY_ID": "k1", "AUDIT_CHAIN_PRIVATE_KEY_BASE64": "%%%"},
+			env:     map[string]string{"AUDIT_CHAIN_ENABLED": "true", "AUDIT_CHAIN_KEY_ID": "k1", "AUDIT_CHAIN_PRIVATE_KEY_BASE64": "%%%"},
 			wantErr: true,
 		},
 		"chain with a public key that does not match fails boot": {
 			env: map[string]string{
-				"AUDIT_CHAIN_ENABLED": "1", "AUDIT_CHAIN_KEY_ID": "k1", "AUDIT_CHAIN_PRIVATE_KEY_BASE64": priv,
+				"AUDIT_CHAIN_ENABLED": "true", "AUDIT_CHAIN_KEY_ID": "k1", "AUDIT_CHAIN_PRIVATE_KEY_BASE64": priv,
 				"AUDIT_CHAIN_PUBLIC_KEY_BASE64": base64.RawURLEncoding.EncodeToString(make([]byte, 32)),
 			},
 			wantErr: true,
 		},
 		"pruning on without a key fails boot": {
-			env:     map[string]string{"AUDIT_CHAIN_PRUNE_ENABLED": "1"},
+			env:     map[string]string{"AUDIT_CHAIN_PRUNE_ENABLED": "true"},
 			wantErr: true,
 		},
 		"pruning on with a key boots": {
-			env:     map[string]string{"AUDIT_CHAIN_PRUNE_ENABLED": "1", "AUDIT_CHAIN_KEY_ID": "k1", "AUDIT_CHAIN_PRIVATE_KEY_BASE64": priv},
+			env:     map[string]string{"AUDIT_CHAIN_PRUNE_ENABLED": "true", "AUDIT_CHAIN_KEY_ID": "k1", "AUDIT_CHAIN_PRIVATE_KEY_BASE64": priv},
 			canSign: true,
 		},
 		"dry run without a key boots": {
-			env: map[string]string{"AUDIT_CHAIN_PRUNE_DRYRUN": "1"},
+			env: map[string]string{"AUDIT_CHAIN_PRUNE_DRYRUN": "true"},
 		},
 	} {
 		setMinimumConfig(t)
@@ -2094,15 +2244,15 @@ func TestAuditChainPruneSwitchesShipOffAndExampleCarriesNoKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"AUDIT_CHAIN_PRUNE_ENABLED", "AUDIT_CHAIN_PRUNE_DRYRUN"} {
-		if strings.Contains(block, name) && !strings.Contains(block, "${"+name+":-0}") {
-			t.Fatalf("audit-core compose must default %s to 0", name)
+		if strings.Contains(block, name) && !strings.Contains(block, "${"+name+":-false}") {
+			t.Fatalf("audit-core compose must default %s to false", name)
 		}
 	}
 	example, err := os.ReadFile(filepath.Join(controlRoot, "audit-core", ".env.example"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, line := range []string{"AUDIT_CHAIN_PRUNE_ENABLED=0", "AUDIT_CHAIN_PRUNE_DRYRUN=0"} {
+	for _, line := range []string{"AUDIT_CHAIN_PRUNE_ENABLED=false", "AUDIT_CHAIN_PRUNE_DRYRUN=false"} {
 		if !regexp.MustCompile(`(?m)^` + line + `\r?$`).Match(example) {
 			t.Fatalf("audit-core/.env.example must set %s", line)
 		}

@@ -121,10 +121,8 @@ func (a *ControlScheduledStepAuthorizer) AuthorizeScheduledStep(ctx context.Cont
 		"step_id": intent.StepID, "step_index": intent.StepIndex,
 		"policy_digest": intent.PolicyDigest, "idempotency_key": intent.IdempotencyKey,
 	}
-	if intent.hasContract() {
-		bodyIntent["contract_digest"] = intent.ContractDigest
-		bodyIntent["contract_expires_at"] = intent.ContractExpiresAt
-	}
+	// The decision call names no stored-consent contract: Control binds it only from the
+	// prepared Session Core step (F-f10-27). The intent keeps the contract for verify below.
 	body, err := json.Marshal(map[string]any{"intent": bodyIntent})
 	if err != nil {
 		return "", fmt.Errorf("encode scheduled-step intent: %w", err)

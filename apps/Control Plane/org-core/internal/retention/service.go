@@ -147,7 +147,9 @@ func (s *Service) PlaceHold(ctx context.Context, orgID string, actor Actor, req 
 		nothing, err := s.threads.NothingRetained(ctx, orgID, target)
 		switch {
 		case err != nil:
-			log.Printf("retention: thread retention unknown for org=%s, placing the hold: %v", orgID, err)
+			// Unknown is not empty: the hold is placed. The log carries the closed word only,
+			// never an id or the reader's error text, which can name either.
+			log.Print("retention: thread_receipt_unavailable, placing the thread hold")
 		case nothing:
 			return PlaceResult{}, ErrNothingRetained
 		}
@@ -194,6 +196,51 @@ func (s *Service) Check(ctx context.Context, orgID string, req CheckRequest) (Ch
 	}
 	result.OrganizationID = orgID
 	return result, nil
+}
+
+// The erasure operations a legal hold can refuse (F-f10-06, decision D-C1).
+const (
+	ErasureOpHardDelete = "hard_delete"
+	ErasureOpSoftDelete = "soft_delete"
+	ErasureOpPurge      = "purge"
+)
+
+// HoldCountUnknown is the count an erasure refusal records when the holds could not be
+// counted. The refusal itself is still recorded.
+const HoldCountUnknown = -1
+
+// ErasureRefusalStore is the store half of AuditRefusedErasure. *Repository satisfies it.
+// It is separate from Store so the in-memory test stores need not implement it.
+type ErasureRefusalStore interface {
+	EnqueueErasureRefusal(ctx context.Context, orgID string, actor Actor, details map[string]any) error
+}
+
+// ErrRefusalAuditUnavailable means the store cannot record an erasure refusal.
+var ErrRefusalAuditUnavailable = errors.New("erasure refusal audit is unavailable")
+
+// AuditRefusedErasure records one refused erasure of orgID in the retention audit outbox
+// (F-f10-06, decision D-C1): event org_retention_changed with details kind erasure_refused,
+// the operation and the number of active org and thread holds. Ids and counts only: no hold
+// reference, no free text. The caller's refusal never depends on this succeeding.
+func (s *Service) AuditRefusedErasure(ctx context.Context, orgID string, actor Actor, op string, orgHolds, threadHolds int) error {
+	if strings.TrimSpace(orgID) == "" || strings.TrimSpace(actor.ID) == "" || strings.TrimSpace(actor.Role) == "" {
+		return errors.New("an organization, actor id and role are required to audit an erasure refusal")
+	}
+	switch op {
+	case ErasureOpHardDelete, ErasureOpSoftDelete, ErasureOpPurge:
+	default:
+		return errors.New("unknown erasure operation")
+	}
+	if orgHolds < HoldCountUnknown || threadHolds < HoldCountUnknown {
+		return errors.New("hold counts must not be negative")
+	}
+	store, ok := s.store.(ErasureRefusalStore)
+	if !ok {
+		return ErrRefusalAuditUnavailable
+	}
+	return store.EnqueueErasureRefusal(ctx, orgID, actor, map[string]any{
+		"kind": "erasure_refused", "op": op, "org_holds": orgHolds, "thread_holds": threadHolds,
+	})
 }
 
 // FlushAuditOutbox publishes pending retention audit intents, the same loop the

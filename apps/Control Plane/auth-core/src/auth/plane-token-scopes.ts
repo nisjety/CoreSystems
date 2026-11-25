@@ -44,6 +44,19 @@ export type InteractiveScopeAudience =
   | 'sandbox-manager'
   | 'bridge-core';
 
+/**
+ * Is the org-admin marker on for capability-core? Read per call from the environment so an
+ * operator flip needs no rebuild (flag `PLANE_TOKEN_CAPABILITY_ADMIN_SCOPE`, strict literal
+ * `true`, default off). With it on, owners and admins also carry `capability:admin`, which
+ * capability-core's verifiedIsAdmin reads as the admin marker for org-scope writes. Members and
+ * viewers never get it: it only adds a marker for a role that already holds `capability:write`.
+ */
+export function capabilityAdminScopeEnabled(
+  environment: Record<string, string | undefined> = process.env,
+): boolean {
+  return environment.PLANE_TOKEN_CAPABILITY_ADMIN_SCOPE === 'true';
+}
+
 export function planeScopesForRole(
   role: string | null | undefined,
   audience: InteractiveScopeAudience = 'data-plane',
@@ -55,9 +68,12 @@ export function planeScopesForRole(
     return isCompliance ? [] : ['inference:invoke'];
   }
   if (audience === 'capability-core') {
-    return normalizedRole === 'owner' || normalizedRole === 'admin'
-      ? ['capability:read', 'capability:write']
-      : ['capability:read'];
+    if (normalizedRole === 'owner' || normalizedRole === 'admin') {
+      return capabilityAdminScopeEnabled()
+        ? ['capability:read', 'capability:write', 'capability:admin']
+        : ['capability:read', 'capability:write'];
+    }
+    return ['capability:read'];
   }
   if (audience === 'cost-core') {
     return normalizedRole === 'owner' || normalizedRole === 'admin'

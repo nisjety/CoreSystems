@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  capabilityAdminScopeEnabled,
   modelGatewayScopesForRole,
   planeScopesForRole,
 } from './plane-token-scopes';
@@ -86,6 +87,68 @@ describe('plane user scope contract', () => {
     },
   );
 
+  describe('capability:admin marker (PLANE_TOKEN_CAPABILITY_ADMIN_SCOPE)', () => {
+    const original = process.env.PLANE_TOKEN_CAPABILITY_ADMIN_SCOPE;
+    afterEach(() => {
+      if (original === undefined) {
+        delete process.env.PLANE_TOKEN_CAPABILITY_ADMIN_SCOPE;
+      } else {
+        process.env.PLANE_TOKEN_CAPABILITY_ADMIN_SCOPE = original;
+      }
+    });
+
+    it('keeps the two capability scopes for owners and admins while the switch is off', () => {
+      delete process.env.PLANE_TOKEN_CAPABILITY_ADMIN_SCOPE;
+      for (const role of ['admin', 'owner', ' ADMIN ']) {
+        expect(planeScopesForRole(role, 'capability-core')).toEqual([
+          'capability:read',
+          'capability:write',
+        ]);
+      }
+    });
+
+    it('adds capability:admin for owners and admins only while the switch is on', () => {
+      process.env.PLANE_TOKEN_CAPABILITY_ADMIN_SCOPE = 'true';
+      for (const role of ['admin', 'owner', ' ADMIN ']) {
+        expect(planeScopesForRole(role, 'capability-core')).toEqual([
+          'capability:read',
+          'capability:write',
+          'capability:admin',
+        ]);
+      }
+    });
+
+    it('never adds capability:admin to a member, a viewer or a null role, even with the switch on', () => {
+      process.env.PLANE_TOKEN_CAPABILITY_ADMIN_SCOPE = 'true';
+      for (const role of ['member', 'viewer', null]) {
+        expect(planeScopesForRole(role, 'capability-core')).toEqual([
+          'capability:read',
+        ]);
+      }
+    });
+
+    it.each(['1', 'TRUE', ' true', 'yes', ''])(
+      'treats the value %p as off: only the strict literal true turns the marker on',
+      (value) => {
+        process.env.PLANE_TOKEN_CAPABILITY_ADMIN_SCOPE = value;
+        expect(planeScopesForRole('owner', 'capability-core')).toEqual([
+          'capability:read',
+          'capability:write',
+        ]);
+        expect(capabilityAdminScopeEnabled()).toBe(false);
+      },
+    );
+
+    it('reads the switch at call time from the environment it is given', () => {
+      expect(
+        capabilityAdminScopeEnabled({
+          PLANE_TOKEN_CAPABILITY_ADMIN_SCOPE: 'true',
+        }),
+      ).toBe(true);
+      expect(capabilityAdminScopeEnabled({})).toBe(false);
+    });
+  });
+
   it('keeps model-gateway privilege separate and role-derived', () => {
     expect(modelGatewayScopesForRole('member')).toEqual([]);
     expect(modelGatewayScopesForRole('admin')).toEqual(['admin']);
@@ -140,6 +203,37 @@ describe('plane user scope contract', () => {
     },
   );
 
+  // EP-4 S7 (DEC-F08-05): the one narrow scope that lets execution-core name an MCP server's question. Held by
+  // execution-core alone, on the session-core audience alone; it is never orchestration:write.
+  (existsSync(principalsPath) ? it : it.skip)(
+    'grants orchestration:question:service-origin to execution-core for session-core only',
+    () => {
+      const registry = JSON.parse(
+        readFileSync(principalsPath, 'utf8'),
+      ) as Record<
+        string,
+        { scopes: string[]; scopesByAudience: Record<string, string[]> }
+      >;
+      const scope = 'orchestration:question:service-origin';
+      expect(registry['execution-core'].scopes).toContain(scope);
+      expect(
+        registry['execution-core'].scopesByAudience['session-core'],
+      ).toContain(scope);
+      for (const [principal, entry] of Object.entries(registry)) {
+        const holders = Object.entries(entry.scopesByAudience ?? {})
+          .filter(([, scopes]) => scopes.includes(scope))
+          .map(([audience]) => audience);
+        expect({ principal, holders }).toEqual({
+          principal,
+          holders: principal === 'execution-core' ? ['session-core'] : [],
+        });
+      }
+      expect(registry['execution-core'].scopes).not.toContain(
+        'orchestration:write',
+      );
+    },
+  );
+
   // Scopes that exist for ONE service principal each (Control Plane principal
   // bundle, plan W0-4; config/plane-service-principals.json holds each in one
   // row): the web rerank of quarry-edge, the usage forwarder of data-orchestrator
@@ -153,6 +247,7 @@ describe('plane user scope contract', () => {
       'cost:write',
       'retention:zdr-decide',
       'session:memory-controls:read',
+      'orchestration:question:service-origin',
     ];
     const audiences = [
       'data-plane',

@@ -2,6 +2,7 @@ package retention
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -359,7 +360,37 @@ func auditPayload(eventID, orgID string, actor Actor, subject, resourceID string
 }
 
 func enqueueAudit(ctx context.Context, tx pgx.Tx, eventID, orgID string, actor Actor, subject, resourceID string, details map[string]any) error {
-	body, err := json.Marshal(auditPayload(eventID, orgID, actor, subject, resourceID, details, time.Now()))
+	return insertAuditPayload(ctx, tx, eventID, orgID, auditPayload(eventID, orgID, actor, subject, resourceID, details, time.Now()))
+}
+
+// erasureRefusalPayload is auditPayload for a refused erasure (F-f10-06): the outcome is
+// "denied" and the details are the caller's kind, operation and hold counts.
+func erasureRefusalPayload(eventID, orgID string, actor Actor, details map[string]any, occurredAt time.Time) map[string]any {
+	payload := auditPayload(eventID, orgID, actor, "erasure:"+orgID, orgID, details, occurredAt)
+	payload["outcome"] = "denied"
+	return payload
+}
+
+// EnqueueErasureRefusal records one refused erasure in the retention audit outbox, in the
+// organisation's scope. Every refusal is its own event, so the id carries a random part.
+// Like every row of this outbox it has no foreign key, so the audit trail outlives a later
+// purge of the organisation; it holds ids and counts only.
+func (r *Repository) EnqueueErasureRefusal(ctx context.Context, orgID string, actor Actor, details map[string]any) error {
+	if err := r.ready(); err != nil {
+		return err
+	}
+	var raw [8]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return fmt.Errorf("generate erasure refusal event id: %w", err)
+	}
+	eventID := "retention:org-core:erasure_refused:" + orgDigest(orgID) + ":" + hex.EncodeToString(raw[:])
+	return r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
+		return insertAuditPayload(ctx, tx, eventID, orgID, erasureRefusalPayload(eventID, orgID, actor, details, time.Now()))
+	})
+}
+
+func insertAuditPayload(ctx context.Context, tx pgx.Tx, eventID, orgID string, payload map[string]any) error {
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("encode retention audit payload: %w", err)
 	}

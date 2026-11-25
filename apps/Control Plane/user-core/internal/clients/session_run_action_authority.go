@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/spaces"
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
@@ -160,12 +161,28 @@ func scheduledStepAuthorityFromResponse(response *mpv1.ResolveScheduledStepAutho
 	if response == nil || !response.GetResolved() {
 		return spaces.ScheduledStepAuthority{}, fmt.Errorf("the requested scheduled step authority was not resolved by Session Core")
 	}
+	// The stored-consent contract of the step is Control-signed data held by Session
+	// Core (F-f10-27). Both fields are set for a step under a contract and both empty
+	// for a legacy one; one without the other is a refused response.
+	contractDigest, contractExpiresRaw := response.GetContractDigest(), response.GetContractExpiresAt()
+	if (contractDigest == "") != (contractExpiresRaw == "") {
+		return spaces.ScheduledStepAuthority{}, fmt.Errorf("the Session Core scheduled step contract binding is incomplete")
+	}
+	var contractExpiresAt time.Time
+	if contractExpiresRaw != "" {
+		expiresAt, err := time.Parse(time.RFC3339, contractExpiresRaw)
+		if err != nil {
+			return spaces.ScheduledStepAuthority{}, fmt.Errorf("the Session Core scheduled step contract expiry is invalid: %w", err)
+		}
+		contractExpiresAt = expiresAt.UTC()
+	}
 	authority := spaces.ScheduledStepAuthority{
 		RunID: response.GetRunId(), ThreadID: response.GetThreadId(), OrgID: response.GetOrgId(),
 		SubjectID: response.GetSubjectId(), SpaceRef: response.GetSpaceId(), ScheduleID: response.GetScheduleId(),
 		FireKey: response.GetFireKey(), TemplateDigest: response.GetTemplateDigest(),
 		PolicyDigest: response.GetPolicyDigest(), StepID: response.GetStepId(), StepIndex: response.GetStepIndex(),
 		IdempotencyKey: response.GetIdempotencyKey(), RunStatus: response.GetRunStatus(),
+		ContractDigest: contractDigest, ContractExpiresAt: contractExpiresAt,
 	}
 	if err := authority.Validate(); err != nil {
 		return spaces.ScheduledStepAuthority{}, err

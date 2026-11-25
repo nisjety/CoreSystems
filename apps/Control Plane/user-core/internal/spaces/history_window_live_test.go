@@ -2,6 +2,8 @@ package spaces
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -104,6 +106,71 @@ func TestHistoryFloorIsAbsentWhenFlagOffOrModeFullLive(t *testing.T) {
 	}
 	if decision.HistoryFloorRevision != 0 {
 		t.Fatalf("decision floor = %d", decision.HistoryFloorRevision)
+	}
+}
+
+// R-sws-07 live leg: the shared revise resolver binds the same history floor as the thread-read resolver.
+// The editor is absent from revision 2 and back at revision 3, so the floor is 3 for the editor and none
+// for the owner, who sat in every snapshot. The room's history_mode and the switch decide the rest.
+func TestHistoryFloorOnReviseDecisionLive(t *testing.T) {
+	f := newRoomLiveFixture(t)
+	ctx := context.Background()
+	s := f.lifecycleRoom(t, "histrev")
+	f.repo.SetHistoryWindowClaim(true)
+	f.exec(t, `UPDATE registered_spaces SET history_mode='since_join' WHERE space_ref=$1`, s.ref)
+	f.publishAudience(t, s.ref, 2, s.owner, s.manager, s.viewer)
+	f.publishAudience(t, s.ref, 3, s.owner, s.manager, s.viewer, s.editor)
+
+	reviseDecision := func(subject string) (PersonalThreadDecisionEvidence, Decision) {
+		t.Helper()
+		evidence, err := f.repo.ResolveSharedThreadReviseDecisionEvidence(ctx, s.ref, f.org, subject)
+		if err != nil {
+			t.Fatalf("resolve revise evidence for %s: %v", subject, err)
+		}
+		decision, err := IssueThreadReviseDecision(evidence, validReviseRequest(), time.Now().UTC())
+		if err != nil {
+			t.Fatalf("issue revise decision for %s: %v", subject, err)
+		}
+		return evidence, decision
+	}
+
+	// The since_join editor carries the floor on the evidence and on the signed decision.
+	evidence, decision := reviseDecision(s.editor)
+	if evidence.HistoryFloorRevision != 3 || decision.HistoryFloorRevision != 3 {
+		t.Fatalf("editor added back at revision 3: evidence floor %d, decision floor %d", evidence.HistoryFloorRevision, decision.HistoryFloorRevision)
+	}
+	raw, err := json.Marshal(decision)
+	if err != nil {
+		t.Fatalf("marshal revise decision: %v", err)
+	}
+	if !strings.Contains(string(raw), `"history_floor_revision":3`) {
+		t.Fatalf("the revise decision must sign the floor: %s", raw)
+	}
+
+	// The owner was in every snapshot: no floor, and the claim is absent from the decision.
+	_, ownerDecision := reviseDecision(s.owner)
+	if ownerDecision.HistoryFloorRevision != 0 {
+		t.Fatalf("a member present in every snapshot has no revise floor, got %d", ownerDecision.HistoryFloorRevision)
+	}
+	raw, err = json.Marshal(ownerDecision)
+	if err != nil {
+		t.Fatalf("marshal owner revise decision: %v", err)
+	}
+	if strings.Contains(string(raw), "history_floor_revision") {
+		t.Fatalf("a revise decision without a floor must omit the claim: %s", raw)
+	}
+
+	// history_mode full: the editor's revise decision carries no floor.
+	f.exec(t, `UPDATE registered_spaces SET history_mode='full' WHERE space_ref=$1`, s.ref)
+	if _, full := reviseDecision(s.editor); full.HistoryFloorRevision != 0 {
+		t.Fatalf("history_mode full must emit no revise floor, got %d", full.HistoryFloorRevision)
+	}
+
+	// since_join with the switch off: no revise floor either.
+	f.exec(t, `UPDATE registered_spaces SET history_mode='since_join' WHERE space_ref=$1`, s.ref)
+	f.repo.SetHistoryWindowClaim(false)
+	if _, off := reviseDecision(s.editor); off.HistoryFloorRevision != 0 {
+		t.Fatalf("flag off must emit no revise floor, got %d", off.HistoryFloorRevision)
 	}
 }
 

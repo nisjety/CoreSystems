@@ -206,7 +206,38 @@ pub(crate) fn to_proto_timestamp(ts: DateTime<Utc>) -> prost_types::Timestamp {
 /// the revision fold under the ceiling and from the floor on, as the timeline reads them. A deleted turn
 /// reads empty, and a turn stamped after the ceiling is not read (V3e-sws-2-rel2).
 fn thread_list_page_sql() -> String {
+    thread_list_page_sql_with_forks(crate::thread_fork::thread_fork_enabled())
+}
+
+/// The page query, with or without the fork count (`ThreadSummary.fork_count`). With the fork switch off the
+/// count is not selected at all, so the statement is the one the page has always run, and `list_threads`
+/// reads the count as 0. With it on, the count is a correlated subquery in the final select, so it runs for
+/// the rows the page holds and not for every candidate row before the page's `LIMIT`.
+fn thread_list_page_sql_with_forks(fork_counts: bool) -> String {
     let thread_gate = crate::space::audience_window::floor_gate_message_sql("em", "$6", "$13");
+    let fork_count = if fork_counts {
+        // The same gates the page puts on its own threads: the org; the owner for an owner read ($6 NULL); for an
+        // audience read, the ceiling and the page's message-level floor gate on the fork's own messages (the EXISTS
+        // the page holds for a thread, here for the fork). A fork keeps its source's owner, so an owner read counts
+        // the reader's own forks. The listing's Space filter ($4) is applied too, so a Space read counts only forks
+        // in that Space (a fork is never in a Space today, so that count is 0, and it fails closed if that changes).
+        // The count never counts a fork the reader could not list with the same owner, audience and Space scope.
+        let fork_gate = crate::space::audience_window::floor_gate_message_sql("fm", "$6", "$13");
+        format!(
+            "(SELECT count(*)::int FROM threads f
+                              WHERE f.org_id = $1 AND f.forked_from_thread_id = page.id
+                                AND (NULLIF($4, '') IS NULL OR f.space_id = $4)
+                                AND ($6::BIGINT IS NULL
+                                     OR f.recipient_audience_revision IS NULL
+                                     OR f.recipient_audience_revision <= $6::BIGINT)
+                                AND ($6::BIGINT IS NULL
+                                     OR EXISTS (SELECT 1 FROM messages fm WHERE fm.thread_id = f.id AND {fork_gate}))
+                                AND ($6::BIGINT IS NOT NULL OR f.user_id = $2)) AS fork_count,
+                    "
+        )
+    } else {
+        String::new()
+    };
     format!(
         "WITH page AS (
                     SELECT t.id, t.session_key, t.created_at, t.presentation_title,
@@ -262,7 +293,7 @@ fn thread_list_page_sql() -> String {
                     page.last_read_at,
                     page.forked_from_thread_id,
                     page.memory_mode,
-                    jsonb_build_object('reply_count', reply_stats.reply_count,
+                    {fork_count}jsonb_build_object('reply_count', reply_stats.reply_count,
                                        'last_author', reply_stats.last_author) AS reply_stats
                  FROM page
                  LEFT JOIN LATERAL (
@@ -332,6 +363,7 @@ fn thread_list_page_sql() -> String {
         fold_content = crate::space::revisions::FOLD_CONTENT_SQL,
         fold_join = crate::space::revisions::fold_join_sql("$6::BIGINT"),
         run_phase = crate::run_phase::run_phase_sql!("r"),
+        fork_count = fork_count,
     )
 }
 
@@ -357,6 +389,57 @@ mod thread_list_page_sql_tests {
         assert!(
             sql.contains("AS status, r.updated_at"),
             "the latest run keeps its phase"
+        );
+    }
+
+    /// `ThreadSummary.fork_count` is a correlated count under the page's own gates, in the final select, and it
+    /// is selected only while the fork switch is on. Off, the statement is the one the page always ran: no
+    /// count, and the reply stats follow the memory mode as before. Checked on the statement text, so no
+    /// database is needed.
+    #[test]
+    fn the_fork_count_is_a_gated_count_in_the_final_select_only_while_the_switch_is_on() {
+        let off = thread_list_page_sql_with_forks(false);
+        assert!(!off.contains("fork_count"), "off: no count is selected");
+        assert!(
+            off.contains("page.memory_mode,\n                    jsonb_build_object('reply_count'"),
+            "off: the final select reads as it did before the count"
+        );
+
+        let on = thread_list_page_sql_with_forks(true);
+        assert!(on.contains("(SELECT count(*)::int FROM threads f"));
+        assert!(on.contains("f.org_id = $1 AND f.forked_from_thread_id = page.id"));
+        assert!(
+            on.contains("(NULLIF($4, '') IS NULL OR f.space_id = $4)"),
+            "a Space read counts only forks in that Space"
+        );
+        assert!(
+            on.contains("f.recipient_audience_revision <= $6::BIGINT"),
+            "an audience read stops at the ceiling"
+        );
+        assert!(
+            on.contains("($6::BIGINT IS NOT NULL OR f.user_id = $2)"),
+            "an owner read counts only the reader's own forks"
+        );
+        let fork_gate = crate::space::audience_window::floor_gate_message_sql("fm", "$6", "$13");
+        assert!(
+            on.contains("OR EXISTS (SELECT 1 FROM messages fm WHERE fm.thread_id = f.id AND "),
+            "an audience read counts a fork only while it holds a message"
+        );
+        assert!(
+            on.contains(&fork_gate),
+            "that message is held to the page's floor gate, as the page holds its own threads"
+        );
+        assert!(on.contains(") AS fork_count,"));
+        assert!(
+            on.find("AS fork_count").unwrap() < on.find("AS reply_stats").unwrap(),
+            "the count sits in the final select, which runs for the page's rows only"
+        );
+        for n in 1..=14 {
+            assert!(on.contains(&format!("${n}")), "${n} is still bound");
+        }
+        assert!(
+            !on.contains("$15"),
+            "the count binds no fifteenth parameter"
         );
     }
 
@@ -1288,6 +1371,24 @@ pub struct SessionService {
     grant_columns: ThreadGrantColumns,
 }
 
+#[cfg(test)]
+impl SessionService {
+    /// A service on `pool` with no outbound client, for the DB tests of sibling modules that read back through
+    /// the session RPCs.
+    pub(crate) fn for_pool_test(pool: PgPool) -> Self {
+        Self {
+            pool,
+            retrieval_client: None,
+            graph_client: None,
+            knowledge_client: None,
+            letta_memory: None,
+            audit_publisher: None,
+            auth: None,
+            grant_columns: ThreadGrantColumns::present(),
+        }
+    }
+}
+
 /// Additive managed-run protocol. Keeping this service separate preserves the
 /// legacy `SessionCore` trait and its existing mocks while giving producers a
 /// durable, source-bound terminal receipt contract.
@@ -1447,7 +1548,8 @@ pub(crate) async fn delete_thread_rows(
          WHERE payload ->> 'thread_id' = $1
             OR payload -> 'payload' ->> 'thread_id' = $1
             OR payload ->> 'run_id' IN (SELECT id FROM runs WHERE thread_id = $1)
-            OR payload ->> 'subject' IN (SELECT id FROM runs WHERE thread_id = $1)",
+            OR payload ->> 'subject' IN (SELECT id FROM runs WHERE thread_id = $1)
+            OR payload -> 'payload' ->> 'run_id' IN (SELECT id FROM runs WHERE thread_id = $1)",
         "DELETE FROM dream_runs WHERE thread_id = $1
             OR run_id IN (SELECT id FROM runs WHERE thread_id = $1)",
         "DELETE FROM memory_index WHERE thread_id = $1",
@@ -2468,7 +2570,9 @@ async fn claim_scheduled_step_inner(
 
 /// Complete a claimed scheduled step's receipt. With `settle_fire` (the result switch
 /// is on) the fire learns the same terminal status in this transaction, so a failed
-/// or unknown step no longer leaves its fire pending (build plan WS20 S1).
+/// or unknown step no longer leaves its fire pending (build plan WS20 S1). The fire
+/// this step settles as failed or unknown also ledgers its goal turn, with the goal
+/// ledger on (F-f09-12).
 #[allow(clippy::result_large_err)]
 async fn record_scheduled_step_receipt_inner(
     pool: &PgPool,
@@ -2572,6 +2676,38 @@ async fn record_scheduled_step_receipt_inner(
         .execute(&mut *tx)
         .await
         .map_err(|error| Status::internal(error.to_string()))?;
+        // A failed or unknown step is a finished goal turn too, with no tokens (F-f09-12), written whether or not
+        // this call moved the fire: the step started (its receipt was claimed), and the run id keys the turn, so a
+        // fire the terminal path already ledgered is not counted twice. A completed step's turn is written with its
+        // answer, by the scheduled result.
+        if matches!(req.status.as_str(), "failed" | "unknown_outcome")
+            && crate::thread_goals::thread_goals_enabled()
+        {
+            let (schedule_id, thread_id): (String, String) = sqlx::query_as(
+                "SELECT schedule_id, thread_id FROM scheduled_step_receipts
+                 WHERE run_id = $1 AND step_id = $2 AND org_id = $3",
+            )
+            .bind(&req.run_id)
+            .bind(&req.step_id)
+            .bind(&req.org_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+            record_unattended_goal_turn(
+                &mut tx,
+                &UnattendedFire {
+                    schedule_id: &schedule_id,
+                    org_id: &req.org_id,
+                    run_id: &req.run_id,
+                    scheduled_thread_id: &thread_id,
+                    outcome: unattended_turn_outcome(&req.status),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    stopped_by: None,
+                },
+            )
+            .await?;
+        }
     }
     tx.commit()
         .await
@@ -2869,6 +3005,7 @@ async fn record_scheduled_run_result_with(
                 outcome: unattended_turn_outcome(run_outcome),
                 input_tokens: i64::from(req.input_tokens),
                 output_tokens: i64::from(req.output_tokens),
+                stopped_by: None,
             },
         )
         .await?;
@@ -2889,25 +3026,42 @@ async fn record_scheduled_run_result_with(
 const MAX_UNATTENDED_GOAL_RUNS: i32 = 20;
 
 /// One finished fire of a goal-bound schedule, as its goal turn records it: ids, a closed outcome
-/// and counts, never the answer.
-struct UnattendedFire<'a> {
-    schedule_id: &'a str,
-    org_id: &'a str,
-    run_id: &'a str,
-    scheduled_thread_id: &'a str,
-    outcome: &'static str,
-    input_tokens: i64,
-    output_tokens: i64,
+/// and counts, never the answer. Built by the scheduled result, the step receipt and the managed
+/// terminalization that settles a fire (F-f09-12).
+pub(crate) struct UnattendedFire<'a> {
+    pub(crate) schedule_id: &'a str,
+    pub(crate) org_id: &'a str,
+    pub(crate) run_id: &'a str,
+    pub(crate) scheduled_thread_id: &'a str,
+    pub(crate) outcome: &'static str,
+    pub(crate) input_tokens: i64,
+    pub(crate) output_tokens: i64,
+    /// The room member who stopped the run through the room route, or `None` when no room member did (P2-sc-13-rel1).
+    /// The turn counts toward the goal's turn cap and the schedule's run cap unless that member is not the goal's
+    /// owner (see `fire_stop_counts`). An uncounted turn is ledgered and its tokens count, but nothing else moves.
+    pub(crate) stopped_by: Option<&'a str>,
 }
 
 /// The goal-turn outcome of a scheduled run outcome (the `thread_goal_turns` CHECK). A
-/// `needs_review` run is a failed run, so its turn is failed (DEC-V-R14).
-fn unattended_turn_outcome(run_outcome: &str) -> &'static str {
+/// `needs_review` run is a failed run, so its turn is failed (DEC-V-R14). A cancelled or unknown
+/// outcome is `unknown`.
+pub(crate) fn unattended_turn_outcome(run_outcome: &str) -> &'static str {
     match run_outcome {
         "completed" => "completed",
         "failed" | "needs_review" => "failed",
         _ => "unknown",
     }
+}
+
+/// Whether a finished fire's goal turn counts toward the goal's turn cap and the schedule's run cap (P2-sc-13-rel1).
+/// `stopped_by` is the room member who stopped the run through the room route, or `None` when no room member did:
+/// the orchestrator's CancelRun, and a fire that finished on its own. Such a fire counts, and so does the goal
+/// owner's own room-route stop, because a human owner cannot CancelRun a system-owned fire and the room route is
+/// their only stop route. A stop by any other member does not count, so it cannot spend the owner's goal turns or
+/// pause the owner's schedule. Whether a third-party stop should count is an open owner decision; until it is made,
+/// such a stop is ledgered uncounted.
+pub(crate) fn fire_stop_counts(stopped_by: Option<&str>, goal_owner: &str) -> bool {
+    stopped_by.is_none_or(|who| who == goal_owner)
 }
 
 /// The counters of a goal an unattended turn was added to.
@@ -2945,14 +3099,16 @@ fn unattended_stop_state(goal: &UnattendedGoalCounters) -> Option<(&'static str,
 }
 
 /// Ledger one fire of a goal-bound schedule on its goal (EP-7 S6), inside the scheduled result's
-/// transaction. The turn is written settled and counted, with the step's tokens as metered usage
-/// and the scheduled thread its answer went to (D9). A cap the turn reaches closes the goal, and
-/// the 0094 trigger pauses the schedule with it in this transaction; a schedule that made the runs
-/// its template allows is paused here (`goal_runs_reached`). A schedule without a goal, or whose
-/// goal is gone, writes nothing. A fire that lands after its goal closed is still ledgered: what a
-/// run spent is spent.
+/// transaction. The turn is written settled, with the step's tokens as metered usage and the
+/// scheduled thread its answer went to (D9). A counted turn counts toward the goal's turns and the
+/// schedule's runs: a cap the turn reaches closes the goal, and the 0094 trigger pauses the schedule
+/// with it in this transaction; a schedule that made the runs its template allows is paused here
+/// (`goal_runs_reached`). An uncounted turn (a stop by a room member other than the goal's owner,
+/// P2-sc-13-rel1: see `fire_stop_counts`) keeps its ledger row and its tokens, and moves neither the turn
+/// count nor the run count. A schedule without a goal, or whose goal is gone, writes nothing. A fire that lands after
+/// its goal closed is still ledgered: what a run spent is spent.
 #[allow(clippy::result_large_err)]
-async fn record_unattended_goal_turn(
+pub(crate) async fn record_unattended_goal_turn(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     fire: &UnattendedFire<'_>,
 ) -> Result<(), Status> {
@@ -2975,24 +3131,27 @@ async fn record_unattended_goal_turn(
     let Some((goal_id, max_runs)) = link else {
         return Ok(());
     };
-    // The goal's row lock orders this write with an attended claim or settle of the same goal.
-    let locked: Option<(String,)> =
-        sqlx::query_as("SELECT id FROM thread_goals WHERE id = $1 AND org_id = $2 FOR UPDATE")
-            .bind(&goal_id)
-            .bind(fire.org_id)
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(internal)?;
-    if locked.is_none() {
+    // The goal's row lock orders this write with an attended claim or settle of the same goal. The goal's owner is
+    // read under the same lock: a room member's stop counts only when that member is the owner (P2-sc-13-rel1).
+    let locked: Option<(String, String)> = sqlx::query_as(
+        "SELECT id, user_id FROM thread_goals WHERE id = $1 AND org_id = $2 FOR UPDATE",
+    )
+    .bind(&goal_id)
+    .bind(fire.org_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(internal)?;
+    let Some((_, goal_owner)) = locked else {
         return Ok(());
-    }
+    };
+    let counted = fire_stop_counts(fire.stopped_by, &goal_owner);
     let inserted = sqlx::query(
         "INSERT INTO thread_goal_turns
              (goal_id, turn_no, run_id, org_id, claim_expires_at, settled_at, outcome,
               metered_input_tokens, metered_output_tokens, usage_source, counted,
               unattended, scheduled_thread_id)
          SELECT $1, COALESCE(MAX(turn_no), 0) + 1, $2, $3, now(), now(), $4, $5, $6,
-                'run_response', true, true, $7
+                'run_response', $8, true, $7
          FROM thread_goal_turns WHERE goal_id = $1
          ON CONFLICT (goal_id, run_id) WHERE run_id IS NOT NULL DO NOTHING",
     )
@@ -3003,6 +3162,7 @@ async fn record_unattended_goal_turn(
     .bind(fire.input_tokens)
     .bind(fire.output_tokens)
     .bind(fire.scheduled_thread_id)
+    .bind(counted)
     .execute(&mut **tx)
     .await
     .map_err(internal)?
@@ -3013,13 +3173,14 @@ async fn record_unattended_goal_turn(
     }
     let goal: UnattendedGoalCounters = sqlx::query_as(
         "UPDATE thread_goals
-         SET tokens_used = tokens_used + $2, turns_used = turns_used + 1, updated_at = now()
+         SET tokens_used = tokens_used + $2, turns_used = turns_used + $3, updated_at = now()
          WHERE id = $1
          RETURNING status, token_budget, tokens_used, cost_budget_usd_micros,
                    cost_used_usd_micros, max_turns, turns_used",
     )
     .bind(&goal_id)
     .bind(fire.input_tokens.saturating_add(fire.output_tokens))
+    .bind(i32::from(counted))
     .fetch_one(&mut **tx)
     .await
     .map_err(internal)?;
@@ -3039,13 +3200,17 @@ async fn record_unattended_goal_turn(
             .map_err(internal)?;
         }
     }
+    if !counted {
+        // Only a counted turn can reach the schedule's run cap, so a stop by another room member cannot pause it.
+        return Ok(());
+    }
     let cap = max_runs
         .and_then(|runs| i32::try_from(runs).ok())
         .filter(|runs| (1..=MAX_UNATTENDED_GOAL_RUNS).contains(runs))
         .unwrap_or(MAX_UNATTENDED_GOAL_RUNS);
     let runs: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM thread_goal_turns
-         WHERE goal_id = $1 AND unattended
+         WHERE goal_id = $1 AND unattended AND counted
            AND run_id IN (SELECT run_id FROM cron_fires
                           WHERE schedule_id = $2 AND run_id IS NOT NULL)",
     )
@@ -3071,9 +3236,9 @@ async fn record_unattended_goal_turn(
 #[cfg(test)]
 mod unattended_goal_tests {
     use super::{
-        claim_scheduled_step_inner, pb, record_scheduled_run_result_with, scheduled_fire_status,
-        scheduled_result_outcome, unattended_stop_state, unattended_turn_outcome,
-        UnattendedGoalCounters,
+        claim_scheduled_step_inner, fire_stop_counts, pb, record_scheduled_run_result_with,
+        record_scheduled_step_receipt_inner, scheduled_fire_status, scheduled_result_outcome,
+        unattended_stop_state, unattended_turn_outcome, UnattendedGoalCounters,
     };
 
     fn counters(tokens: (Option<i64>, i64), turns: (i32, i32)) -> UnattendedGoalCounters {
@@ -3150,6 +3315,24 @@ mod unattended_goal_tests {
         assert_eq!(
             unattended_stop_state(&counters((Some(1_000), 10), (3, 3))),
             Some(("turns_reached", "max_turns"))
+        );
+    }
+
+    /// P2-sc-13-rel1: a fire no room member stopped counts, and so does the goal owner's own room-route stop. Another
+    /// member's stop does not, so it cannot spend the owner's goal turns or pause the owner's schedule.
+    #[test]
+    fn a_stop_by_another_member_does_not_count_against_the_goal() {
+        assert!(
+            fire_stop_counts(None, "user-owner"),
+            "no room member stopped the fire, so it counts"
+        );
+        assert!(
+            fire_stop_counts(Some("user-owner"), "user-owner"),
+            "the goal owner's own room-route stop counts"
+        );
+        assert!(
+            !fire_stop_counts(Some("user-room-manager"), "user-owner"),
+            "a room member other than the goal owner does not count"
         );
     }
 
@@ -3463,6 +3646,734 @@ mod unattended_goal_tests {
         assert_eq!(clean_turn, "completed");
         let review_turn = goal_turn_outcome(&pool, &seeded.goal_id, &review.run_id).await;
         assert_eq!(review_turn, "failed");
+    }
+
+    /// The scheduled-result persistence switch and the goal ledger switch, set for one test. The tests that set
+    /// them hold one lock, and a guard clears both when its test leaves scope, even when an assertion fails.
+    static FIRE_SWITCHES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    struct FireSwitches {
+        _lock: tokio::sync::MutexGuard<'static, ()>,
+    }
+
+    impl FireSwitches {
+        /// Persistence on, and the goal ledger on when `goal_ledger` is set and off otherwise.
+        async fn set(goal_ledger: bool) -> Self {
+            let lock = FIRE_SWITCHES.lock().await;
+            std::env::set_var(crate::terminalization::SCHEDULED_RESULT_PERSIST_ENV, "true");
+            if goal_ledger {
+                std::env::set_var(crate::attention::GOALS_ENABLED_ENV, "true");
+            } else {
+                std::env::remove_var(crate::attention::GOALS_ENABLED_ENV);
+            }
+            Self { _lock: lock }
+        }
+    }
+
+    impl Drop for FireSwitches {
+        fn drop(&mut self) {
+            std::env::remove_var(crate::terminalization::SCHEDULED_RESULT_PERSIST_ENV);
+            std::env::remove_var(crate::attention::GOALS_ENABLED_ENV);
+        }
+    }
+
+    /// Terminalize one scheduled run the way the managed terminal path does, in its own transaction.
+    async fn terminalize(
+        pool: &sqlx::PgPool,
+        run_id: &str,
+        outcome: crate::terminalization::ManagedOutcome<'_>,
+    ) {
+        let mut tx = pool.begin().await.expect("begin");
+        crate::terminalization::transition_managed_run_terminal(
+            &mut tx,
+            run_id,
+            outcome,
+            chrono::Utc::now(),
+        )
+        .await
+        .expect("terminalize the run");
+        tx.commit().await.expect("commit");
+    }
+
+    /// The unattended goal turns one run wrote on its goal: their outcomes and their metered tokens.
+    async fn unattended_turns(
+        pool: &sqlx::PgPool,
+        goal_id: &str,
+        run_id: &str,
+    ) -> Vec<(String, i64, i64)> {
+        sqlx::query_as(
+            "SELECT outcome, metered_input_tokens, metered_output_tokens FROM thread_goal_turns
+             WHERE goal_id = $1 AND run_id = $2 AND unattended",
+        )
+        .bind(goal_id)
+        .bind(run_id)
+        .fetch_all(pool)
+        .await
+        .expect("read the goal turns")
+    }
+
+    /// The tokens and the turns a goal has counted.
+    async fn goal_counters(pool: &sqlx::PgPool, goal_id: &str) -> (i64, i32) {
+        sqlx::query_as("SELECT tokens_used, turns_used FROM thread_goals WHERE id = $1")
+            .bind(goal_id)
+            .fetch_one(pool)
+            .await
+            .expect("read counters")
+    }
+
+    /// A fire's status and the run it names, read by its schedule and its fire key.
+    async fn fire_status(
+        pool: &sqlx::PgPool,
+        schedule_id: &str,
+        fire_key: &str,
+    ) -> (String, Option<String>) {
+        sqlx::query_as(
+            "SELECT status, run_id FROM cron_fires WHERE schedule_id = $1 AND fire_key = $2",
+        )
+        .bind(schedule_id)
+        .bind(fire_key)
+        .fetch_one(pool)
+        .await
+        .expect("read fire")
+    }
+
+    /// The step receipt that settles a claimed step's fire as `status`.
+    fn receipt_for(
+        request: &pb::RecordScheduledRunResultRequest,
+        status: &str,
+    ) -> pb::RecordScheduledStepReceiptRequest {
+        pb::RecordScheduledStepReceiptRequest {
+            run_id: request.run_id.clone(),
+            step_id: request.step_id.clone(),
+            org_id: request.org_id.clone(),
+            idempotency_key: request.idempotency_key.clone(),
+            receipt_id: request.receipt_id.clone(),
+            status: status.to_owned(),
+            output_digest: String::new(),
+            error_code: "inference_failed".to_owned(),
+            unknown_outcome: status == "unknown_outcome",
+        }
+    }
+
+    /// A schedule with no goal, and one queued scheduled run of it with its pending fire. Returns the org, the
+    /// schedule id, the run id and the fire key.
+    async fn plain_fire(pool: &sqlx::PgPool, suffix: &str) -> (String, String, String, String) {
+        let org_id = format!("plain-org-{suffix}");
+        let schedule_id = format!("plain-schedule-{suffix}");
+        let thread_id = format!("plain-thread-{suffix}");
+        let run_id = format!("plain-run-{suffix}");
+        let fire_key = format!("plain-fire-key-{suffix}");
+        sqlx::query(
+            "INSERT INTO cron_schedules
+                 (id, org_id, name, schedule_expr, created_by, creator_subject_id, task_template)
+             VALUES ($1, $2, $1, '0 * * * *', $3, $3, $4)",
+        )
+        .bind(&schedule_id)
+        .bind(&org_id)
+        .bind(OWNER)
+        .bind(serde_json::json!({"kind": "cron", "title": "plain reminder"}))
+        .execute(pool)
+        .await
+        .expect("seed a schedule without a goal");
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, $2, $3)",
+        )
+        .bind(&thread_id)
+        .bind(&org_id)
+        .bind(OWNER)
+        .execute(pool)
+        .await
+        .expect("seed thread");
+        sqlx::query(
+            "INSERT INTO runs (id, thread_id, goal, org_id, user_id, status, metadata, retention_class)
+             VALUES ($1, $2, 'plain reminder', $3, $4, 'queued', $5, 'persistent')",
+        )
+        .bind(&run_id)
+        .bind(&thread_id)
+        .bind(&org_id)
+        .bind(OWNER)
+        .bind(serde_json::json!({
+            "source": "scheduled_run",
+            "schedule_id": schedule_id,
+            "fire_key": fire_key,
+        }))
+        .execute(pool)
+        .await
+        .expect("seed scheduled run");
+        sqlx::query(
+            "INSERT INTO cron_fires (id, schedule_id, status, fire_key)
+             VALUES ($1, $2, 'pending', $3)",
+        )
+        .bind(format!("plain-fire-row-{suffix}"))
+        .bind(&schedule_id)
+        .bind(&fire_key)
+        .execute(pool)
+        .await
+        .expect("seed fire");
+        (org_id, schedule_id, run_id, fire_key)
+    }
+
+    /// F-f09-12: a fire the managed terminal path settles as failed writes one counted unattended turn with no
+    /// tokens, in the same transaction. The fire settles, names its run, and the goal's turn count advances once.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn failed_terminalization_of_a_goal_fire_writes_one_counted_turn() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let _switches = FireSwitches::set(true).await;
+        let seeded = seed_goal_schedule(&pool, &mp_ids::new_ulid().to_lowercase(), 3).await;
+        let fire = mp_ids::new_ulid();
+        let request = claimed_fire(&pool, &seeded, &fire).await;
+
+        terminalize(
+            &pool,
+            &request.run_id,
+            crate::terminalization::ManagedOutcome::Failed("inference_failed"),
+        )
+        .await;
+
+        assert_eq!(
+            unattended_turns(&pool, &seeded.goal_id, &request.run_id).await,
+            vec![("failed".to_owned(), 0, 0)],
+            "one counted failed turn, with no tokens"
+        );
+        assert_eq!(
+            fire_status(&pool, &seeded.schedule_id, &format!("fire-{fire}")).await,
+            ("failed".to_owned(), Some(request.run_id.clone())),
+            "the fire settles as failed and names its run"
+        );
+        assert_eq!(goal_counters(&pool, &seeded.goal_id).await, (0, 1));
+        assert_eq!(
+            schedule_state(&pool, &seeded.schedule_id).await,
+            (true, None),
+            "three runs are allowed, so the schedule keeps running"
+        );
+    }
+
+    /// F-f09-12: a replayed settle or terminalization of a settled fire writes nothing. The fire is settled, so the
+    /// settle touches no row, and a replayed terminalization is refused before it writes anything.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn replayed_terminalization_of_a_goal_fire_writes_nothing() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let _switches = FireSwitches::set(true).await;
+        let seeded = seed_goal_schedule(&pool, &mp_ids::new_ulid().to_lowercase(), 3).await;
+        let request = claimed_fire(&pool, &seeded, &mp_ids::new_ulid()).await;
+        terminalize(
+            &pool,
+            &request.run_id,
+            crate::terminalization::ManagedOutcome::Failed("inference_failed"),
+        )
+        .await;
+
+        let mut tx = pool.begin().await.expect("begin");
+        crate::terminalization::settle_scheduled_fire(
+            &mut tx,
+            &request.run_id,
+            "failed",
+            chrono::Utc::now(),
+            None,
+        )
+        .await
+        .expect("a replayed settle is not an error");
+        tx.commit().await.expect("commit the replayed settle");
+
+        let mut tx = pool.begin().await.expect("begin");
+        let replayed = crate::terminalization::transition_managed_run_terminal(
+            &mut tx,
+            &request.run_id,
+            crate::terminalization::ManagedOutcome::Failed("inference_failed"),
+            chrono::Utc::now(),
+        )
+        .await;
+        assert!(
+            replayed.is_err(),
+            "the run's terminal outcome is already assigned"
+        );
+        drop(tx);
+
+        assert_eq!(
+            unattended_turns(&pool, &seeded.goal_id, &request.run_id)
+                .await
+                .len(),
+            1,
+            "still one turn"
+        );
+        assert_eq!(goal_counters(&pool, &seeded.goal_id).await, (0, 1));
+    }
+
+    /// F-f09-12: a fire the scheduled result settles is ledgered by the result; the terminalization that follows
+    /// settles nothing, because the fire is settled already. The fire counts once, with the result's tokens.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn result_then_terminalization_counts_the_fire_once() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let _switches = FireSwitches::set(true).await;
+        let seeded = seed_goal_schedule(&pool, &mp_ids::new_ulid().to_lowercase(), 5).await;
+        let request = claimed_fire(&pool, &seeded, &mp_ids::new_ulid()).await;
+
+        record_scheduled_run_result_with(&pool, request.clone(), true, false)
+            .await
+            .expect("the scheduled result");
+        terminalize(
+            &pool,
+            &request.run_id,
+            crate::terminalization::ManagedOutcome::Completed,
+        )
+        .await;
+
+        assert_eq!(
+            unattended_turns(&pool, &seeded.goal_id, &request.run_id).await,
+            vec![("completed".to_owned(), 1_200, 300)],
+            "one turn, carrying the result's tokens"
+        );
+        assert_eq!(goal_counters(&pool, &seeded.goal_id).await, (1_500, 1));
+    }
+
+    /// F-f09-12: a failed step settles its fire and ledgers the turn; a replayed receipt writes nothing; and the
+    /// terminalization that follows settles nothing. One turn across the three writes.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn failed_step_then_terminalization_counts_the_fire_once() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let _switches = FireSwitches::set(true).await;
+        let seeded = seed_goal_schedule(&pool, &mp_ids::new_ulid().to_lowercase(), 5).await;
+        let request = claimed_fire(&pool, &seeded, &mp_ids::new_ulid()).await;
+        let receipt = receipt_for(&request, "failed");
+
+        let recorded = record_scheduled_step_receipt_inner(&pool, receipt.clone(), true)
+            .await
+            .expect("the failed step")
+            .into_inner();
+        assert!(recorded.recorded);
+        assert_eq!(
+            unattended_turns(&pool, &seeded.goal_id, &request.run_id).await,
+            vec![("failed".to_owned(), 0, 0)]
+        );
+
+        let replay = record_scheduled_step_receipt_inner(&pool, receipt, true)
+            .await
+            .expect("the replayed step")
+            .into_inner();
+        assert!(
+            !replay.recorded,
+            "a replayed receipt is answered without a write"
+        );
+        terminalize(
+            &pool,
+            &request.run_id,
+            crate::terminalization::ManagedOutcome::Failed("inference_failed"),
+        )
+        .await;
+
+        assert_eq!(
+            unattended_turns(&pool, &seeded.goal_id, &request.run_id).await,
+            vec![("failed".to_owned(), 0, 0)],
+            "one turn across the three writes"
+        );
+        assert_eq!(goal_counters(&pool, &seeded.goal_id).await, (0, 1));
+    }
+
+    /// F-f09-12: an unknown step outcome settles its fire as unknown and ledgers the turn as unknown, with no tokens.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn unknown_step_outcome_ledgers_an_unknown_turn() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let _switches = FireSwitches::set(true).await;
+        let seeded = seed_goal_schedule(&pool, &mp_ids::new_ulid().to_lowercase(), 5).await;
+        let fire = mp_ids::new_ulid();
+        let request = claimed_fire(&pool, &seeded, &fire).await;
+
+        record_scheduled_step_receipt_inner(&pool, receipt_for(&request, "unknown_outcome"), true)
+            .await
+            .expect("the unknown step");
+
+        assert_eq!(
+            unattended_turns(&pool, &seeded.goal_id, &request.run_id).await,
+            vec![("unknown".to_owned(), 0, 0)]
+        );
+        assert_eq!(
+            fire_status(&pool, &seeded.schedule_id, &format!("fire-{fire}")).await,
+            ("unknown".to_owned(), Some(request.run_id.clone()))
+        );
+    }
+
+    /// F-f09-12: with goal_max_runs = 1, the one failed fire spends the schedule's runs, so the schedule pauses
+    /// with `goal_runs_reached` in the same transaction.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn one_failed_fire_pauses_a_schedule_capped_at_one_run() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let _switches = FireSwitches::set(true).await;
+        let seeded = seed_goal_schedule(&pool, &mp_ids::new_ulid().to_lowercase(), 1).await;
+        let request = claimed_fire(&pool, &seeded, &mp_ids::new_ulid()).await;
+
+        terminalize(
+            &pool,
+            &request.run_id,
+            crate::terminalization::ManagedOutcome::Failed("inference_failed"),
+        )
+        .await;
+
+        assert_eq!(
+            schedule_state(&pool, &seeded.schedule_id).await,
+            (false, Some("goal_runs_reached".to_owned()))
+        );
+    }
+
+    /// F-f09-12: a fire of a schedule with no goal settles as before and writes no goal turn.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn a_schedule_without_a_goal_writes_no_turn() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let _switches = FireSwitches::set(true).await;
+        let suffix = mp_ids::new_ulid().to_lowercase();
+        let (_org, schedule_id, run_id, fire_key) = plain_fire(&pool, &suffix).await;
+
+        terminalize(
+            &pool,
+            &run_id,
+            crate::terminalization::ManagedOutcome::Failed("inference_failed"),
+        )
+        .await;
+
+        assert_eq!(
+            fire_status(&pool, &schedule_id, &fire_key).await,
+            ("failed".to_owned(), Some(run_id.clone())),
+            "the fire still settles"
+        );
+        let turns: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM thread_goal_turns WHERE run_id = $1")
+                .bind(&run_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count turns");
+        assert_eq!(turns, 0, "no goal, no turn");
+    }
+
+    /// F-f09-12: with the goal ledger off, a failed terminalization settles its fire and writes no goal turn.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn the_goal_ledger_off_settles_the_fire_and_writes_no_turn() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let _switches = FireSwitches::set(false).await;
+        let seeded = seed_goal_schedule(&pool, &mp_ids::new_ulid().to_lowercase(), 3).await;
+        let fire = mp_ids::new_ulid();
+        let request = claimed_fire(&pool, &seeded, &fire).await;
+
+        terminalize(
+            &pool,
+            &request.run_id,
+            crate::terminalization::ManagedOutcome::Failed("inference_failed"),
+        )
+        .await;
+
+        assert_eq!(
+            fire_status(&pool, &seeded.schedule_id, &format!("fire-{fire}")).await,
+            ("failed".to_owned(), Some(request.run_id.clone()))
+        );
+        assert!(unattended_turns(&pool, &seeded.goal_id, &request.run_id)
+            .await
+            .is_empty());
+        assert_eq!(goal_counters(&pool, &seeded.goal_id).await, (0, 0));
+    }
+
+    /// Cancel one run through the terminalization both cancel paths share, with no room `ActingAs`, the way the
+    /// orchestrator stops a scheduled fire. A human owner cannot CancelRun a system-owned fire, so this models the
+    /// orchestrator's stop, not the owner's.
+    async fn cancel_run(pool: &sqlx::PgPool, run_id: &str) -> pb::CancelRunResponse {
+        crate::run_service_grpc::cancel_run_terminalize(
+            pool,
+            run_id,
+            "stopped by the test",
+            "service:test-canceller",
+            None,
+        )
+        .await
+        .expect("cancel the run")
+    }
+
+    /// F-f09-12, the cancelled path: cancelling a goal-bound scheduled run settles its fire as `cancelled` and
+    /// ledgers one unknown turn with no tokens, in the cancel's own transaction. A second cancel finds the run
+    /// terminal, and a late result or receipt for the run writes no further turn.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn cancelling_a_goal_fire_ledgers_one_unknown_turn() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let _switches = FireSwitches::set(true).await;
+        let seeded = seed_goal_schedule(&pool, &mp_ids::new_ulid().to_lowercase(), 5).await;
+        let fire = mp_ids::new_ulid();
+        let request = claimed_fire(&pool, &seeded, &fire).await;
+
+        assert!(cancel_run(&pool, &request.run_id).await.cancelled);
+        assert_eq!(
+            fire_status(&pool, &seeded.schedule_id, &format!("fire-{fire}")).await,
+            ("cancelled".to_owned(), Some(request.run_id.clone())),
+            "the fire settles as cancelled and names its run"
+        );
+        assert_eq!(
+            unattended_turns(&pool, &seeded.goal_id, &request.run_id).await,
+            vec![("unknown".to_owned(), 0, 0)],
+            "one unknown turn, with no tokens"
+        );
+        assert_eq!(goal_counters(&pool, &seeded.goal_id).await, (0, 1));
+
+        assert!(
+            !cancel_run(&pool, &request.run_id).await.cancelled,
+            "a second cancel finds the run terminal"
+        );
+        let late = record_scheduled_run_result_with(&pool, request.clone(), true, false)
+            .await
+            .expect_err("a late result for a cancelled run is refused");
+        assert_eq!(late.code(), tonic::Code::FailedPrecondition);
+        record_scheduled_step_receipt_inner(&pool, receipt_for(&request, "failed"), true)
+            .await
+            .expect("a late receipt is answered");
+
+        assert_eq!(
+            unattended_turns(&pool, &seeded.goal_id, &request.run_id).await,
+            vec![("unknown".to_owned(), 0, 0)],
+            "still one turn"
+        );
+        assert_eq!(goal_counters(&pool, &seeded.goal_id).await, (0, 1));
+        assert_eq!(
+            fire_status(&pool, &seeded.schedule_id, &format!("fire-{fire}")).await,
+            ("cancelled".to_owned(), Some(request.run_id.clone())),
+            "the settled fire keeps its status"
+        );
+    }
+
+    /// F-f09-12, the cancelled path with the goal ledger off: the cancel settles the fire as `cancelled` and writes
+    /// no goal turn, and the goal's counters do not move.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn cancelling_with_the_goal_ledger_off_settles_the_fire_and_writes_no_turn() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let _switches = FireSwitches::set(false).await;
+        let seeded = seed_goal_schedule(&pool, &mp_ids::new_ulid().to_lowercase(), 3).await;
+        let fire = mp_ids::new_ulid();
+        let request = claimed_fire(&pool, &seeded, &fire).await;
+
+        assert!(cancel_run(&pool, &request.run_id).await.cancelled);
+        assert_eq!(
+            fire_status(&pool, &seeded.schedule_id, &format!("fire-{fire}")).await,
+            ("cancelled".to_owned(), Some(request.run_id.clone())),
+            "the fire still settles"
+        );
+        assert!(unattended_turns(&pool, &seeded.goal_id, &request.run_id)
+            .await
+            .is_empty());
+        assert_eq!(goal_counters(&pool, &seeded.goal_id).await, (0, 0));
+    }
+
+    /// F-f09-12, the cancelled path with the result persistence switch off: the cancel is the one it was. The fire
+    /// keeps the status it had, and no goal turn is written, even with the goal ledger on.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn cancelling_with_the_result_persistence_off_leaves_the_fire_as_it_was() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let _switches = FireSwitches::set(true).await;
+        std::env::remove_var(crate::terminalization::SCHEDULED_RESULT_PERSIST_ENV);
+        let seeded = seed_goal_schedule(&pool, &mp_ids::new_ulid().to_lowercase(), 3).await;
+        let fire = mp_ids::new_ulid();
+        let request = claimed_fire(&pool, &seeded, &fire).await;
+
+        assert!(cancel_run(&pool, &request.run_id).await.cancelled);
+        let (status, _) = fire_status(&pool, &seeded.schedule_id, &format!("fire-{fire}")).await;
+        assert_eq!(status, "pending", "the fire keeps its pending status");
+        assert!(unattended_turns(&pool, &seeded.goal_id, &request.run_id)
+            .await
+            .is_empty());
+        assert_eq!(goal_counters(&pool, &seeded.goal_id).await, (0, 0));
+    }
+
+    /// F-f09-12, the cancelled path for a run no schedule started: the cancel settles no fire and writes no goal
+    /// turn, even with the goal ledger on.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn cancelling_a_run_no_schedule_started_writes_no_turn() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let _switches = FireSwitches::set(true).await;
+        let seeded = seed_goal_schedule(&pool, &mp_ids::new_ulid().to_lowercase(), 3).await;
+        let suffix = mp_ids::new_ulid().to_lowercase();
+        let thread_id = format!("cancel-chat-thread-{suffix}");
+        let run_id = format!("cancel-chat-run-{suffix}");
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, $2, $3)",
+        )
+        .bind(&thread_id)
+        .bind(&seeded.org_id)
+        .bind(OWNER)
+        .execute(&pool)
+        .await
+        .expect("seed thread");
+        sqlx::query(
+            "INSERT INTO runs (id, thread_id, goal, org_id, user_id, status, metadata, retention_class)
+             VALUES ($1, $2, 'a chat turn', $3, $4, 'queued', '{}', 'persistent')",
+        )
+        .bind(&run_id)
+        .bind(&thread_id)
+        .bind(&seeded.org_id)
+        .bind(OWNER)
+        .execute(&pool)
+        .await
+        .expect("seed a run no schedule started");
+
+        assert!(cancel_run(&pool, &run_id).await.cancelled);
+        let fires: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cron_fires WHERE run_id = $1")
+            .bind(&run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count fires");
+        assert_eq!(fires, 0, "no fire names the run");
+        assert!(unattended_turns(&pool, &seeded.goal_id, &run_id)
+            .await
+            .is_empty());
+        assert_eq!(goal_counters(&pool, &seeded.goal_id).await, (0, 0));
+    }
+
+    /// Stop one run through the room route as `stopper`, the verified caller the receipt names. The room-manager
+    /// stop hands the terminalization its `ActingAs`.
+    async fn stop_in_room(
+        pool: &sqlx::PgPool,
+        run_id: &str,
+        stopper: &str,
+    ) -> pb::CancelRunResponse {
+        let room = crate::run_service_grpc::ActingAs {
+            acting_as: "room_manager",
+            decision_ref: "decision-room-manager-stop",
+        };
+        crate::run_service_grpc::cancel_run_terminalize(
+            pool,
+            run_id,
+            "room_manager_stop",
+            stopper,
+            Some(&room),
+        )
+        .await
+        .expect("the room member stops the run")
+    }
+
+    /// Whether the goal turn one run wrote on its goal counts toward the goal's caps.
+    async fn turn_counted(pool: &sqlx::PgPool, goal_id: &str, run_id: &str) -> bool {
+        let counted: bool = sqlx::query_scalar(
+            "SELECT counted FROM thread_goal_turns WHERE goal_id = $1 AND run_id = $2 AND unattended",
+        )
+        .bind(goal_id)
+        .bind(run_id)
+        .fetch_one(pool)
+        .await
+        .expect("read the turn's counted flag");
+        counted
+    }
+
+    /// P2-sc-13-rel1: a Space manager's stop of an owner's goal-bound fire settles the fire as `cancelled` and ledgers
+    /// its turn, uncounted. The goal's turn count does not move and, with goal_max_runs = 1, the schedule is not
+    /// paused. The next fire's stop on the CancelRun route (the orchestrator's, no room route) counts, and with that
+    /// one run allowed it pauses the schedule.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn a_room_manager_stop_of_a_goal_fire_is_ledgered_but_does_not_count() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let _switches = FireSwitches::set(true).await;
+        let seeded = seed_goal_schedule(&pool, &mp_ids::new_ulid().to_lowercase(), 1).await;
+        let first = mp_ids::new_ulid();
+        let request = claimed_fire(&pool, &seeded, &first).await;
+
+        assert!(
+            stop_in_room(&pool, &request.run_id, "user-room-manager")
+                .await
+                .cancelled
+        );
+        assert_eq!(
+            fire_status(&pool, &seeded.schedule_id, &format!("fire-{first}")).await,
+            ("cancelled".to_owned(), Some(request.run_id.clone())),
+            "the fire settles as cancelled and names its run"
+        );
+        assert_eq!(
+            unattended_turns(&pool, &seeded.goal_id, &request.run_id).await,
+            vec![("unknown".to_owned(), 0, 0)],
+            "the stop is ledgered as one unknown turn, with no tokens"
+        );
+        assert!(
+            !turn_counted(&pool, &seeded.goal_id, &request.run_id).await,
+            "the stop is ledgered uncounted"
+        );
+        assert_eq!(
+            goal_counters(&pool, &seeded.goal_id).await,
+            (0, 0),
+            "the stop spends none of the owner's goal turns"
+        );
+        assert_eq!(
+            schedule_state(&pool, &seeded.schedule_id).await,
+            (true, None),
+            "a stop the owner did not make does not pause the schedule"
+        );
+
+        let second = mp_ids::new_ulid();
+        let request = claimed_fire(&pool, &seeded, &second).await;
+        assert!(cancel_run(&pool, &request.run_id).await.cancelled);
+        assert!(
+            turn_counted(&pool, &seeded.goal_id, &request.run_id).await,
+            "the orchestrator's CancelRun stop counts"
+        );
+        assert_eq!(goal_counters(&pool, &seeded.goal_id).await, (0, 1));
+        assert_eq!(
+            schedule_state(&pool, &seeded.schedule_id).await,
+            (false, Some("goal_runs_reached".to_owned())),
+            "the counted run reaches the one run allowed, and the schedule pauses"
+        );
+    }
+
+    /// P2-sc-13-rel1: a goal owner who holds manager or owner in the Space stops their own fire through the room
+    /// route, which is their only stop route for it. That stop is the owner's own, so it counts: the goal's turn count
+    /// moves and, with goal_max_runs = 1, the schedule pauses with `goal_runs_reached`.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn a_goal_owners_room_route_stop_of_their_own_fire_counts() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let _switches = FireSwitches::set(true).await;
+        let seeded = seed_goal_schedule(&pool, &mp_ids::new_ulid().to_lowercase(), 1).await;
+        let request = claimed_fire(&pool, &seeded, &mp_ids::new_ulid()).await;
+
+        assert!(stop_in_room(&pool, &request.run_id, OWNER).await.cancelled);
+        assert!(
+            turn_counted(&pool, &seeded.goal_id, &request.run_id).await,
+            "the goal owner's own room-route stop counts"
+        );
+        assert_eq!(goal_counters(&pool, &seeded.goal_id).await, (0, 1));
+        assert_eq!(
+            schedule_state(&pool, &seeded.schedule_id).await,
+            (false, Some("goal_runs_reached".to_owned())),
+            "the owner's counted stop reaches the one run allowed, and the schedule pauses"
+        );
     }
 
     /// One fire row, read back for the assertions above.
@@ -5615,7 +6526,7 @@ pub(crate) fn revise_space_context_is_complete(req: &pb::ReviseMessageRequest) -
 }
 
 #[allow(clippy::result_large_err)]
-fn verify_revise_space_decision_with_key(
+pub(crate) fn verify_revise_space_decision_with_key(
     req: &pb::ReviseMessageRequest,
     org_id: &str,
     user_id: &str,
@@ -5709,8 +6620,9 @@ fn verify_revise_space_decision_with_key(
     Ok(VerifiedRevise {
         moderate: has(rev::PERMISSION_MODERATE),
         purge_original: purge,
-        // V3e-sws-2: honoured only when Control signs a floor on a revise decision. Control does not
-        // mint one yet, so this is `None` and the write path is unchanged until it does.
+        // V3e-sws-2 (R-sws-07): honoured only when Control signs a floor on a revise decision, which it
+        // does for a since_join room while its SPACE_HISTORY_WINDOW_CLAIM is on. Without the floor claim,
+        // or with this switch off, this is `None` and the write path is unchanged.
         history_floor: crate::space::audience_window::history_floor_from_claim(
             claims.history_floor_revision,
             crate::space::audience_window::history_floor_enabled(),
@@ -6361,11 +7273,51 @@ fn valid_connection_id(id: &str) -> bool {
 
 /// A caller's `client_message_id` has the shape the `messages` CHECK allows, so a malformed one is
 /// refused as a bad argument here instead of surfacing as a database error from the CHECK.
-fn valid_client_message_id(id: &str) -> bool {
+pub(crate) fn valid_client_message_id(id: &str) -> bool {
     let mut bytes = id.bytes();
     bytes.next().is_some_and(|first| first.is_ascii_alphanumeric())
         && id.len() <= 128
         && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// A send that repeats the message a linked question answer appended (O-15) fills what the answer could not
+/// carry: the connection the turn is sent on and the send's metadata. The answer route stores only the id and the
+/// summary, so without this a regenerate or an edit of that turn would find no stored connection and could fall to
+/// the platform chain. Fill-only: a connection is written only while the row holds none (neither a gateway nor a
+/// subscription connection), and a metadata key the row already holds is never replaced. Only a user row that a
+/// run question of this thread names as its answer is touched, so every other repeat still writes nothing.
+async fn fill_linked_answer_message(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    thread_id: &str,
+    client_message_id: &str,
+    message_id: &str,
+    model_connection_id: &str,
+    subscription_connection_id: &str,
+    metadata: &serde_json::Value,
+) -> Result<(), Status> {
+    sqlx::query(
+        "UPDATE messages m
+            SET model_connection_id = CASE
+                    WHEN m.model_connection_id IS NULL AND m.subscription_connection_id IS NULL
+                    THEN NULLIF($3, '') ELSE m.model_connection_id END,
+                subscription_connection_id = CASE
+                    WHEN m.model_connection_id IS NULL AND m.subscription_connection_id IS NULL
+                    THEN NULLIF($4, '') ELSE m.subscription_connection_id END,
+                metadata = $5::jsonb || COALESCE(m.metadata, '{}'::jsonb)
+          WHERE m.id = $1 AND m.thread_id = $2 AND m.role = 'user'
+            AND EXISTS (SELECT 1 FROM run_questions q
+                         WHERE q.thread_id = $2 AND q.answered_message_id = $6)",
+    )
+    .bind(message_id)
+    .bind(thread_id)
+    .bind(model_connection_id)
+    .bind(subscription_connection_id)
+    .bind(metadata)
+    .bind(client_message_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| Status::internal(e.to_string()))?;
+    Ok(())
 }
 
 /// Memory candidates an append extracted inside its transaction, to mirror
@@ -6707,6 +7659,18 @@ pub(crate) async fn append_message_in_tx_as(
                 return Err(Status::already_exists(
                     "client_message_id already names a different message in this thread",
                 ));
+            }
+            if post_kind == "turn" && !member {
+                fill_linked_answer_message(
+                    tx,
+                    &req.thread_id,
+                    client_message_id,
+                    &existing_id,
+                    model_connection_id,
+                    subscription_connection_id,
+                    &metadata_json,
+                )
+                .await?;
             }
             return Ok(AppendedMessage {
                 sequence: u64::try_from(existing_sequence)
@@ -11371,6 +12335,10 @@ impl SessionCore for SessionService {
                 forked_from_thread_id: Option<String>,
                 // The thread's own memory mode (WS07-S6, migration 0067): `inherit` or `off`.
                 memory_mode: String,
+                // The live forks of the thread (ThreadSummary.fork_count). Selected only while the fork switch
+                // is on; a row without the column reads as 0.
+                #[sqlx(default)]
+                fork_count: i32,
                 // {reply_count, last_author}: one JSON column so the row stays a flat struct.
                 reply_stats: Option<serde_json::Value>,
             }
@@ -11434,6 +12402,7 @@ impl SessionCore for SessionService {
                             last_read_at,
                             forked_from_thread_id,
                             memory_mode,
+                            fork_count,
                             reply_stats,
                         } = row;
                         let fallback_title = if session_key.trim().is_empty() {
@@ -11466,6 +12435,7 @@ impl SessionCore for SessionService {
                             last_read_at: Some(to_proto_timestamp(last_read_at)),
                             forked_from_thread_id: forked_from_thread_id.unwrap_or_default(),
                             memory_mode: if zdr_caller { String::new() } else { memory_mode },
+                            fork_count,
                             attention_state: pb::AttentionState::Unspecified as i32,
                             attention_since: None,
                             attention_unseen: false,
@@ -11842,7 +12812,10 @@ impl SessionCore for SessionService {
                     "session-core",
                     "THREAD_ARCHIVED",
                     &resource,
-                    &format!("{thread_id}:archived"),
+                    // Per archive instance, as archive_thread keys it: a restore lets the thread be archived
+                    // again, and events is unique on (org_id, idempotency_key). Every row of this call shares
+                    // `now` and differs by thread_id, so the keys stay unique within the call too.
+                    &format!("{thread_id}:archived:{}", now.to_rfc3339()),
                 ))
                 .bind(&resource)
                 .bind(THREAD_ARCHIVED_TYPE_URL)
@@ -11886,11 +12859,22 @@ impl SessionCore for SessionService {
             authorize_thread_deletion_owner(&self.pool, &caller, &req.thread_id).await?;
             // EP-9 C4: a held thread, or any thread of a held org, is not erased. Asked after
             // the owner check, so only the owner learns the thread is held, and before the
-            // transaction, so a refusal or an org-core outage changes nothing.
-            crate::gdpr::erasure_hold_gate()
+            // transaction, so a refusal or an org-core outage changes nothing. A hold's refusal is
+            // audited (F-f10-07) on a pool connection before it is returned, and nothing is deleted.
+            if let Err(refusal) = crate::gdpr::erasure_hold_gate()
                 .ensure_not_held(&req.org_id, std::slice::from_ref(&req.thread_id))
                 .await
-                .map_err(crate::gdpr::ErasureHoldError::into_status)?;
+            {
+                crate::gdpr::record_refused_erasure(
+                    &self.pool,
+                    &req.org_id,
+                    caller.user_id().unwrap_or(caller.principal_id()),
+                    "thread_delete",
+                    &refusal,
+                )
+                .await;
+                return Err(refusal.into_status());
+            }
 
             let mut tx = self
                 .pool
@@ -11946,6 +12930,16 @@ impl SessionCore for SessionService {
                 &snapshot_ids,
             )
             .await;
+            // The thread's sandbox workspace goes with the thread (P2-sc-16-rel1), erased last: after the commit and
+            // after the semantic copies and grants above, which exist nowhere else. A request dropped during this erase
+            // (it may take up to its deadline) then skips nothing. Under the owner its row names, and never failing the
+            // delete. Off, nothing is erased.
+            crate::sandbox_workspace_eraser::erase_after_delete(
+                "delete_thread",
+                &req.org_id,
+                &[(req.thread_id.clone(), owner_user.clone())],
+            )
+            .await;
 
             Ok(Response::new(pb::DeleteThreadResponse {
                 thread_id: req.thread_id,
@@ -11996,10 +12990,24 @@ impl SessionCore for SessionService {
             // held; the locks above keep the set fixed while org-core is asked, and a refusal
             // drops the transaction, so nothing is deleted.
             let held_candidates: Vec<String> = thread_ids.iter().map(|(id,)| id.clone()).collect();
-            crate::gdpr::erasure_hold_gate()
+            if let Err(refusal) = crate::gdpr::erasure_hold_gate()
                 .ensure_not_held(&req.org_id, &held_candidates)
                 .await
-                .map_err(crate::gdpr::ErasureHoldError::into_status)?;
+            {
+                // Audited (F-f10-07) on a pool connection, outside this transaction. The transaction is
+                // dropped first (rolled back), so its row locks and connection are released before the
+                // audit insert runs: nothing is deleted.
+                drop(tx);
+                crate::gdpr::record_refused_erasure(
+                    &self.pool,
+                    &req.org_id,
+                    caller.user_id().unwrap_or(caller.principal_id()),
+                    "bulk_delete",
+                    &refusal,
+                )
+                .await;
+                return Err(refusal.into_status());
+            }
 
             let mut erased_memories: Vec<crate::memory_erasure::ErasedMemory> = Vec::new();
             let mut snapshot_ids: Vec<String> = Vec::new();
@@ -12027,6 +13035,20 @@ impl SessionCore for SessionService {
                 &caller,
                 &req.user_id,
                 &snapshot_ids,
+            )
+            .await;
+
+            // Each thread's sandbox workspace goes with it (P2-sc-16-rel1), erased last: after the commit and after the
+            // semantic copies and grants above (see `delete_thread`), so a request dropped during this erase skips
+            // nothing. Under the owner the bulk erase names, and never failing the delete. Off, nothing is erased.
+            let deleted: Vec<(String, String)> = thread_ids
+                .iter()
+                .map(|(thread_id,)| (thread_id.clone(), req.user_id.clone()))
+                .collect();
+            crate::sandbox_workspace_eraser::erase_after_delete(
+                "delete_threads",
+                &req.org_id,
+                &deleted,
             )
             .await;
 
@@ -12350,13 +13372,19 @@ impl ManagedRunLifecycle for ManagedRunLifecycleService {
             let caller = identity(&request)?;
             let mut req = request.into_inner();
             caller.authorize_org(&req.org_id)?;
-            let user_id = caller.user_id().ok_or_else(|| {
+            // F-f10-22: the run's owner is the caller's owner id: the person for a user, the key
+            // principal `apikey:<key_id>` for an API key. A service has no owner and is refused.
+            let user_id = caller.owner_id().ok_or_else(|| {
                 Status::permission_denied("user-bound managed-run credential required")
             })?;
             req.user_id = user_id.to_owned();
             // WS08-S2: a wake writes durable rows (the run's trigger pair), so a zero-retention
             // caller is refused with the typed catalogue refusal before anything else.
             let wake_ctx = req.wake.take();
+            // F-f10-22: an API key starts a plain run on its own thread, never a wake.
+            if caller.is_api_key() && wake_ctx.is_some() {
+                return Err(Status::permission_denied("an API key may not start a wake"));
+            }
             if wake_ctx.is_some() && caller.zdr() {
                 return Err(mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
                     .grpc_status(tonic::Code::PermissionDenied));
@@ -12403,11 +13431,15 @@ impl ManagedRunLifecycle for ManagedRunLifecycleService {
             } else {
                 None
             };
+            // F-f10-22: an API key's run is stamped `api` and names the key and its owner, the
+            // stamp StartRun gives a key's run.
+            let api_key = crate::run_origin_stamp::ApiKeyStamp::of(&caller);
             terminalization::start_managed_run_with_wake_inner(
                 &self.pool,
                 req,
                 retention,
                 verified_wake.as_ref(),
+                api_key,
             )
             .await
             .map(|started| Response::new(started.into_proto()))
@@ -13458,7 +14490,11 @@ pub async fn serve(
         pool: pool.clone(),
         letta_memory: letta_memory.clone(),
     };
-    let retention = SessionRetentionGrpc { pool: pool.clone() };
+    // SESSION_THREAD_RETENTION_READ is read once, at boot: a deploy setting, only the literal `true` on.
+    let retention = SessionRetentionGrpc {
+        pool: pool.clone(),
+        thread_retention_read: crate::thread_retention_read::enabled(),
+    };
     // Checked once, here, after the migrations ran: a database whose 0050 columns were dropped
     // (the revert) must not make every grant-bearing SetRunMode fail with a missing column.
     let grant_columns = ThreadGrantColumns::detect(&pool).await;
@@ -13516,21 +14552,19 @@ pub async fn serve(
             .await;
     }
 
-    // EP-12 S4: the two services that hold `api_key` methods hand their interceptor the called
-    // path; a key is refused on every service that is not stamped.
+    // EP-12 S4 and F-f10-22: the services that hold `api_key` methods hand their interceptor the
+    // called path; a key is refused on every service that is not stamped.
     let session_core = SessionCoreServer::with_interceptor(session.clone(), auth.clone());
     let run_service = RunServiceServer::with_interceptor(runs, auth.clone());
     tonic::transport::Server::builder()
         .add_service(health_service)
         .add_service(crate::auth::RpcPathStamp::new(session_core))
         .add_service(AttentionServiceServer::with_interceptor(session, auth.clone()))
-        .add_service(ManagedRunLifecycleServer::with_interceptor(
-            managed_lifecycle,
-            auth.clone(),
+        .add_service(crate::auth::RpcPathStamp::new(
+            ManagedRunLifecycleServer::with_interceptor(managed_lifecycle, auth.clone()),
         ))
-        .add_service(OrchestrationCoreServiceServer::with_interceptor(
-            orchestration,
-            auth.clone(),
+        .add_service(crate::auth::RpcPathStamp::new(
+            OrchestrationCoreServiceServer::with_interceptor(orchestration, auth.clone()),
         ))
         // WS14-S5: the single-use spend of a resume question's answer.
         .add_service(RunQuestionConsumeServiceServer::with_interceptor(
@@ -13684,10 +14718,13 @@ const COUNT_WAIVED_RUNS_SQL: &str =
      ORDER BY waiver_connection_id, user_id";
 
 /// `SessionRetentionService`: read-only waived-run counts for the org admin
-/// view. It is served behind the verifying interceptor like every service here,
-/// and it stays beside `SessionCore`, so that trait and its mocks are unchanged.
+/// view, and the thread retention read Control's legal-hold placement asks
+/// (F-f10-02). It is served behind the verifying interceptor like every service
+/// here, and it stays beside `SessionCore`, so that trait and its mocks are unchanged.
 pub struct SessionRetentionGrpc {
     pool: PgPool,
+    /// Whether `GetThreadRetention` answers. Read once, at boot; off, that RPC is unavailable.
+    thread_retention_read: bool,
 }
 
 #[tonic::async_trait]
@@ -13710,6 +14747,49 @@ impl SessionRetentionService for SessionRetentionGrpc {
         }
         .await;
         record_metrics("count_waived_runs", started, result.is_ok());
+        result
+    }
+
+    /// F-f10-02: whether one thread keeps nothing, for org-core's legal-hold placement. The rule is
+    /// `thread_retention_read::nothing_retained`: at least one run, every run `zdr`, and no content row. A waived
+    /// run keeps its content. Two booleans, no run id, count or content. Authorized first and only for org-core
+    /// (see `authorize_thread_retention_read_service`), then the org, then the switch, so a caller that may not
+    /// read learns nothing of the switch.
+    async fn get_thread_retention(
+        &self,
+        request: Request<pb::GetThreadRetentionRequest>,
+    ) -> Result<Response<pb::GetThreadRetentionResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::GetThreadRetentionResponse>, Status> = async {
+            let caller = identity(&request)?;
+            crate::auth::authorize_thread_retention_read_service(&caller)?;
+            let req = request.into_inner();
+            if req.org_id.trim().is_empty() || req.thread_id.trim().is_empty() {
+                return Err(Status::invalid_argument(
+                    "org_id and thread_id are required",
+                ));
+            }
+            caller.authorize_org(&req.org_id)?;
+            if !self.thread_retention_read {
+                return Err(Status::unavailable("thread_retention_read_disabled"));
+            }
+            let answer = crate::thread_retention_read::nothing_retained(
+                &self.pool,
+                &req.org_id,
+                &req.thread_id,
+            )
+            .await
+            .map_err(|error| {
+                warn!(error = %error, "get_thread_retention failed");
+                Status::internal("thread retention is unavailable")
+            })?;
+            Ok(Response::new(pb::GetThreadRetentionResponse {
+                found: answer.is_some(),
+                nothing_retained: answer.unwrap_or(false),
+            }))
+        }
+        .await;
+        record_metrics("get_thread_retention", started, result.is_ok());
         result
     }
 }
@@ -15127,6 +16207,19 @@ mod tests {
         suffix: &str,
         metadata: serde_json::Value,
     ) -> (String, String, String) {
+        seeded_scheduled_run_with_retention(pool, suffix, metadata, "persistent", None).await
+    }
+
+    /// The scheduled thread and run `seeded_unbound_scheduled_run` seeds, with the run's retention class and, for a
+    /// waived run, its waiver ids. A scheduled run is only ever bound as persistent, so a zero-retention or waived
+    /// row is seeded here directly, for the reads that never bind one.
+    async fn seeded_scheduled_run_with_retention(
+        pool: &sqlx::PgPool,
+        suffix: &str,
+        metadata: serde_json::Value,
+        retention_class: &str,
+        waiver: Option<(&str, &str)>,
+    ) -> (String, String, String) {
         let run_id = format!("scheduled-run-{suffix}");
         let thread_id = format!("scheduled-thread-{suffix}");
         let org_id = format!("scheduled-org-{suffix}");
@@ -15157,9 +16250,10 @@ mod tests {
              (id, thread_id, goal, org_id, user_id, status, metadata,
               space_id, space_decision_ref, recipient_audience_ref,
               recipient_audience_revision, recipient_audience_hash,
-              privacy_policy_ref, resource_authorization_ref, authority_revision)
+              privacy_policy_ref, resource_authorization_ref, authority_revision,
+              retention_class, waiver_ack_id, waiver_connection_id)
              VALUES ($1,$2,'scheduled proof goal',$3,'service:orchestrator-core',
-                     'queued',$4,$5,$6,$7,1,$8,$9,$10,1)",
+                     'queued',$4,$5,$6,$7,1,$8,$9,$10,1,$11,$12,$13)",
         )
         .bind(&run_id)
         .bind(&thread_id)
@@ -15171,6 +16265,9 @@ mod tests {
         .bind(&audience_hash)
         .bind(format!("privacy-{suffix}"))
         .bind(format!("resource-{suffix}"))
+        .bind(retention_class)
+        .bind(waiver.map(|(ack, _)| ack))
+        .bind(waiver.map(|(_, connection)| connection))
         .execute(pool)
         .await
         .expect("seed scheduled run");
@@ -15332,6 +16429,10 @@ mod tests {
         .expect("read the bound contract");
         assert_eq!(text, CONTRACT_BINDING_TEXT, "the exact text, byte for byte");
         assert_eq!(digest, req.contract_digest);
+        // A replay of the same bind passes against the text the run already holds.
+        persist_scheduled_run_bindings(&pool, &req)
+            .await
+            .expect("a replay of the same contract bind passes");
     }
 
     /// Real-Postgres proof for F-f03-04: a run bound before the text was kept (the exact binding and contract,
@@ -15647,6 +16748,69 @@ mod tests {
             .await
             .expect_err("a person is refused the scheduled-step read");
         assert_eq!(status.code(), tonic::Code::PermissionDenied);
+    }
+
+    /// Real-Postgres proof for F-f03-04: the scheduled-step read serves the run's own retention class as its zdr and
+    /// zdr_waived flags, so the lane can refuse a zero-retention or waived run. A scheduled run is only ever bound as
+    /// persistent, so these two rows are seeded directly, the way a run that was never bound is read.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn a_scheduled_context_serves_the_run_retention_class_as_its_flags() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+
+        let zdr_suffix = mp_ids::new_ulid();
+        let (zdr_run, zdr_thread, zdr_org) = seeded_scheduled_run_with_retention(
+            &pool,
+            &zdr_suffix,
+            scheduled_binding_metadata(&zdr_suffix),
+            "zdr",
+            None,
+        )
+        .await;
+        let zdr = scheduled_step_context_as(
+            &pool,
+            execution_core_caller(&zdr_org),
+            &zdr_run,
+            &zdr_thread,
+            &zdr_org,
+        )
+        .await
+        .expect("the scheduled step reads a zero-retention run's context");
+        assert!(
+            zdr.zdr && !zdr.zdr_waived,
+            "a zero-retention run is read as zdr"
+        );
+
+        let waived_suffix = mp_ids::new_ulid();
+        let (waived_run, waived_thread, waived_org) = seeded_scheduled_run_with_retention(
+            &pool,
+            &waived_suffix,
+            scheduled_binding_metadata(&waived_suffix),
+            "zdr_waived",
+            Some(("retention-ack-waived", "retention-connection-waived")),
+        )
+        .await;
+        let waived = scheduled_step_context_as(
+            &pool,
+            execution_core_caller(&waived_org),
+            &waived_run,
+            &waived_thread,
+            &waived_org,
+        )
+        .await
+        .expect("the scheduled step reads a waived run's context");
+        assert!(
+            !waived.zdr && waived.zdr_waived,
+            "a waived run is read as zdr_waived"
+        );
     }
 
     /// Real-Postgres proof for WS20 S1: a scheduled answer is appended to its thread
@@ -20552,6 +21716,270 @@ mod tests {
         );
     }
 
+    /// F-f10-07: the two thread erasures a legal hold can refuse record the refusal before they return, and
+    /// before any thread row is deleted, so the audit row exists whatever the erase does next.
+    #[test]
+    fn a_held_thread_erase_is_recorded_before_any_thread_is_deleted() {
+        let source = include_str!("grpc.rs");
+        let production = &source[..source.find("\nmod tests {").expect("the test module")];
+        for (handler, op, erase) in [
+            (
+                "    async fn delete_thread(",
+                "\"thread_delete\"",
+                "DELETE FROM threads WHERE id = $1 AND org_id = $2",
+            ),
+            (
+                "    async fn delete_threads(",
+                "\"bulk_delete\"",
+                "delete_thread_rows(&mut tx, thread_id)",
+            ),
+        ] {
+            let from = &production[production
+                .find(handler)
+                .unwrap_or_else(|| panic!("the handler {handler:?}"))..];
+            let body = &from[..from
+                .find("record_metrics(")
+                .unwrap_or_else(|| panic!("the end of {handler:?}"))];
+            let recorded = body
+                .find("crate::gdpr::record_refused_erasure(")
+                .unwrap_or_else(|| panic!("{handler:?} records its refusal"));
+            assert!(body.contains(op), "{handler:?} names its operation {op}");
+            let erased = body
+                .find(erase)
+                .unwrap_or_else(|| panic!("{handler:?} erases {erase:?}"));
+            assert!(
+                recorded < erased,
+                "{handler:?} records its refusal before it erases"
+            );
+        }
+    }
+
+    /// The hold gate a test installs: the switch on and org-core at `url`, with the service credential the
+    /// check route is called with.
+    fn org_core_hold_gate(url: &str) -> crate::gdpr::ErasureHoldGate {
+        crate::gdpr::ErasureHoldGate::from_lookup(|name| match name {
+            crate::gdpr::ERASURE_HOLD_CHECK_ENV => Some("true".to_owned()),
+            crate::org_policy::ORG_CORE_URL_ENV => Some(url.to_owned()),
+            crate::org_policy::SERVICE_TOKEN_ENV => Some("session-token".to_owned()),
+            _ => None,
+        })
+    }
+
+    /// F-f10-07: a held thread erase, driven through the two handlers that can refuse it. A thread delete and a bulk
+    /// delete of a held thread are each refused as `FailedPrecondition` with the typed legal-hold word, each writes
+    /// exactly one content-free `erasure_refused` row, and neither deletes anything: the thread and its message are
+    /// still there. An unanswered check is `Unavailable` and writes no row. org-core is a wiremock, installed as this
+    /// test's gate on the test's own thread.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres whose name contains \"test\""]
+    #[allow(clippy::too_many_lines)]
+    async fn a_held_thread_erase_is_refused_audited_once_and_deletes_nothing() {
+        use crate::space::test_support;
+        use serde_json::json;
+
+        async fn count_rows(pool: &sqlx::PgPool, table: &str, column: &str, value: &str) -> i64 {
+            let query = format!("SELECT count(*) FROM {table} WHERE {column} = $1");
+            let (count,): (i64,) = sqlx::query_as(&query)
+                .bind(value)
+                .fetch_one(pool)
+                .await
+                .expect("count the rows");
+            count
+        }
+
+        async fn refused_rows(pool: &sqlx::PgPool, org: &str, op: Option<&str>) -> i64 {
+            let (count,): (i64,) = sqlx::query_as(
+                "SELECT count(*) FROM session_audit_outbox
+                 WHERE payload ->> 'org_id' = $1 AND payload ->> 'event' = 'erasure_refused'
+                   AND ($2::text IS NULL OR payload -> 'details' ->> 'op' = $2)",
+            )
+            .bind(org)
+            .bind(op)
+            .fetch_one(pool)
+            .await
+            .expect("count the refused-erasure rows");
+            count
+        }
+
+        fn refusal_word(status: &tonic::Status) -> Option<String> {
+            status
+                .metadata()
+                .get(crate::run_phase::ERROR_CODE_TRAILER)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        }
+
+        let Some(pool) = test_support::connect().await else {
+            return;
+        };
+        let nonce = mp_ids::new_ulid();
+        let org = format!("erase-held-org-{nonce}");
+        let owner = format!("erase-held-owner-{nonce}");
+        let thread = format!("erase-held-thread-{nonce}");
+        let message = format!("erase-held-msg-{nonce}");
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, $2, $3)",
+        )
+        .bind(&thread)
+        .bind(&org)
+        .bind(&owner)
+        .execute(&pool)
+        .await
+        .expect("seed thread");
+        sqlx::query(
+            "INSERT INTO messages (id, thread_id, role, content) VALUES ($1, $2, 'user', 'held transcript')",
+        )
+        .bind(&message)
+        .bind(&thread)
+        .execute(&pool)
+        .await
+        .expect("seed message");
+
+        // org-core holds this thread. Only the check route for this org is answered.
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(format!(
+                "/internal/orgs/{org}/retention/check"
+            )))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({
+                "organization_id": org.as_str(),
+                "window_days": null,
+                "revision": 0,
+                "org_held": false,
+                "held_thread_ids": [thread.as_str()],
+            })))
+            .mount(&server)
+            .await;
+
+        let svc = super::SessionService {
+            pool: pool.clone(),
+            retrieval_client: None,
+            graph_client: None,
+            knowledge_client: None,
+            letta_memory: None,
+            audit_publisher: None,
+            auth: None,
+            grant_columns: crate::grpc::ThreadGrantColumns::present(),
+        };
+        let _gate = crate::gdpr::test_gate::install(org_core_hold_gate(&server.uri()));
+
+        // A thread delete of the held thread is refused, and audited once.
+        let mut request = Request::new(pb::DeleteThreadRequest {
+            org_id: org.clone(),
+            thread_id: thread.clone(),
+        });
+        request
+            .extensions_mut()
+            .insert(VerifiedIdentity::user_for_test(&org, &owner));
+        let status = svc
+            .delete_thread(request)
+            .await
+            .expect_err("the hold refuses the thread delete");
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition, "{status:?}");
+        assert_eq!(
+            refusal_word(&status).as_deref(),
+            Some(crate::gdpr::ERASURE_BLOCKED_LEGAL_HOLD),
+            "{status:?}"
+        );
+        assert_eq!(
+            refused_rows(&pool, &org, Some("thread_delete")).await,
+            1,
+            "one refused thread delete, one row"
+        );
+        assert_eq!(count_rows(&pool, "threads", "id", &thread).await, 1);
+        assert_eq!(count_rows(&pool, "messages", "thread_id", &thread).await, 1);
+
+        // A bulk delete of the owner's threads is refused the same way, and audited once.
+        let mut request = Request::new(pb::DeleteThreadsRequest {
+            org_id: org.clone(),
+            user_id: owner.clone(),
+        });
+        request
+            .extensions_mut()
+            .insert(VerifiedIdentity::user_for_test(&org, &owner));
+        let status = svc
+            .delete_threads(request)
+            .await
+            .expect_err("the hold refuses the bulk delete");
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition, "{status:?}");
+        assert_eq!(
+            refusal_word(&status).as_deref(),
+            Some(crate::gdpr::ERASURE_BLOCKED_LEGAL_HOLD),
+            "{status:?}"
+        );
+        assert_eq!(
+            refused_rows(&pool, &org, Some("bulk_delete")).await,
+            1,
+            "one refused bulk delete, one row"
+        );
+        assert_eq!(count_rows(&pool, "threads", "id", &thread).await, 1);
+        assert_eq!(count_rows(&pool, "messages", "thread_id", &thread).await, 1);
+
+        // Each row names the organisation and the actor, a count and closed words, never the thread or the message.
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT payload::text FROM session_audit_outbox
+             WHERE payload ->> 'org_id' = $1 AND payload ->> 'event' = 'erasure_refused'",
+        )
+        .bind(&org)
+        .fetch_all(&pool)
+        .await
+        .expect("read the refused-erasure rows");
+        assert_eq!(rows.len(), 2, "one row per refused erase");
+        for row in &rows {
+            assert!(
+                !row.contains(thread.as_str()) && !row.contains(message.as_str()),
+                "the row names no thread or message: {row}"
+            );
+            let body: serde_json::Value = serde_json::from_str(row).expect("the row is JSON");
+            assert_eq!(body["user_id"], owner.as_str());
+            assert_eq!(body["outcome"], "denied");
+            assert_eq!(body["details"]["scope"], "threads");
+            assert_eq!(body["details"]["held_threads"], 1);
+        }
+
+        // An unanswered check decided nothing: the erase is refused as unavailable, and writes no row.
+        let _unanswered = crate::gdpr::test_gate::install(org_core_hold_gate("http://127.0.0.1:9"));
+        let mut request = Request::new(pb::DeleteThreadRequest {
+            org_id: org.clone(),
+            thread_id: thread.clone(),
+        });
+        request
+            .extensions_mut()
+            .insert(VerifiedIdentity::user_for_test(&org, &owner));
+        let status = svc
+            .delete_thread(request)
+            .await
+            .expect_err("an unanswered check refuses the erase");
+        assert_eq!(status.code(), tonic::Code::Unavailable, "{status:?}");
+        assert_eq!(
+            refusal_word(&status).as_deref(),
+            Some(crate::gdpr::ERASURE_HOLD_CHECK_UNAVAILABLE),
+            "{status:?}"
+        );
+        assert_eq!(
+            refused_rows(&pool, &org, None).await,
+            2,
+            "an unanswered check writes no row"
+        );
+        assert_eq!(count_rows(&pool, "threads", "id", &thread).await, 1);
+
+        sqlx::query("DELETE FROM session_audit_outbox WHERE payload ->> 'org_id' = $1")
+            .bind(&org)
+            .execute(&pool)
+            .await
+            .expect("clean the audit rows");
+        sqlx::query("DELETE FROM messages WHERE thread_id = $1")
+            .bind(&thread)
+            .execute(&pool)
+            .await
+            .expect("clean the message");
+        sqlx::query("DELETE FROM threads WHERE id = $1")
+            .bind(&thread)
+            .execute(&pool)
+            .await
+            .expect("clean the thread");
+    }
+
     /// EP-9 C4: a Space deletion asks the legal-hold gate before it erases any memory or
     /// thread. The gate is asked after the owner's Space threads are locked, so it checks the
     /// same set the loop erases (the order `delete_threads` uses), and before the first
@@ -25320,6 +26748,16 @@ mod waived_run_count_wire_tests {
         std::net::TcpListener,
         SessionRetentionServiceClient<Channel>,
     ) {
+        retention_client_with(false).await
+    }
+
+    /// The same service, with its thread retention read switched `thread_retention_read`.
+    async fn retention_client_with(
+        thread_retention_read: bool,
+    ) -> (
+        std::net::TcpListener,
+        SessionRetentionServiceClient<Channel>,
+    ) {
         let silent_database = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let pool = sqlx::postgres::PgPoolOptions::new()
             .acquire_timeout(Duration::from_millis(250))
@@ -25335,7 +26773,10 @@ mod waived_run_count_wire_tests {
         tokio::spawn(async move {
             tonic::transport::Server::builder()
                 .add_service(SessionRetentionServiceServer::with_interceptor(
-                    SessionRetentionGrpc { pool },
+                    SessionRetentionGrpc {
+                        pool,
+                        thread_retention_read,
+                    },
                     verifier("session-core"),
                 ))
                 .serve_with_incoming(
@@ -25461,6 +26902,157 @@ mod waived_run_count_wire_tests {
     fn the_count_query_spells_the_receipt_class_the_index_is_built_for() {
         assert_eq!(RetentionClass::ZdrWaived.as_str(), "zdr_waived");
         assert!(COUNT_WAIVED_RUNS_SQL.contains("retention_class = 'zdr_waived'"));
+    }
+
+    /// One `GetThreadRetention` call as org-core makes it: the bearer in `authorization`, signed the way
+    /// Auth Core signs it.
+    async fn retention_of(
+        client: &mut SessionRetentionServiceClient<Channel>,
+        claims: &serde_json::Value,
+        org_id: &str,
+        thread_id: &str,
+    ) -> Result<pb::GetThreadRetentionResponse, Status> {
+        let mut request = tonic::Request::new(pb::GetThreadRetentionRequest {
+            org_id: org_id.to_owned(),
+            thread_id: thread_id.to_owned(),
+        });
+        request.metadata_mut().insert(
+            "authorization",
+            format!("Bearer {}", sign(claims, KID))
+                .parse()
+                .expect("bearer metadata"),
+        );
+        client
+            .get_thread_retention(request)
+            .await
+            .map(tonic::Response::into_inner)
+    }
+
+    /// The org-core credential for `org`, as Auth Core would issue it for the scopes and posture given.
+    fn org_core_claims(org: &str, scopes: &[&str], zdr: bool) -> serde_json::Value {
+        service_principal_claims(
+            "session-core",
+            org,
+            "org-core",
+            scopes,
+            "org-core thread retention read",
+            zdr,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_user_credential_cannot_read_thread_retention_even_with_the_scope() {
+        let (_silent_database, mut client) = retention_client_with(true).await;
+        let mut claims = user_claims("session-core", ORG, "user-admin", false);
+        claims["scopes"] = serde_json::json!([crate::auth::THREAD_RETENTION_READ_SCOPE]);
+        let status = retention_of(&mut client, &claims, ORG, "thr-1")
+            .await
+            .expect_err("a user credential never reads thread retention");
+        assert_eq!(status.code(), Code::PermissionDenied, "{status:?}");
+        assert!(
+            status
+                .message()
+                .contains("only org-core may read thread retention"),
+            "{status:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn only_org_core_holding_the_scope_may_read_thread_retention() {
+        let (_silent_database, mut client) = retention_client_with(true).await;
+        let scope = crate::auth::THREAD_RETENTION_READ_SCOPE;
+        for claims in [
+            org_core_claims(ORG, &[], false),
+            org_core_claims(ORG, &["session:read"], false),
+            service_principal_claims(
+                "session-core",
+                ORG,
+                "session-core",
+                &[scope],
+                "reads",
+                false,
+            ),
+            service_principal_claims(
+                "session-core",
+                ORG,
+                "sandbox-manager",
+                &[scope],
+                "reads",
+                false,
+            ),
+        ] {
+            let status = retention_of(&mut client, &claims, ORG, "thr-1")
+                .await
+                .expect_err("only org-core with the read scope may read");
+            assert_eq!(status.code(), Code::PermissionDenied, "{status:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn org_core_cannot_read_another_orgs_thread_retention() {
+        let (_silent_database, mut client) = retention_client_with(true).await;
+        let claims = org_core_claims(ORG, &[crate::auth::THREAD_RETENTION_READ_SCOPE], false);
+        let status = retention_of(&mut client, &claims, "org-count-b", "thr-1")
+            .await
+            .expect_err("the credential names one org only");
+        assert_eq!(status.code(), Code::PermissionDenied, "{status:?}");
+        assert!(
+            status.message().contains("tenant access denied"),
+            "{status:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_org_or_thread_is_an_invalid_request() {
+        let (_silent_database, mut client) = retention_client_with(true).await;
+        let claims = org_core_claims(ORG, &[crate::auth::THREAD_RETENTION_READ_SCOPE], false);
+        for (org, thread) in [(ORG, ""), ("", "thr-1")] {
+            let status = retention_of(&mut client, &claims, org, thread)
+                .await
+                .expect_err("a thread and an org are required");
+            assert_eq!(status.code(), Code::InvalidArgument, "{status:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn thread_retention_is_unavailable_while_its_switch_is_off() {
+        let (_silent_database, mut client) = retention_client_with(false).await;
+        let claims = org_core_claims(ORG, &[crate::auth::THREAD_RETENTION_READ_SCOPE], false);
+        let status = retention_of(&mut client, &claims, ORG, "thr-1")
+            .await
+            .expect_err("off answers unavailable");
+        assert_eq!(status.code(), Code::Unavailable, "{status:?}");
+        assert_eq!(status.message(), "thread_retention_read_disabled");
+    }
+
+    #[tokio::test]
+    async fn an_authorized_read_reaches_the_query_and_gets_only_a_generic_failure() {
+        let (_silent_database, mut client) = retention_client_with(true).await;
+        let claims = org_core_claims(ORG, &[crate::auth::THREAD_RETENTION_READ_SCOPE], false);
+        let status = retention_of(&mut client, &claims, ORG, "thr-1")
+            .await
+            .expect_err("the silent database cannot answer");
+        // Every credential and switch check passed. The failure is the database, and the caller
+        // learns nothing of it beyond that.
+        assert_eq!(status.code(), Code::Internal, "{status:?}");
+        assert_eq!(
+            status.message(),
+            "thread retention is unavailable",
+            "database errors are not echoed to the caller"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_zdr_org_core_credential_is_refused_with_the_legal_hold_feature() {
+        let (_silent_database, mut client) = retention_client_with(true).await;
+        let claims = org_core_claims(ORG, &[crate::auth::THREAD_RETENTION_READ_SCOPE], true);
+        let status = retention_of(&mut client, &claims, ORG, "thr-1")
+            .await
+            .expect_err("ZDR is refused");
+        assert_eq!(status.code(), Code::FailedPrecondition, "{status:?}");
+        let refusal = Refusal::from_status(&status).expect("the status carries a catalogue kind");
+        assert_eq!(refusal.code(), "zdr_feature_not_supported");
+        assert_eq!(refusal.feature(), Some("legal_hold"));
     }
 }
 
@@ -25588,12 +27180,15 @@ mod waived_run_count_db_tests {
             },
         )
         .expect("the admin credential is accepted");
-        SessionRetentionGrpc { pool: pool.clone() }
-            .count_waived_runs(request)
-            .await
-            .expect("the count reads")
-            .into_inner()
-            .counts
+        SessionRetentionGrpc {
+            pool: pool.clone(),
+            thread_retention_read: false,
+        }
+        .count_waived_runs(request)
+        .await
+        .expect("the count reads")
+        .into_inner()
+        .counts
     }
 
     /// The down script opens and closes its own transaction. Inside ours that
@@ -26651,6 +28246,112 @@ mod thread_list_db_tests {
         assert!(found.next_cursor.is_empty());
     }
 
+    /// `ThreadSummary.fork_count` (WS17 S6): a source reports how many live threads were forked from it, read by its
+    /// owner. The count follows the forks that exist and reads 0 while the fork switch is off. The switch is set here
+    /// only, under the lock the fork switch's own tests take, and a guard clears it when the test leaves scope.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn list_threads_reports_how_many_live_forks_a_thread_has() {
+        use crate::thread_fork::{
+            copy_thread, erase_thread_as_delete_thread_does, ENABLED_ENV, FORK_SWITCH_LOCK,
+        };
+
+        /// Clears the switch when it leaves scope, so a failing assertion cannot leave it on.
+        struct SwitchOn;
+        impl Drop for SwitchOn {
+            fn drop(&mut self) {
+                std::env::remove_var(ENABLED_ENV);
+            }
+        }
+
+        fn fork_count_of(page: &pb::ListThreadsResponse, thread: &str) -> i32 {
+            page.threads
+                .iter()
+                .find(|summary| summary.thread_id == thread)
+                .unwrap_or_else(|| panic!("{thread} is listed"))
+                .fork_count
+        }
+
+        let _switch_lock = FORK_SWITCH_LOCK.lock().await;
+        let pool = connect().await;
+        let suffix = new_ulid();
+        let org = format!("fork-count-test-{suffix}");
+        let user = "fork-count-owner";
+        let source = format!("{suffix}-source");
+        seed_thread(&pool, &org, user, &source, 0, false, false).await;
+        let mut tx = pool.begin().await.unwrap();
+        append_message_in_tx(
+            &mut tx,
+            &pb::AppendMessageRequest {
+                thread_id: source.clone(),
+                role: "user".to_owned(),
+                content: "question".to_owned(),
+                ..Default::default()
+            },
+            user,
+        )
+        .await
+        .unwrap();
+        let answer = append_message_in_tx(
+            &mut tx,
+            &pb::AppendMessageRequest {
+                thread_id: source.clone(),
+                role: "assistant".to_owned(),
+                content: "answer".to_owned(),
+                ..Default::default()
+            },
+            user,
+        )
+        .await
+        .unwrap()
+        .message_id;
+        tx.commit().await.unwrap();
+
+        let owner = crate::auth::VerifiedIdentity::user_for_test(&org, user);
+        let fork_of_answer = || pb::ForkThreadRequest {
+            org_id: org.clone(),
+            thread_id: source.clone(),
+            from_message_id: answer.clone(),
+            title: String::new(),
+        };
+        let first = copy_thread(&pool, &owner, fork_of_answer())
+            .await
+            .unwrap()
+            .new_thread_id;
+        let second = copy_thread(&pool, &owner, fork_of_answer())
+            .await
+            .unwrap()
+            .new_thread_id;
+
+        let svc = service(pool.clone());
+        std::env::set_var(ENABLED_ENV, "true");
+        let _switch = SwitchOn;
+        let page = list(&svc, &org, user, pb::ListThreadsRequest::default()).await;
+        assert_eq!(fork_count_of(&page, &source), 2, "two live forks");
+        assert_eq!(
+            fork_count_of(&page, &first),
+            0,
+            "a fork has no forks of its own"
+        );
+
+        std::env::remove_var(ENABLED_ENV);
+        let page = list(&svc, &org, user, pb::ListThreadsRequest::default()).await;
+        assert_eq!(
+            fork_count_of(&page, &source),
+            0,
+            "with the switch off the count reads 0, though both forks remain"
+        );
+
+        std::env::set_var(ENABLED_ENV, "true");
+        erase_thread_as_delete_thread_does(&pool, &org, &first).await;
+        let page = list(&svc, &org, user, pb::ListThreadsRequest::default()).await;
+        assert_eq!(fork_count_of(&page, &source), 1, "one live fork is left");
+
+        erase_thread_as_delete_thread_does(&pool, &org, &second).await;
+        let page = list(&svc, &org, user, pb::ListThreadsRequest::default()).await;
+        assert_eq!(fork_count_of(&page, &source), 0, "no live fork is left");
+    }
+
     #[tokio::test]
     #[ignore = "requires DATABASE_URL to a disposable Postgres"]
     async fn archived_filter_separates_active_archived_and_all() {
@@ -27087,6 +28788,98 @@ mod thread_list_db_tests {
                 .await
                 .unwrap();
         assert!(archived);
+    }
+
+    /// F-f02-06: both archive paths key THREAD_ARCHIVED per archive instance, never per thread alone. A restore
+    /// lets a thread be archived again, and events is unique on (org_id, idempotency_key). Reads this file's
+    /// production part, as the other source-scan tests here do.
+    #[test]
+    fn both_archive_paths_key_the_event_per_archive_instance() {
+        let source = include_str!("grpc.rs");
+        let production = &source[..source.find("\nmod tests {").expect("the test module")];
+        let single_at = production
+            .find("    async fn archive_thread(")
+            .expect("archive_thread");
+        let bulk_at = production
+            .find("    async fn archive_threads(")
+            .expect("archive_threads");
+        let end_at = production
+            .find("    async fn delete_thread(")
+            .expect("delete_thread");
+        let single = &production[single_at..bulk_at];
+        let bulk = &production[bulk_at..end_at];
+        let single_key = "&format!(\"{}:archived:{}\", req.thread_id, archived_at.to_rfc3339())";
+        let bulk_key = "&format!(\"{thread_id}:archived:{}\", now.to_rfc3339())";
+        assert!(
+            single.contains(single_key),
+            "archive_thread keys by the archive instance"
+        );
+        assert!(
+            bulk.contains(bulk_key),
+            "archive_threads keys by the archive instance"
+        );
+        assert!(
+            !bulk.contains("{thread_id}:archived\")"),
+            "the per-thread key is gone from the bulk path"
+        );
+    }
+
+    /// F-f02-06: archiving a user's threads in bulk, restoring one, and bulk-archiving again writes a second
+    /// THREAD_ARCHIVED event. The old per-thread key made the second INSERT collide on the idempotency index,
+    /// which rolled back the whole bulk transaction with Status::internal.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn bulk_archive_after_restore_writes_a_second_archived_event() {
+        let pool = connect().await;
+        let suffix = new_ulid();
+        let org = format!("bulk-re-archive-test-{suffix}");
+        let user = "bulk-re-archive-user";
+        let thread_id = format!("{suffix}-b1");
+        seed_thread(&pool, &org, user, &thread_id, 1, false, false).await;
+        let svc = service(pool.clone());
+        let archive_all = || {
+            let mut request = Request::new(pb::ArchiveThreadsRequest {
+                org_id: org.clone(),
+                user_id: user.to_owned(),
+            });
+            request
+                .extensions_mut()
+                .insert(VerifiedIdentity::user_for_test(&org, user));
+            svc.archive_threads(request)
+        };
+        let restore = || {
+            let mut request = Request::new(pb::UpdateThreadPresentationRequest {
+                org_id: org.clone(),
+                thread_id: thread_id.clone(),
+                archived: Some(false),
+                ..Default::default()
+            });
+            request
+                .extensions_mut()
+                .insert(VerifiedIdentity::user_for_test(&org, user));
+            svc.update_thread_presentation(request)
+        };
+
+        let first = archive_all().await.expect("first bulk archive");
+        assert_eq!(first.into_inner().archived_count, 1);
+        restore().await.expect("restore");
+        let again = archive_all().await.expect("bulk re-archive after restore");
+        assert_eq!(
+            again.into_inner().archived_count,
+            1,
+            "the restored thread is archived again"
+        );
+
+        let archived_events: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events
+             WHERE org_id = $1 AND event_type = 'THREAD_ARCHIVED' AND resource_ref = $2",
+        )
+        .bind(&org)
+        .bind(format!("thread:{thread_id}"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(archived_events, 2, "each bulk archive writes its own event");
     }
 
     #[tokio::test]
@@ -27739,3 +29532,7 @@ mod space_mentions_tests;
 #[cfg(test)]
 #[path = "grpc_owed_tests.rs"]
 mod owed_tests;
+
+#[cfg(test)]
+#[path = "grpc_api_key_run_tests.rs"]
+mod api_key_run_tests;

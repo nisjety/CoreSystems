@@ -2441,6 +2441,7 @@ describeIfPolicy('principal bundle R-13 PR 1: quarry-edge model lanes', () => {
       'model-gateway-goal-judge',
       'model-gateway-mail-task-bridge',
       'orchestrator-core',
+      'org-core',
       'quarry-edge',
       'retrieval-engine',
       'sandbox-manager',

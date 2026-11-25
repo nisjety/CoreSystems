@@ -5,6 +5,7 @@ import {
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 
 const mockGetSession = jest.fn();
@@ -305,21 +306,39 @@ describe('PlaneTokenController interactive capability scope issuance', () => {
   });
 
   it('requests fresh proof only for the execution audience, without changing normal minting when unavailable', async () => {
-    mockResolveCanonicalTokenContext.mockResolvedValue({ orgId: 'org-a', role: 'member' });
+    mockResolveCanonicalTokenContext.mockResolvedValue({
+      orgId: 'org-a',
+      role: 'member',
+    });
     const tokens = {
       isInteractivePlaneAudience: jest.fn().mockReturnValue(true),
       issuePlaneToken: jest.fn().mockReturnValue({ token: 'interactive' }),
     };
     const controller = new PlaneTokenController(tokens as never, {} as never);
-    const proof = { orgId: 'org-a', authority: 'fresh-interactive-org-retention-policy', zdr: false };
-    mockResolveFreshExecutionRetentionProof.mockResolvedValueOnce(proof).mockResolvedValueOnce(undefined);
+    const proof = {
+      orgId: 'org-a',
+      authority: 'fresh-interactive-org-retention-policy',
+      zdr: false,
+    };
+    mockResolveFreshExecutionRetentionProof
+      .mockResolvedValueOnce(proof)
+      .mockResolvedValueOnce(undefined);
     await controller.getToken('execution-core', { headers: {} } as never);
-    expect(tokens.issuePlaneToken).toHaveBeenLastCalledWith('execution-core', expect.objectContaining({ executionRetentionProof: proof }));
+    expect(tokens.issuePlaneToken).toHaveBeenLastCalledWith(
+      'execution-core',
+      expect.objectContaining({ executionRetentionProof: proof }),
+    );
     await controller.getToken('execution-core', { headers: {} } as never);
-    expect(tokens.issuePlaneToken).toHaveBeenLastCalledWith('execution-core', expect.objectContaining({ executionRetentionProof: undefined }));
+    expect(tokens.issuePlaneToken).toHaveBeenLastCalledWith(
+      'execution-core',
+      expect.objectContaining({ executionRetentionProof: undefined }),
+    );
     await controller.getToken('session-core', { headers: {} } as never);
     expect(mockResolveFreshExecutionRetentionProof).toHaveBeenCalledTimes(2);
-    mockResolveInteractiveRetentionPosture.mockResolvedValue({ zdr: true, authority: 'interactive-org-retention-policy' });
+    mockResolveInteractiveRetentionPosture.mockResolvedValue({
+      zdr: true,
+      authority: 'interactive-org-retention-policy',
+    });
     await controller.getToken('execution-core', { headers: {} } as never);
     expect(mockResolveFreshExecutionRetentionProof).toHaveBeenCalledTimes(2);
   });
@@ -367,6 +386,62 @@ describe('PlaneTokenController interactive capability scope issuance', () => {
       expect(mockResolveInteractiveRetentionPosture).toHaveBeenCalledWith(
         'org-a',
       );
+    },
+  );
+
+  it.each([
+    ['member', ['capability:read']],
+    ['viewer', ['capability:read']],
+    ['compliance', ['capability:read']],
+    ['admin', ['capability:read', 'capability:write', 'capability:admin']],
+    ['owner', ['capability:read', 'capability:write', 'capability:admin']],
+  ] as const)(
+    'mints capability:admin for %s only while PLANE_TOKEN_CAPABILITY_ADMIN_SCOPE is the literal true',
+    async (role, expectedScopes) => {
+      const original = process.env.PLANE_TOKEN_CAPABILITY_ADMIN_SCOPE;
+      process.env.PLANE_TOKEN_CAPABILITY_ADMIN_SCOPE = 'true';
+      try {
+        mockResolveCanonicalTokenContext.mockResolvedValue({
+          orgId: 'org-a',
+          role,
+        });
+        const tokens = {
+          isInteractivePlaneAudience: jest.fn().mockReturnValue(true),
+          issuePlaneToken: jest.fn().mockReturnValue({ token: 'interactive' }),
+        };
+        const controller = new PlaneTokenController(
+          tokens as never,
+          {} as never,
+        );
+
+        await expect(
+          controller.getToken('capability-core', {
+            headers: { cookie: 'session=test' },
+          } as never),
+        ).resolves.toEqual(
+          expect.objectContaining({
+            token: 'interactive',
+            orgId: 'org-a',
+            role,
+          }),
+        );
+        expect(tokens.issuePlaneToken).toHaveBeenCalledWith('capability-core', {
+          userId: 'user-a',
+          orgId: 'org-a',
+          email: 'user@example.test',
+          scopes: expectedScopes,
+          retentionPosture: {
+            zdr: false,
+            authority: 'interactive-org-retention-policy',
+          },
+        });
+      } finally {
+        if (original === undefined) {
+          delete process.env.PLANE_TOKEN_CAPABILITY_ADMIN_SCOPE;
+        } else {
+          process.env.PLANE_TOKEN_CAPABILITY_ADMIN_SCOPE = original;
+        }
+      }
     },
   );
 
@@ -465,11 +540,13 @@ describe('PlaneTokenController delegated-identity token exchange (issueTokenExch
     }
   });
 
-  function buildController(overrides: {
-    verifyPlaneSubjectToken?: jest.Mock;
-    issuePlaneToken?: jest.Mock;
-    publishAuditDurable?: jest.Mock;
-  } = {}) {
+  function buildController(
+    overrides: {
+      verifyPlaneSubjectToken?: jest.Mock;
+      issuePlaneToken?: jest.Mock;
+      publishAuditDurable?: jest.Mock;
+    } = {},
+  ) {
     const tokens = {
       isKnownPlaneAudience: jest.fn().mockReturnValue(true),
       verifyPlaneSubjectToken:
@@ -487,7 +564,11 @@ describe('PlaneTokenController delegated-identity token exchange (issueTokenExch
           seq: 1,
         }),
     };
-    return { controller: new PlaneTokenController(tokens as never, audit as never), tokens, audit };
+    return {
+      controller: new PlaneTokenController(tokens as never, audit as never),
+      tokens,
+      audit,
+    };
   }
 
   const validBody = {
@@ -516,7 +597,7 @@ describe('PlaneTokenController delegated-identity token exchange (issueTokenExch
     );
     expect(tokens.issuePlaneToken).toHaveBeenCalledWith(
       'ingestion',
-      expect.objectContaining({
+      expect.objectContaining<Record<string, unknown>>({
         userId: 'service:model-execution',
         orgId: 'org-a',
         actingUserId: 'user-a',
@@ -527,7 +608,7 @@ describe('PlaneTokenController delegated-identity token exchange (issueTokenExch
     );
     expect(audit.publishAuditDurable).toHaveBeenCalledWith(
       'verevon.audit.v2.control.auth-core.plane_service_token_exchanged',
-      expect.objectContaining({
+      expect.objectContaining<Record<string, unknown>>({
         subject: 'service:model-execution',
         resource_id: 'ingestion',
         details: expect.objectContaining({ acting_user_id: 'user-a' }),
@@ -869,4 +950,21 @@ describe('PlaneTokenController compliance role agent refusal', () => {
       expect(tokens.issuePlaneToken).toHaveBeenCalledTimes(1);
     },
   );
+});
+
+it('keeps this spec free of prettier findings (lint pin, P2-cp-12-rel1)', () => {
+  const bin = require.resolve('prettier/bin/prettier.cjs');
+  // `--check` also exits 0 for an ignored file, so first pin that this spec is
+  // not excluded by .prettierignore.
+  const info = spawnSync(process.execPath, [bin, '--file-info', __filename], {
+    encoding: 'utf8',
+  });
+  expect(JSON.parse(info.stdout)).toMatchObject({ ignored: false });
+  const check = spawnSync(process.execPath, [bin, '--check', __filename], {
+    encoding: 'utf8',
+  });
+  expect(check.stdout + check.stderr).toContain(
+    'All matched files use Prettier code style!',
+  );
+  expect(check.status).toBe(0);
 });

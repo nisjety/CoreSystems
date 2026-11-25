@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -1493,6 +1494,15 @@ FOR UPDATE`, orgID).Scan(&storedRevision, &completedAt, &storedReceipt); err != 
 			return nil
 		}
 
+		// Legal-hold gate (F-f10-06, D-C1): with ERASURE_HOLD_CHECK on, a held organisation is
+		// not erased here. The tombstone above stays incomplete, so the retry resumes once the
+		// holds are released. Off, the gate is not run and the erasure is unchanged.
+		if erasureHoldCheckOn() {
+			if err := refuseHeldOrganizationErasure(ctx, tx, orgID); err != nil {
+				return err
+			}
+		}
+
 		if err := tx.QueryRow(ctx, `SELECT gdpr_hard_delete_organization($1)`, orgID).Scan(&receipt); err != nil {
 			return fmt.Errorf("gdpr_hard_delete_organization: %w", err)
 		}
@@ -1553,11 +1563,36 @@ func (r *Repository) SoftDeleteOrganization(
 // PurgeOldDeletedOrganizations invokes purge_old_deleted_organizations($1),
 // hard-deleting organizations soft-deleted more than daysThreshold days ago.
 // Returns the proc's JSONB receipt ({ purged_count, org_ids, ... }) verbatim.
+//
+// With ERASURE_HOLD_CHECK the literal "true" (F-f10-06), the call runs in one
+// transaction that first sets app.erasure_hold_check to 'on', so the proc
+// (migration 037) skips every organisation with an active legal hold and names
+// the skipped ones in the receipt's held_org_ids. Off, the call is exactly the
+// single statement it always was.
 func (r *Repository) PurgeOldDeletedOrganizations(ctx context.Context, daysThreshold int) (json.RawMessage, error) {
-	var receipt []byte
-	err := r.pool.QueryRow(ctx, `SELECT purge_old_deleted_organizations($1)`, daysThreshold).Scan(&receipt)
+	if os.Getenv(envErasureHoldCheck) != "true" {
+		var receipt []byte
+		err := r.pool.QueryRow(ctx, `SELECT purge_old_deleted_organizations($1)`, daysThreshold).Scan(&receipt)
+		if err != nil {
+			return nil, fmt.Errorf("purge_old_deleted_organizations: %w", err)
+		}
+		return json.RawMessage(receipt), nil
+	}
+	tx, err := r.pool.Begin(ctx)
 	if err != nil {
+		return nil, fmt.Errorf("purge_old_deleted_organizations: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	// set_config(..., true) is SET LOCAL: the setting ends with this transaction.
+	if _, err := tx.Exec(ctx, `SELECT set_config('app.erasure_hold_check', $1, true)`, "on"); err != nil {
+		return nil, fmt.Errorf("purge_old_deleted_organizations: set hold check: %w", err)
+	}
+	var receipt []byte
+	if err := tx.QueryRow(ctx, `SELECT purge_old_deleted_organizations($1)`, daysThreshold).Scan(&receipt); err != nil {
 		return nil, fmt.Errorf("purge_old_deleted_organizations: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("purge_old_deleted_organizations: commit: %w", err)
 	}
 	return json.RawMessage(receipt), nil
 }

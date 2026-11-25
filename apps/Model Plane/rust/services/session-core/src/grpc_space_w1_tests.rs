@@ -978,3 +978,65 @@ fn signed_history_floor_is_honoured_only_while_the_switch_is_the_literal_true() 
         );
     }
 }
+
+/// R-sws-01: a run-control decision signs the stop floor the way a read does. Session Core honours it only while
+/// the switch is the literal true, and the floor sits outside the decision's signature and digest, so the switch
+/// never changes what the token authorizes.
+#[test]
+fn signed_run_control_floor_is_honoured_only_while_the_switch_is_the_literal_true() {
+    let token = live_run_control_token(
+        "org-1",
+        "user-1",
+        "space-room",
+        "run-1",
+        "key-1",
+        4,
+        Some(7),
+    );
+    // The claims carry the wall clock (live_run_control_token), so verify at the wall clock too.
+    let now = Utc::now();
+    let verify = || {
+        verify_run_control_space_decision_with_key(
+            &token,
+            DECISION_REF,
+            "org-1",
+            "user-1",
+            "space-room",
+            "run-1",
+            "key-1",
+            KEY_ID,
+            &signing_key().verifying_key(),
+            now,
+        )
+        .expect("the signed run-control decision verifies")
+    };
+    {
+        let _env = HistoryFloorEnv::set(Some("true"));
+        let verified = verify();
+        assert_eq!(
+            verified.history_floor,
+            Some(7),
+            "the signed stop floor is honoured when the switch is on"
+        );
+        assert_eq!(
+            verified.recipient_audience_revision, 4,
+            "the ceiling is unchanged"
+        );
+    }
+    for value in [
+        None,
+        Some(""),
+        Some("1"),
+        Some("yes"),
+        Some("on"),
+        Some("TRUE"),
+        Some(" true "),
+    ] {
+        let _env = HistoryFloorEnv::set(value);
+        assert_eq!(
+            verify().history_floor,
+            None,
+            "{value:?} leaves the signed stop floor unhonoured, so full history shows"
+        );
+    }
+}

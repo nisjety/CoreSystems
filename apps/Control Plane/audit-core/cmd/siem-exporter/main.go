@@ -6,7 +6,7 @@
 // org:siem:read:any) and each org's audit chain from the audit database, and
 // delivers in chain order with a cursor that advances only after a 2xx.
 //
-// AUDIT_SIEM_EXPORT_ENABLED is off unless it is exactly "1". Off, the process
+// AUDIT_SIEM_EXPORT_ENABLED is off unless it is exactly "true". Off, the process
 // serves its metrics and does nothing else, so a compose stack that includes
 // the siem profile without opting in exports nothing.
 package main
@@ -27,6 +27,7 @@ import (
 
 	metricsserver "github.com/triodelab/controlplane/audit-core/internal/metrics"
 	"github.com/triodelab/controlplane/audit-core/internal/siem"
+	"github.com/triodelab/controlplane/audit-core/internal/switches"
 )
 
 const (
@@ -46,19 +47,30 @@ type config struct {
 	MetricsPort  int
 }
 
+// siemSwitches are the switches this binary reads. Both moved off the lenient "1"
+// reader, so a former spelling refuses boot in production, as it does on the server.
+var siemSwitches = []switches.Switch{
+	{Name: "AUDIT_SIEM_ALLOW_PRIVATE_DESTINATIONS", Refuse: switches.RefuseInProduction},
+	{Name: "AUDIT_SIEM_EXPORT_ENABLED", Refuse: switches.RefuseInProduction},
+}
+
 // loadConfig reads the environment through getenv so a test can supply it.
-// Every switch is strict: only the literal "1" enables. Setting the dev-only
+// Every switch is strict: only the literal "true" enables. Setting the dev-only
 // private-destination switch in production is a boot failure, not a warning,
 // and it is refused even while the exporter is idle, so a misconfigured
 // production stack is caught before anyone turns the exporter on.
 func loadConfig(getenv func(string) string) (config, error) {
+	production := getenv("ENVIRONMENT") == "production"
+	if err := switches.Check(getenv, production, siemSwitches); err != nil {
+		return config{}, err
+	}
 	cfg := config{
-		Enabled:      getenv("AUDIT_SIEM_EXPORT_ENABLED") == "1",
-		AllowPrivate: getenv("AUDIT_SIEM_ALLOW_PRIVATE_DESTINATIONS") == "1",
+		Enabled:      switches.On(getenv("AUDIT_SIEM_EXPORT_ENABLED")),
+		AllowPrivate: switches.On(getenv("AUDIT_SIEM_ALLOW_PRIVATE_DESTINATIONS")),
 		MetricsPort:  defaultMetrics,
 	}
-	if cfg.AllowPrivate && getenv("ENVIRONMENT") == "production" {
-		return config{}, errors.New("AUDIT_SIEM_ALLOW_PRIVATE_DESTINATIONS=1 is refused when ENVIRONMENT=production")
+	if cfg.AllowPrivate && production {
+		return config{}, errors.New("AUDIT_SIEM_ALLOW_PRIVATE_DESTINATIONS=true is refused when ENVIRONMENT=production")
 	}
 	if raw := getenv("METRICS_PORT"); raw != "" {
 		if port, err := strconv.Atoi(raw); err == nil && port > 0 {
@@ -75,7 +87,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		"DATABASE_URL": cfg.DatabaseURL, "ORG_CORE_URL": cfg.OrgCoreURL, "ORG_CORE_SERVICE_TOKEN": cfg.OrgCoreToken,
 	} {
 		if value == "" {
-			return config{}, fmt.Errorf("%s is required when AUDIT_SIEM_EXPORT_ENABLED=1", name)
+			return config{}, fmt.Errorf("%s is required when AUDIT_SIEM_EXPORT_ENABLED=true", name)
 		}
 	}
 	return cfg, nil
@@ -105,7 +117,7 @@ func main() {
 	}()
 
 	if !cfg.Enabled {
-		log.Info().Msg("siem export is off (AUDIT_SIEM_EXPORT_ENABLED is not 1): idle")
+		log.Info().Msg("siem export is off (AUDIT_SIEM_EXPORT_ENABLED is not true): idle")
 		<-ctx.Done()
 		return
 	}

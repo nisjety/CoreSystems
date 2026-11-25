@@ -153,6 +153,7 @@ func (r *Repository) ResolvePersonalThreadReviseDecisionEvidence(ctx context.Con
 // resolvers (a removed participant stops resolving), reads the Space only while
 // it is active (an archived room cannot be edited), and binds the independent
 // message_revise_entitled bit. It must never fall back to thread_create.
+// Like the thread-read resolver it binds the since_join history floor (WS04-S11).
 func (r *Repository) ResolveSharedThreadReviseDecisionEvidence(ctx context.Context, spaceRef, orgID, subjectID string) (PersonalThreadDecisionEvidence, error) {
 	if r == nil || r.db == nil {
 		return PersonalThreadDecisionEvidence{}, fmt.Errorf("space authority repository unavailable")
@@ -187,6 +188,11 @@ func (r *Repository) ResolveSharedThreadReviseDecisionEvidence(ctx context.Conte
 	}
 	if err != nil {
 		return PersonalThreadDecisionEvidence{}, fmt.Errorf("resolve shared Space message revise authority: %w", err)
+	}
+	// R-sws-07 (WS04-S11): a since_join room signs the same history floor on a revise decision as on a
+	// thread-read decision, so Session Core refuses a revision of a message posted before the caller joined.
+	if err := r.applyHistoryFloor(ctx, &evidence); err != nil {
+		return PersonalThreadDecisionEvidence{}, err
 	}
 	evidence.ResourceAuthorizationRef = fmt.Sprintf("control:%s:thread-revise:%d", evidence.Membership.SpaceRef, evidence.Membership.Revisions.Authority)
 	if err := evidence.ValidateForSharedThreadRevise(); err != nil {

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash"
 	"strings"
@@ -95,6 +96,11 @@ type ScheduledStepAuthority struct {
 	StepIndex      uint32
 	IdempotencyKey string
 	RunStatus      string
+	// ContractDigest and ContractExpiresAt are the stored-consent contract Control
+	// signed for this step (F-f10-27). Session Core sets them only for a step under a
+	// contract; zero values keep the legacy v1 binding.
+	ContractDigest    string
+	ContractExpiresAt time.Time
 }
 
 func (a ScheduledStepAuthority) Validate() error {
@@ -195,6 +201,33 @@ func (i ScheduledStepIntent) hasContract() bool {
 
 func (i ScheduledStepIntent) validateContract(now time.Time) error {
 	return validateScheduledContract(i.ContractDigest, i.ContractExpiresAt, now)
+}
+
+// ErrScheduledContractExpired refuses a prepared scheduled step whose stored-consent
+// contract has expired. The HTTP issuer answers it 403 scheduled_contract_expired.
+var ErrScheduledContractExpired = errors.New("scheduled_contract_expired")
+
+// BindScheduledStepContract returns the intent bound to the stored-consent contract
+// that Session Core prepared for this step (F-f10-27). The binding is read only from
+// prepared: a contract the intent already carries is replaced, so no request body can
+// name a digest or an expiry of its own. A prepared step with no contract keeps the
+// legacy v1 binding, with zero contract fields. An expired contract is refused with
+// ErrScheduledContractExpired.
+func BindScheduledStepContract(intent ScheduledStepIntent, prepared ScheduledStepAuthority, now time.Time) (ScheduledStepIntent, error) {
+	intent.ContractDigest = ""
+	intent.ContractExpiresAt = time.Time{}
+	if !hasScheduledContract(prepared.ContractDigest, prepared.ContractExpiresAt) {
+		return intent, nil
+	}
+	if !prepared.ContractExpiresAt.IsZero() && !now.Before(prepared.ContractExpiresAt) {
+		return ScheduledStepIntent{}, ErrScheduledContractExpired
+	}
+	if err := validateScheduledContract(prepared.ContractDigest, prepared.ContractExpiresAt, now); err != nil {
+		return ScheduledStepIntent{}, err
+	}
+	intent.ContractDigest = prepared.ContractDigest
+	intent.ContractExpiresAt = prepared.ContractExpiresAt.UTC()
+	return intent, nil
 }
 
 // IssueScheduledStepDecision re-resolves the current Space authority for one

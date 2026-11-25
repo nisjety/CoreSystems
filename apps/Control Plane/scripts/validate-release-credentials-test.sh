@@ -308,6 +308,10 @@ expect_failure GATEWAY_RETENTION_DECISION_SERVICE_API_KEY \
   USER_CORE_GATEWAY_TOKEN="$reused_principal_credential" \
   GATEWAY_RETENTION_DECISION_SERVICE_API_KEY="$reused_principal_credential"
 
+# The audit-chain keypair is required once the chain is switched on with the exact literal
+# true, as audit-core reads it. The former spelling 1 turns nothing on, so it asks for no key.
+expect_failure AUDIT_CHAIN_PRIVATE_KEY_BASE64 AUDIT_CHAIN_ENABLED=true
+
 if env "${retired_env[@]}" REQUIRE_LEGACY_BRIDGE=1 "$preflight" >/dev/null 2>&1; then
   printf 'expected legacy bridge credential failure when its profile is required\n' >&2
   exit 1

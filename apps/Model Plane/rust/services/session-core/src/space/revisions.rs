@@ -756,7 +756,8 @@ async fn revise_message(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grpc::thread_revise_payload_digest;
+    use crate::grpc::space_w1_tests::HistoryFloorEnv;
+    use crate::grpc::{thread_revise_payload_digest, verify_revise_space_decision_with_key};
     use crate::space::test_support::{
         clean_space, connect, seed_space_message_at_revision, seed_space_thread,
     };
@@ -1020,6 +1021,57 @@ mod tests {
         );
     }
 
+    /// R-sws-07: the floor a revise decision signs refuses a target stamped before it, and only while the Session Core
+    /// switch is the literal `true`. Pure: the decision is minted and verified in memory, and nothing is written.
+    #[test]
+    fn a_signed_revise_floor_refuses_a_pre_join_target_only_behind_the_switch() {
+        let signing_key = crate::grpc::space_w1_tests::signing_key();
+        let key_id = crate::grpc::space_w1_tests::KEY_ID;
+        let mut req = pb::ReviseMessageRequest {
+            org_id: ORG.to_owned(),
+            thread_id: "thread-floor".to_owned(),
+            message_id: "message-floor".to_owned(),
+            action: rev::ACTION_EDIT.to_owned(),
+            content: "Edited after the join".to_owned(),
+            ..Default::default()
+        };
+        sign_revise_with_floor(&mut req, &signing_key, key_id, true, Some(3));
+        let verifying_key = signing_key.verifying_key();
+        let now = Utc::now();
+        // The decision's audience (ceiling) is 4 and its floor is 3: a target stamped 2 predates the join.
+        let ceiling = 4;
+        for (switch, floor) in [(Some("true"), Some(3)), (Some("1"), None), (None, None)] {
+            let _switch = HistoryFloorEnv::set(switch);
+            let verified = verify_revise_space_decision_with_key(
+                &req,
+                ORG,
+                PERSON,
+                key_id,
+                &verifying_key,
+                now,
+            )
+            .expect("the signed revise decision verifies");
+            assert_eq!(verified.history_floor, floor, "switch {switch:?}");
+            assert_eq!(
+                revise_target_in_reach(Some(2), ceiling, verified.history_floor),
+                floor.is_none(),
+                "a pre-join target is refused only while the floor is on (switch {switch:?})"
+            );
+            assert!(
+                revise_target_in_reach(Some(3), ceiling, verified.history_floor),
+                "a target from the floor on is in reach (switch {switch:?})"
+            );
+            assert!(
+                revise_target_in_reach(Some(4), ceiling, verified.history_floor),
+                "a target at the ceiling is in reach (switch {switch:?})"
+            );
+            assert!(
+                revise_target_in_reach(None, ceiling, verified.history_floor),
+                "an unstamped target is in reach (switch {switch:?})"
+            );
+        }
+    }
+
     // ---- DB tier: `#[ignore]`d, needs DATABASE_URL to a disposable `*test*` Postgres ----------
 
     /// The org, the Space, and the one person who owns the threads and wrote the message.
@@ -1036,6 +1088,18 @@ mod tests {
         signing_key: &SigningKey,
         key_id: &str,
         purge: bool,
+    ) {
+        sign_revise_with_floor(req, signing_key, key_id, purge, None);
+    }
+
+    /// [`sign_revise`] that also signs a `since_join` history floor, as Control does for a since_join room (R-sws-07).
+    /// The floor is outside the payload digest, so the digest is computed exactly as it is without one.
+    fn sign_revise_with_floor(
+        req: &mut pb::ReviseMessageRequest,
+        signing_key: &SigningKey,
+        key_id: &str,
+        purge: bool,
+        floor: Option<u64>,
     ) {
         req.space_id = SPACE.to_owned();
         req.space_decision_ref = "revise-decision-1".to_owned();
@@ -1055,7 +1119,7 @@ mod tests {
             rev::PERMISSION_RETAIN_ORIGINAL
         };
         let now = Utc::now();
-        let claims = serde_json::json!({
+        let mut claims = serde_json::json!({
             "decision_ref": req.space_decision_ref,
             "org_id": ORG,
             "space_ref": SPACE,
@@ -1087,6 +1151,9 @@ mod tests {
             "issued_at": now.to_rfc3339(),
             "expires_at": (now + chrono::Duration::minutes(1)).to_rfc3339(),
         });
+        if let Some(floor) = floor {
+            claims["history_floor_revision"] = serde_json::json!(floor);
+        }
         let signed = format!(
             "v2.{}.{}",
             URL_SAFE_NO_PAD.encode(key_id.as_bytes()),
@@ -1294,5 +1361,113 @@ mod tests {
             text, SEEDED_TEXT,
             "a retained delete keeps the original text"
         );
+    }
+
+    /// Seeds one message the caller wrote (author [`PERSON`]) stamped with `revision`, so the caller may revise it.
+    async fn seed_caller_message_at_revision(
+        pool: &PgPool,
+        thread: &str,
+        message: &str,
+        revision: i64,
+    ) {
+        sqlx::query(
+            "INSERT INTO messages (id, thread_id, role, content, space_id, recipient_audience_ref, \
+             recipient_audience_revision, recipient_audience_hash, authority_revision, \
+             resource_authorization_ref, author_subject_id) \
+             VALUES ($1, $2, 'user', $3, $4, 'audience-1', $5, 'sha256:audience-1', 1, 'resource-1', $6)",
+        )
+        .bind(message)
+        .bind(thread)
+        .bind(SEEDED_TEXT)
+        .bind(SPACE)
+        .bind(revision)
+        .bind(PERSON)
+        .execute(pool)
+        .await
+        .expect("seed a message of the caller");
+    }
+
+    /// R-sws-07 against Postgres: a revision of a message stamped before a signed `since_join` floor is `message_not_found`
+    /// while the Session Core switch is on, and a revision of one from the floor on is recorded. Switched off, the same
+    /// pre-join revision proceeds, because full history shows. Run with `DATABASE_URL` set to a disposable `*test*`
+    /// database and `cargo test -- --ignored`.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn a_revision_of_a_message_before_the_history_floor_is_not_found_while_the_floor_is_on() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let nonce = new_ulid();
+        let thread = format!("revise-floor-thread-{nonce}");
+        let before = format!("revise-floor-before-{nonce}");
+        let after = format!("revise-floor-after-{nonce}");
+        seed_space_thread(&pool, ORG, SPACE, &thread, PERSON).await;
+        seed_caller_message_at_revision(&pool, &thread, &before, 2).await;
+        seed_caller_message_at_revision(&pool, &thread, &after, 4).await;
+
+        // The same key the held-thread test publishes, so the two tests never disagree on the environment.
+        let signing_key = SigningKey::from_bytes(&[61_u8; 32]);
+        let key_id = "control-revise-test-key";
+        std::env::remove_var("CONTROL_SPACE_DECISION_PUBLIC_KEYS_JSON");
+        std::env::set_var("CONTROL_SPACE_DECISION_KEY_ID", key_id);
+        std::env::set_var(
+            "CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64",
+            URL_SAFE_NO_PAD.encode(signing_key.verifying_key().to_bytes()),
+        );
+
+        let edit = |message: &str, content: &str| pb::ReviseMessageRequest {
+            org_id: ORG.to_owned(),
+            thread_id: thread.clone(),
+            message_id: message.to_owned(),
+            action: rev::ACTION_EDIT.to_owned(),
+            content: content.to_owned(),
+            ..Default::default()
+        };
+        // Each decision binds its own message id, so each is minted for its own target.
+        let mut before_req = edit(&before, "Edited before the join");
+        sign_revise_with_floor(&mut before_req, &signing_key, key_id, true, Some(3));
+        let mut after_req = edit(&after, "Edited after the join");
+        sign_revise_with_floor(&mut after_req, &signing_key, key_id, true, Some(3));
+
+        {
+            let _switch = HistoryFloorEnv::set(Some("true"));
+            let refusal = revise_message(
+                &pool,
+                &before_req,
+                PERSON,
+                &crate::gdpr::ErasureHoldGate::Off,
+            )
+            .await
+            .expect_err("a message stamped before the floor is not found");
+            assert_eq!(refusal.code(), tonic::Code::NotFound);
+            assert_eq!(
+                refusal
+                    .metadata()
+                    .get(ERROR_CODE_TRAILER)
+                    .and_then(|code| code.to_str().ok()),
+                Some("message_not_found"),
+            );
+            let (response, _) = revise_message(
+                &pool,
+                &after_req,
+                PERSON,
+                &crate::gdpr::ErasureHoldGate::Off,
+            )
+            .await
+            .expect("a message from the floor on is revised");
+            assert_eq!(response.revision_state, "edited");
+        }
+        {
+            let _switch = HistoryFloorEnv::set(None);
+            let (response, _) = revise_message(
+                &pool,
+                &before_req,
+                PERSON,
+                &crate::gdpr::ErasureHoldGate::Off,
+            )
+            .await
+            .expect("switched off, the pre-join message is revisable as it always was");
+            assert_eq!(response.revision_state, "edited");
+        }
     }
 }

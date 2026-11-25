@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,6 +28,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/triodelab/controlplane/audit-core/internal/chain"
+	"github.com/triodelab/controlplane/audit-core/internal/switches"
 )
 
 // Status is the outcome of one verification. Only Verified and
@@ -476,11 +478,12 @@ func registerLastVerify() {
 	registerLastVerifyOnce.Do(func() { prometheus.MustRegister(lastVerify) })
 }
 
-// Enabled reads AUDIT_CHAIN_VERIFY_ENABLED. Verification is read-only, so
-// unlike the other chain switches it follows the chain: on whenever the chain
-// is on, off only for the literal "0" (and always off with the chain off).
+// Enabled reads AUDIT_CHAIN_VERIFY_ENABLED. Verification is read-only, so unlike
+// the other chain switches it follows the chain: blank (spaces only included), or
+// the literal true, runs it whenever the chain is on. Any other value, false
+// included, reads as off, and it is always off with the chain off.
 func Enabled(raw string, chainEnabled bool) bool {
-	return chainEnabled && raw != "0"
+	return chainEnabled && (strings.TrimSpace(raw) == "" || switches.On(raw))
 }
 
 // ParseInterval reads AUDIT_CHAIN_VERIFY_INTERVAL, the spacing of incremental

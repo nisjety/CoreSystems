@@ -22,28 +22,30 @@ What it does not prove:
 
 ## 2. Switches
 
-All switches default to off. audit-core and the SIEM exporter accept only the literal `1` to turn a switch on. org-core also accepts `true`. The verifier follows the chain switch and turns off only for the literal `0`.
+All switches default to off. audit-core and the SIEM exporter accept only the literal `true` to turn a switch on, and any other value reads as off. org-core reads its own switches with its own rule (`ORG_SIEM_DESTINATIONS_ENABLED` still takes `1` or `true`). The verifier follows the chain switch when `AUDIT_CHAIN_VERIFY_ENABLED` is blank or `true`, and any other value turns it off.
 
 | Variable | Read by | Default | Effect |
 |---|---|---|---|
-| `AUDIT_CHAIN_ENABLED` | audit-core | `0` | Only `1` turns the chain on. Off, new rows are not chained. |
+| `AUDIT_CHAIN_ENABLED` | audit-core | `false` | Only `true` turns the chain on. Off, new rows are not chained. |
 | `AUDIT_CHAIN_KEY_ID` | audit-core | empty | Id of the active signing key: letters, digits, `.`, `_` and `-`, at most 64 characters. |
 | `AUDIT_CHAIN_PRIVATE_KEY_BASE64` | audit-core | empty | Active Ed25519 seed (32 bytes) or expanded key (64 bytes), base64url without padding or standard base64. |
 | `AUDIT_CHAIN_PUBLIC_KEY_BASE64` | audit-core | empty | Public key of the active pair. Boot fails when it does not match the private key. |
 | `AUDIT_CHAIN_VERIFY_KEYS` | audit-core | empty | Retired public keys as comma-separated `key_id:public_key` pairs. |
 | `AUDIT_CHAIN_ATTEST_INTERVAL` | audit-core | `60s` | How often healthy heads are signed. An invalid value falls back to the default. |
-| `AUDIT_CHAIN_PRUNE_ENABLED` | audit-core | `0` | Only `1` lets the purge delete verified chained prefixes, with a signed checkpoint per batch. |
-| `AUDIT_CHAIN_PRUNE_DRYRUN` | audit-core | `0` | Only `1` makes the purge verify and log its plan. It wins over `AUDIT_CHAIN_PRUNE_ENABLED`. |
-| `AUDIT_CHAIN_VERIFY_ENABLED` | audit-core | empty | Empty follows `AUDIT_CHAIN_ENABLED`. `0` turns the verifier off. Any other value keeps it on only while the chain is on. |
+| `AUDIT_CHAIN_PRUNE_ENABLED` | audit-core | `false` | Only `true` lets the purge delete verified chained prefixes, with a signed checkpoint per batch. |
+| `AUDIT_CHAIN_PRUNE_DRYRUN` | audit-core | `false` | Only `true` makes the purge verify and log its plan. It wins over `AUDIT_CHAIN_PRUNE_ENABLED`. A misread value refuses boot in every environment, because read as off it could let a purge delete. |
+| `AUDIT_CHAIN_VERIFY_ENABLED` | audit-core | empty | Empty (spaces only included) or `true` follows `AUDIT_CHAIN_ENABLED`. `false` turns the verifier off, and so does any other value. |
 | `AUDIT_CHAIN_VERIFY_INTERVAL` | audit-core | `24h` | Spacing of verifier passes. Every seventh pass is a full pass from the trust base. |
 | `AUDIT_RETENTION_DAYS` | audit-core | `365` | Retention window for `audit_events` and `usage_events`. |
-| `AUDIT_SIEM_EXPORT_ENABLED` | siem-exporter | `0` | Only `1` makes the exporter deliver. Otherwise it idles. |
-| `AUDIT_SIEM_ALLOW_PRIVATE_DESTINATIONS` | siem-exporter | `0` | Development only. Boot refuses `1` when `ENVIRONMENT=production`. |
+| `AUDIT_SIEM_EXPORT_ENABLED` | siem-exporter | `false` | Only `true` makes the exporter deliver. Otherwise it idles. |
+| `AUDIT_SIEM_ALLOW_PRIVATE_DESTINATIONS` | siem-exporter | `false` | Development only. Boot refuses `true` when `ENVIRONMENT=production`. |
 | `ORG_SIEM_DESTINATIONS_ENABLED` | org-core | `0` | `1` or `true` mounts the destination routes. Otherwise they answer 404. |
 | `ORG_CORE_SIEM_SEAL_KEY` | org-core | empty | 32-byte AES-256-GCM key that seals destination secrets. |
 | `ORG_CORE_SIEM_SEAL_KEY_ID` | org-core | `v1` | Id stored with each sealed secret. |
 
-Boot rules. With `AUDIT_CHAIN_ENABLED=1` and `ENVIRONMENT=production`, audit-core refuses to start without a signing key. `AUDIT_CHAIN_PRUNE_ENABLED=1` refuses to start without a signing key in any environment. When the chain or pruning is on, a key that does not decode, or a public key that does not match its private key, stops boot. With the chain on and no key outside production, the chain runs, heads are not attested, and chained rows cannot be pruned; audit-core logs a warning.
+Boot rules. With `AUDIT_CHAIN_ENABLED=true` and `ENVIRONMENT=production`, audit-core refuses to start without a signing key. `AUDIT_CHAIN_PRUNE_ENABLED=true` refuses to start without a signing key in any environment. When the chain or pruning is on, a key that does not decode, or a public key that does not match its private key, stops boot. With the chain on and no key outside production, the chain runs, heads are not attested, and chained rows cannot be pruned; audit-core logs a warning.
+
+Former spellings. Before the literal rule, `1` turned these switches on. A live `1`, `on`, `yes`, `enabled` or `True` now reads as off, so the chain or the pruning would switch off where a `1` used to turn it on. To keep that from passing unnoticed, at boot audit-core and the SIEM exporter log each such switch by name and never its value. With `ENVIRONMENT=production` they refuse to start with `<NAME> must be true or false`. Before a rollout, check the compose files and the flag registry for the old values only; never read `.env` files for this check.
 
 `scripts/run-control-plane.sh` generates the audit-chain pair and the seal key when they are missing. It never overwrites an existing value.
 
@@ -51,7 +53,7 @@ Boot rules. With `AUDIT_CHAIN_ENABLED=1` and `ENVIRONMENT=production`, audit-cor
 
 ### 3.1 The verifier inside audit-core
 
-When the chain is on and `AUDIT_CHAIN_VERIFY_ENABLED` is not `0`, audit-core runs a verifier pass at start and then every `AUDIT_CHAIN_VERIFY_INTERVAL`. Each pass checks every org that has a chain head, resumes from the stored cursor, and writes one row per org to `audit_chain_verifications` (`last_status`, `last_reason`, `first_broken_seq`, `verified_through_seq`, `legacy_unchained_rows`, `last_run_at`, `last_full_at`).
+When the chain is on and `AUDIT_CHAIN_VERIFY_ENABLED` is blank or `true`, audit-core runs a verifier pass at start and then every `AUDIT_CHAIN_VERIFY_INTERVAL`. Each pass checks every org that has a chain head, resumes from the stored cursor, and writes one row per org to `audit_chain_verifications` (`last_status`, `last_reason`, `first_broken_seq`, `verified_through_seq`, `legacy_unchained_rows`, `last_run_at`, `last_full_at`).
 
 Metrics and alerts (`apps/Control Plane/observability/rules/audit-core.rules.yml`):
 
@@ -151,11 +153,11 @@ If the private key is lost, new heads cannot be signed (`signing_key_unavailable
 
 ## 6. Retention purge: dry run and enabling
 
-The purge runs at start and then every 24 hours in each audit-core replica. For unchained rows it is the existing rule: delete rows whose `ingested_at` is older than `AUDIT_RETENTION_DAYS`. For chained rows it stays off until `AUDIT_CHAIN_PRUNE_ENABLED=1`.
+The purge runs at start and then every 24 hours in each audit-core replica. For unchained rows it is the existing rule: delete rows whose `ingested_at` is older than `AUDIT_RETENTION_DAYS`. For chained rows it stays off until `AUDIT_CHAIN_PRUNE_ENABLED=true`.
 
 **Dry run.**
 
-1. Set `AUDIT_CHAIN_PRUNE_DRYRUN=1`. Leave `AUDIT_CHAIN_PRUNE_ENABLED` at `0`.
+1. Set `AUDIT_CHAIN_PRUNE_DRYRUN=true`. Leave `AUDIT_CHAIN_PRUNE_ENABLED` at `false`.
 2. Restart audit-core, or wait for the next daily sweep.
 3. Read the logs. For each org, in batches of up to 5,000 rows:
    - `audit chain purge dry run: prefix verified, nothing deleted` (with `org_id`, `from_seq`, `through_seq` and `rows`) means that prefix would be deleted.
@@ -165,7 +167,7 @@ The purge runs at start and then every 24 hours in each audit-core replica. For 
 **Enabling pruning.**
 
 1. Enable it only after clean dry-run plans for every org that will be pruned, and with a signing key in place. Pruning refuses to start without a private key.
-2. Set `AUDIT_CHAIN_PRUNE_ENABLED=1` and `AUDIT_CHAIN_PRUNE_DRYRUN=0`, then restart.
+2. Set `AUDIT_CHAIN_PRUNE_ENABLED=true` and `AUDIT_CHAIN_PRUNE_DRYRUN=false`, then restart.
 3. Each batch runs in one transaction. It takes the org's advisory lock, verifies the prefix again, deletes it, and inserts a signed checkpoint with `reason = retention`. A replica that cannot take the lock skips that org until the next sweep.
 4. The cut is made by `chain_seq`, not by time. Rows are removed up to the row just before the first chained row that is still inside the window. `ingested_at` is not in commit order, so a time cut could skip a row.
 5. Capture the checkpoint rows and the verifier report before and after the first sweep (section 9).
@@ -176,9 +178,9 @@ No code path writes a checkpoint with `reason = 'erasure'`, although the table a
 
 Roll back in this order. Every step except the last can be undone.
 
-1. **Stop new chaining.** Set `AUDIT_CHAIN_ENABLED=0` and restart audit-core. New rows are unchained. Rows written while the chain is off, after the org was activated, are chained by the boot catch-up when the switch is turned on again (`chain_mode = 'catchup'`). Nothing is lost.
-2. **Stop pruning.** Set `AUDIT_CHAIN_PRUNE_ENABLED=0` and restart. Rows already pruned stay pruned, and their checkpoints stay. The rest of the chain verifies from the newest checkpoint.
-3. **Stop export.** Set `AUDIT_SIEM_EXPORT_ENABLED=0` or stop the `audit-siem-exporter` service. Cursors stay in `audit_export_cursors`, and a re-enabled destination resumes from its cursor. An owner or admin can also disable a destination with PATCH.
+1. **Stop new chaining.** Set `AUDIT_CHAIN_ENABLED=false` and restart audit-core. New rows are unchained. Rows written while the chain is off, after the org was activated, are chained by the boot catch-up when the switch is turned on again (`chain_mode = 'catchup'`). Nothing is lost.
+2. **Stop pruning.** Set `AUDIT_CHAIN_PRUNE_ENABLED=false` and restart. Rows already pruned stay pruned, and their checkpoints stay. The rest of the chain verifies from the newest checkpoint.
+3. **Stop export.** Set `AUDIT_SIEM_EXPORT_ENABLED=false` or stop the `audit-siem-exporter` service. Cursors stay in `audit_export_cursors`, and a re-enabled destination resumes from its cursor. An owner or admin can also disable a destination with PATCH.
 4. **Hide the destination routes.** Set `ORG_SIEM_DESTINATIONS_ENABLED=0` on org-core. Stored destinations stay in the table.
 5. **Compliance API.** It has no switch. audit-core accepts it only from the gateway principal, with the compliance scope and an owner or admin role. Roll back the gateway image, and roll the audit-core image and its credential registry together through `scripts/run-control-plane.sh`.
 6. **Do not roll audit-core back below the WS06-S2 build while migration 007 is applied.** Migration 007 adds the guard trigger, and the S2 build's purge sets `audit.maintenance` before it deletes. A build from before S2 deletes without that setting, the guard trigger refuses the delete, and the retention sweep fails, for `usage_events` as well. If an older image cannot be avoided, get the Control Plane owner's sign-off first and watch the sweep logs.

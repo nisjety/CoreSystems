@@ -104,6 +104,8 @@ func runControlPayloadDigest(evidence PersonalThreadDecisionEvidence, request Ru
 // ResolveSharedRunControlDecisionEvidence (current membership, current
 // recipient audience, run_control_entitled). The decision carries the Space ZDR
 // claim; whether a ZDR run may be cancelled this way is Session Core's call.
+// It also carries the since_join history floor the evidence resolved, if any
+// (R-sws-01), so a late joiner cannot stop a run stamped before they joined.
 func IssueSharedRunControlDecision(evidence PersonalThreadDecisionEvidence, request RunControlDecisionRequest, now time.Time) (Decision, error) {
 	if err := evidence.ValidateForSharedRunControl(); err != nil {
 		return Decision{}, err
@@ -114,9 +116,15 @@ func IssueSharedRunControlDecision(evidence PersonalThreadDecisionEvidence, requ
 	if now.IsZero() {
 		return Decision{}, fmt.Errorf("run control decision issuance time is required")
 	}
-	return newEvidenceDecision(
+	decision := newEvidenceDecision(
 		evidence, request.DecisionRef, runControlAudience, runControlAction, runControlSchema,
 		runControlPayloadDigest(evidence, request), request.IdempotencyKey, request.Nonce,
 		[]string{RunControlPermission}, evidence.Privacy.ZeroDataRetention, now,
-	), nil
+	)
+	// R-sws-01: the same signed floor the shared thread read carries. It is set only when the resolver found a
+	// since_join floor; it is outside the payload digest, so the digest and its golden are unchanged.
+	if evidence.HistoryFloorRevision > 0 {
+		decision.HistoryFloorRevision = evidence.HistoryFloorRevision
+	}
+	return decision, nil
 }

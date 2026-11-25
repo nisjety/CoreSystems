@@ -1343,7 +1343,15 @@ func (s *Server) issueScheduledRunExecutionDecision(c *gin.Context) {
 		ScheduleID: request.Intent.ScheduleID, FireKey: request.Intent.FireKey, TaskID: request.Intent.TaskID,
 		TemplateDigest: request.Intent.TemplateDigest, IdempotencyKey: request.Intent.IdempotencyKey,
 	}
-	if request.Intent.ContractDigest != "" || request.Intent.ContractExpiresAt != "" {
+	if s.scheduleContractsEnabled {
+		// F-f10-27 rel1: with the stored-consent contract switch on, the contract is bound only
+		// from the prepared Session Core run. The body's contract is a claim that must match it.
+		bound, ok := s.boundScheduledRunExecution(c, intent, request.Intent.ThreadID, request.Intent.ContractDigest, request.Intent.ContractExpiresAt)
+		if !ok {
+			return
+		}
+		intent = bound
+	} else if request.Intent.ContractDigest != "" || request.Intent.ContractExpiresAt != "" {
 		expiresAt, parseErr := time.Parse(time.RFC3339, request.Intent.ContractExpiresAt)
 		if parseErr != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "valid scheduled run execution intent is required"})
@@ -1376,6 +1384,79 @@ func (s *Server) issueScheduledRunExecutionDecision(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": decision, "token": token}})
 }
 
+// boundScheduledRunExecution resolves the prepared Session Core run for a run-execution
+// intent and binds the intent to it (F-f10-27 rel1). It writes the refusal and returns
+// false when the intent is malformed, the prepared run cannot be read, or the body's
+// contract claim differs from the prepared contract.
+func (s *Server) boundScheduledRunExecution(c *gin.Context, intent spaces.ScheduledRunIntent, threadID, claimedDigest, claimedExpiresAt string) (spaces.ScheduledRunIntent, bool) {
+	threadID = strings.TrimSpace(threadID)
+	if err := intent.Validate(); err != nil || threadID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "valid scheduled run execution intent is required"})
+		return spaces.ScheduledRunIntent{}, false
+	}
+	if s.scheduledRunAuthority == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "prepared scheduled run authority unavailable"})
+		return spaces.ScheduledRunIntent{}, false
+	}
+	prepared, err := s.scheduledRunAuthority.ResolveScheduledRunAuthority(c.Request.Context(), intent, threadID)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "prepared scheduled run authority unavailable"})
+		return spaces.ScheduledRunIntent{}, false
+	}
+	bound, refusal, message := scheduledRunBoundIntent(intent, threadID, claimedDigest, claimedExpiresAt, prepared, time.Now().UTC())
+	if refusal != 0 {
+		c.JSON(refusal, gin.H{"error": message})
+		return spaces.ScheduledRunIntent{}, false
+	}
+	return bound, true
+}
+
+// scheduledRunBoundIntent checks the prepared Session Core run against the execution
+// intent, then binds the intent to what Session Core prepared: the subject and the
+// stored-consent contract (F-f10-27 rel1). The contract a request body claims is only
+// compared with the prepared one, and any difference is refused; it is never bound. It
+// returns the bound intent, or the status and message of the refusal (a zero status on
+// success).
+func scheduledRunBoundIntent(intent spaces.ScheduledRunIntent, threadID, claimedDigest, claimedExpiresAt string, prepared spaces.ScheduledRunAuthority, now time.Time) (spaces.ScheduledRunIntent, int, string) {
+	if prepared.OrgID != intent.OrgID || prepared.SpaceRef != intent.SpaceRef ||
+		prepared.SubjectID != intent.SubjectID || prepared.ThreadID != strings.TrimSpace(threadID) ||
+		prepared.RunID != intent.TaskID || prepared.ScheduleID != intent.ScheduleID ||
+		prepared.FireKey != intent.FireKey || prepared.TemplateDigest != intent.TemplateDigest ||
+		prepared.IdempotencyKey != intent.IdempotencyKey ||
+		!claimedScheduledRunContractMatches(claimedDigest, claimedExpiresAt, prepared) {
+		return spaces.ScheduledRunIntent{}, http.StatusForbidden, "prepared scheduled run authority does not match intent"
+	}
+	if err := prepared.Validate(); err != nil {
+		return spaces.ScheduledRunIntent{}, http.StatusForbidden, "prepared scheduled run authority is invalid"
+	}
+	bound, err := spaces.BindScheduledRunContract(intent, prepared, now)
+	if errors.Is(err, spaces.ErrScheduledContractExpired) {
+		return spaces.ScheduledRunIntent{}, http.StatusForbidden, "scheduled_contract_expired"
+	}
+	if err != nil {
+		return spaces.ScheduledRunIntent{}, http.StatusForbidden, "prepared scheduled run authority is invalid"
+	}
+	// SubjectID is sourced from Session Core's prepared-run metadata; the comparison above
+	// already proved the body names the same subject.
+	bound.SubjectID = prepared.SubjectID
+	return bound, 0, ""
+}
+
+// claimedScheduledRunContractMatches reports whether the contract a request body claims is
+// exactly the prepared one: no claim for a legacy run, or the same digest and the same
+// expiry for a contract-bound run.
+func claimedScheduledRunContractMatches(claimedDigest, claimedExpiresAt string, prepared spaces.ScheduledRunAuthority) bool {
+	preparedBound := prepared.ContractDigest != "" || !prepared.ContractExpiresAt.IsZero()
+	if claimedDigest == "" && claimedExpiresAt == "" {
+		return !preparedBound
+	}
+	if !preparedBound || claimedDigest != prepared.ContractDigest {
+		return false
+	}
+	expiresAt, err := time.Parse(time.RFC3339, claimedExpiresAt)
+	return err == nil && expiresAt.Equal(prepared.ContractExpiresAt)
+}
+
 // issueScheduledStepDecision refreshes the full current Space authority for a
 // single turn. The signed envelope is target-bound to Execution Core and is
 // returned only to the authenticated Orchestrator workload; it is never a
@@ -1392,13 +1473,7 @@ func (s *Server) issueScheduledStepDecision(c *gin.Context) {
 	if !bindSpaceDecisionBody(c, &request, "valid scheduled step intent is required") {
 		return
 	}
-	intent := spaces.ScheduledStepIntent{
-		OrgID: request.Intent.OrgID, SpaceRef: request.Intent.SpaceRef,
-		RunID: request.Intent.RunID, ThreadID: request.Intent.ThreadID, ScheduleID: request.Intent.ScheduleID,
-		FireKey: request.Intent.FireKey, TemplateDigest: request.Intent.TemplateDigest,
-		StepID: request.Intent.StepID, StepIndex: request.Intent.StepIndex,
-		PolicyDigest: request.Intent.PolicyDigest, IdempotencyKey: request.Intent.IdempotencyKey,
-	}
+	intent := scheduledStepIntentFromRequest(request.Intent)
 	if err := intent.ValidateAuthorityRequest(); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "valid scheduled step intent is required"})
 		return
@@ -1408,21 +1483,12 @@ func (s *Server) issueScheduledStepDecision(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "prepared scheduled step authority unavailable"})
 		return
 	}
-	if prepared.OrgID != intent.OrgID || prepared.SpaceRef != intent.SpaceRef ||
-		prepared.RunID != intent.RunID || prepared.ThreadID != intent.ThreadID ||
-		prepared.ScheduleID != intent.ScheduleID || prepared.FireKey != intent.FireKey ||
-		prepared.TemplateDigest != intent.TemplateDigest || prepared.StepID != intent.StepID ||
-		prepared.StepIndex != intent.StepIndex || prepared.PolicyDigest != intent.PolicyDigest ||
-		prepared.IdempotencyKey != intent.IdempotencyKey ||
-		(strings.TrimSpace(request.Intent.SubjectID) != "" && request.Intent.SubjectID != prepared.SubjectID) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "prepared scheduled step authority does not match intent"})
-		return
-	}
-	// SubjectID is now sourced from Session Core's prepared-run metadata, never
-	// from the Orchestrator request body.
-	intent.SubjectID = prepared.SubjectID
-	if err := intent.Validate(); err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": "prepared scheduled step authority is invalid"})
+	// The prepared step is checked against the intent and bound to it in one place.
+	// The subject and the stored-consent contract come only from Session Core
+	// (F-f10-27); nothing the request body claims about the contract is read.
+	intent, refusal, message := scheduledStepBoundIntent(intent, request.Intent.SubjectID, prepared, time.Now().UTC())
+	if refusal != 0 {
+		c.JSON(refusal, gin.H{"error": message})
 		return
 	}
 	evidence, ok := s.resolvePersonalThreadEvidence(c, intent.SpaceRef, intent.OrgID, intent.SubjectID, "personal Space scheduled step authority unavailable")
@@ -1443,6 +1509,51 @@ func (s *Server) issueScheduledStepDecision(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": decision, "token": token}})
+}
+
+// scheduledStepBoundIntent checks the prepared Session Core step against the request
+// intent, then binds the intent to what Session Core prepared: the subject and the
+// stored-consent contract (F-f10-27). It returns the bound intent, or the status and
+// message of the refusal (a zero status on success). The contract is read only from
+// prepared, so a digest or expiry the request body names is never used.
+func scheduledStepBoundIntent(intent spaces.ScheduledStepIntent, requestedSubjectID string, prepared spaces.ScheduledStepAuthority, now time.Time) (spaces.ScheduledStepIntent, int, string) {
+	if prepared.OrgID != intent.OrgID || prepared.SpaceRef != intent.SpaceRef ||
+		prepared.RunID != intent.RunID || prepared.ThreadID != intent.ThreadID ||
+		prepared.ScheduleID != intent.ScheduleID || prepared.FireKey != intent.FireKey ||
+		prepared.TemplateDigest != intent.TemplateDigest || prepared.StepID != intent.StepID ||
+		prepared.StepIndex != intent.StepIndex || prepared.PolicyDigest != intent.PolicyDigest ||
+		prepared.IdempotencyKey != intent.IdempotencyKey ||
+		(strings.TrimSpace(requestedSubjectID) != "" && requestedSubjectID != prepared.SubjectID) {
+		return spaces.ScheduledStepIntent{}, http.StatusForbidden, "prepared scheduled step authority does not match intent"
+	}
+	// SubjectID is sourced from Session Core's prepared-run metadata, never from the
+	// Orchestrator request body.
+	intent.SubjectID = prepared.SubjectID
+	if err := intent.Validate(); err != nil {
+		return spaces.ScheduledStepIntent{}, http.StatusForbidden, "prepared scheduled step authority is invalid"
+	}
+	bound, err := spaces.BindScheduledStepContract(intent, prepared, now)
+	if errors.Is(err, spaces.ErrScheduledContractExpired) {
+		return spaces.ScheduledStepIntent{}, http.StatusForbidden, "scheduled_contract_expired"
+	}
+	if err != nil {
+		return spaces.ScheduledStepIntent{}, http.StatusForbidden, "prepared scheduled step authority is invalid"
+	}
+	return bound, 0, ""
+}
+
+// scheduledStepIntentFromRequest maps the Orchestrator's step intent onto the Space
+// intent Session Core is asked about. It has no stored-consent contract: the binding
+// comes only from the prepared step (F-f10-27), so a contract the body names never
+// reaches the intent.
+func scheduledStepIntentFromRequest(requested scheduledStepIntent) spaces.ScheduledStepIntent {
+	return spaces.ScheduledStepIntent{
+		OrgID: requested.OrgID, SpaceRef: requested.SpaceRef,
+		RunID: requested.RunID, ThreadID: requested.ThreadID, ScheduleID: requested.ScheduleID,
+		FireKey: requested.FireKey, TemplateDigest: requested.TemplateDigest,
+		StepID: requested.StepID, StepIndex: requested.StepIndex,
+		PolicyDigest: requested.PolicyDigest, IdempotencyKey: requested.IdempotencyKey,
+	}
 }
 
 // personalImportExecutionIntent is a deliberately constrained wire view of a

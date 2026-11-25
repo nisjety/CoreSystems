@@ -27,6 +27,7 @@ import (
 	metricsserver "github.com/triodelab/controlplane/audit-core/internal/metrics"
 	"github.com/triodelab/controlplane/audit-core/internal/store"
 	"github.com/triodelab/controlplane/audit-core/internal/subscriber"
+	"github.com/triodelab/controlplane/audit-core/internal/switches"
 	"github.com/triodelab/controlplane/audit-core/internal/verifier"
 )
 
@@ -120,7 +121,7 @@ func main() {
 		go runAttestor(ctx, st, cfg.AttestInterval)
 	}
 
-	// The verifier follows the chain switch unless AUDIT_CHAIN_VERIFY_ENABLED says 0.
+	// The verifier follows the chain switch unless AUDIT_CHAIN_VERIFY_ENABLED is false.
 	if verifier.Enabled(os.Getenv("AUDIT_CHAIN_VERIFY_ENABLED"), cfg.ChainEnabled) {
 		go verifier.Run(ctx, st, verifier.Config{Interval: verifier.ParseInterval(os.Getenv("AUDIT_CHAIN_VERIFY_INTERVAL"))})
 	}
@@ -267,16 +268,30 @@ type config struct {
 	ExtraNATSBuses []extraNATSBus
 }
 
-// parseChainEnabled is strict: only the literal "1" turns the audit hash chain
+// serverSwitches are the audit-core switches this binary reads. Each one whose reader
+// this change moved off a lenient one refuses a misread value at boot, so a live "1",
+// "on" or "yes" cannot switch a feature off unseen. The prune dry run is a guard, so
+// its misread value refuses boot in every environment. ORG_COMPLIANCE_ROLE_ENABLED
+// was already exact, so it only warns.
+var serverSwitches = []switches.Switch{
+	{Name: "AUDIT_ALLOW_NATS_TOKEN_FALLBACK", Refuse: switches.RefuseInProduction},
+	{Name: "AUDIT_CHAIN_ENABLED", Refuse: switches.RefuseInProduction},
+	{Name: "AUDIT_CHAIN_PRUNE_DRYRUN", Refuse: switches.RefuseAlways},
+	{Name: "AUDIT_CHAIN_PRUNE_ENABLED", Refuse: switches.RefuseInProduction},
+	{Name: "AUDIT_CHAIN_VERIFY_ENABLED", Refuse: switches.RefuseInProduction},
+	{Name: "ORG_COMPLIANCE_ROLE_ENABLED", Refuse: switches.WarnOnly},
+}
+
+// parseChainEnabled is strict: only the literal "true" turns the audit hash chain
 // on, so an unset, empty or misspelled value leaves it off.
 func parseChainEnabled(raw string) bool {
 	return parseStrictSwitch(raw)
 }
 
 // parseStrictSwitch is the one switch parser of this service: only the literal
-// "1" enables, so an unset, empty or misspelled value leaves the feature off.
+// "true" enables, so an unset, empty or misspelled value leaves the feature off.
 func parseStrictSwitch(raw string) bool {
-	return raw == "1"
+	return switches.On(raw)
 }
 
 // defaultAttestInterval is how often chain heads are signed when
@@ -303,10 +318,10 @@ func loadChainKeys(chainEnabled bool, prune store.PruneMode, production bool) (*
 		return nil, fmt.Errorf("audit chain key: %w", err)
 	}
 	if prune == store.PruneOn && !ring.CanSign() {
-		return nil, fmt.Errorf("AUDIT_CHAIN_PRUNE_ENABLED=1 needs AUDIT_CHAIN_KEY_ID and AUDIT_CHAIN_PRIVATE_KEY_BASE64: every purge batch signs a checkpoint")
+		return nil, fmt.Errorf("AUDIT_CHAIN_PRUNE_ENABLED=true needs AUDIT_CHAIN_KEY_ID and AUDIT_CHAIN_PRIVATE_KEY_BASE64: every purge batch signs a checkpoint")
 	}
 	if chainEnabled && production && !ring.CanSign() {
-		return nil, fmt.Errorf("AUDIT_CHAIN_ENABLED=1 in production needs AUDIT_CHAIN_KEY_ID and AUDIT_CHAIN_PRIVATE_KEY_BASE64: unsigned chain heads cannot be attested")
+		return nil, fmt.Errorf("AUDIT_CHAIN_ENABLED=true in production needs AUDIT_CHAIN_KEY_ID and AUDIT_CHAIN_PRIVATE_KEY_BASE64: unsigned chain heads cannot be attested")
 	}
 	if chainEnabled && !ring.CanSign() {
 		log.Warn().Msg("audit chain is on without a signing key: heads are not attested and chained rows cannot be pruned")
@@ -328,6 +343,10 @@ func parsePruneMode(enabled, dryRun string) store.PruneMode {
 }
 
 func loadConfig() (*config, error) {
+	production := os.Getenv("ENVIRONMENT") == "production"
+	if err := switches.Check(os.Getenv, production, serverSwitches); err != nil {
+		return nil, err
+	}
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required")
@@ -339,7 +358,7 @@ func loadConfig() (*config, error) {
 	if err := validateNATSURL(natsURL); err != nil {
 		return nil, fmt.Errorf("NATS_URL: %w", err)
 	}
-	allowTokenFallback := os.Getenv("AUDIT_ALLOW_NATS_TOKEN_FALLBACK") == "1"
+	allowTokenFallback := switches.On(os.Getenv("AUDIT_ALLOW_NATS_TOKEN_FALLBACK"))
 	credential, err := selectNATSCredential(
 		os.Getenv("NATS_USER"),
 		os.Getenv("NATS_PASSWORD"),
@@ -384,7 +403,7 @@ func loadConfig() (*config, error) {
 
 	chainEnabled := parseChainEnabled(os.Getenv("AUDIT_CHAIN_ENABLED"))
 	pruneMode := parsePruneMode(os.Getenv("AUDIT_CHAIN_PRUNE_ENABLED"), os.Getenv("AUDIT_CHAIN_PRUNE_DRYRUN"))
-	keyRing, err := loadChainKeys(chainEnabled, pruneMode, os.Getenv("ENVIRONMENT") == "production")
+	keyRing, err := loadChainKeys(chainEnabled, pruneMode, production)
 	if err != nil {
 		return nil, err
 	}

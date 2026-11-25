@@ -83,8 +83,11 @@ func erasureHoldCheckEnabled() bool {
 // erased now: 409 erasure_blocked_legal_hold while a hold is active, 503
 // erasure_hold_check_unavailable when the holds cannot be read (a hold that
 // cannot be ruled out is treated as present; the caller retries). Every refusal
-// is logged with the actor; with the switch off it reads nothing.
-func (s *Server) refuseHeldErasure(c *gin.Context, orgID, actorID, op string) bool {
+// is logged with the actor; with the switch off it reads nothing. A held refusal
+// (409) also leaves one durable audit row in the retention outbox (F-f10-06,
+// decision D-C1); the unavailable refusal (503) records nothing. op is one of the
+// retention.ErasureOp* names.
+func (s *Server) refuseHeldErasure(c *gin.Context, orgID, actorID, actorRole, op string) bool {
 	if !erasureHoldCheckEnabled() {
 		return false
 	}
@@ -119,10 +122,30 @@ func (s *Server) refuseHeldErasure(c *gin.Context, orgID, actorID, op string) bo
 		return false
 	}
 	log.Printf("gdpr: %s of org=%s by actor=%s refused: %d org and %d thread legal holds active", op, orgID, actorID, orgHolds, threadHolds)
+	s.auditRefusedErasure(ctx, orgID, retention.Actor{ID: actorID, Role: actorRole}, op, orgHolds, threadHolds)
 	writeRetentionError(c, http.StatusConflict, codeErasureBlockedLegalHold,
 		"A legal hold covers this organization, so nothing was erased. The hold must be released first.",
 		gin.H{"org_holds": orgHolds, "thread_holds": threadHolds, "held_content": heldErasureContent, "retryable": false})
 	return true
+}
+
+// erasureRefusalAuditor is the retention service's refusal audit. *retention.Service
+// satisfies it; a retention seam without it records nothing and logs so.
+type erasureRefusalAuditor interface {
+	AuditRefusedErasure(ctx context.Context, orgID string, actor retention.Actor, op string, orgHolds, threadHolds int) error
+}
+
+// auditRefusedErasure records a held refusal. A failure is logged with a closed word
+// and never changes the refusal.
+func (s *Server) auditRefusedErasure(ctx context.Context, orgID string, actor retention.Actor, op string, orgHolds, threadHolds int) {
+	auditor, ok := s.retention.(erasureRefusalAuditor)
+	if !ok {
+		log.Print("gdpr: erasure_refusal_audit_unavailable")
+		return
+	}
+	if err := auditor.AuditRefusedErasure(ctx, orgID, actor, op, orgHolds, threadHolds); err != nil {
+		log.Print("gdpr: erasure_refusal_audit_failed")
+	}
 }
 
 // confirmedErasure reports whether an irreversible erasure may proceed. Erasure
@@ -214,7 +237,7 @@ func (s *Server) hardDeleteOrganization(c *gin.Context) {
 		return
 	}
 
-	if s.refuseHeldErasure(c, orgID, actorID, "hard delete") {
+	if s.refuseHeldErasure(c, orgID, actorID, actorRole, retention.ErasureOpHardDelete) {
 		return
 	}
 
@@ -261,7 +284,7 @@ func (s *Server) softDeleteOrganization(c *gin.Context) {
 
 	// A soft delete starts the clock of the automatic purge, so a held org may
 	// not enter it either.
-	if s.refuseHeldErasure(c, orgID, actorID, "soft delete") {
+	if s.refuseHeldErasure(c, orgID, actorID, actorRole, retention.ErasureOpSoftDelete) {
 		return
 	}
 

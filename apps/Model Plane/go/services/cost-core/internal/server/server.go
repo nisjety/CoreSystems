@@ -226,15 +226,17 @@ func (s *Server) Handler(protect func(http.Handler) http.Handler) http.Handler {
 	return root
 }
 
-// ScopeBudgetCheck is the only scope an api_key principal carries at
-// cost-core (O-18): it allows POST /api/v1/budget/check for the key's own
-// principal and nothing else.
+// ScopeBudgetCheck is the scope of POST /api/v1/budget/check. A service principal
+// must hold it (F-f10-23a: model-gateway's own cost-core credential), and so must
+// an api_key principal, the one scope the key exchange mints for cost-core (O-18).
+// It allows that budget check and nothing else.
 const ScopeBudgetCheck = "cost:budget:check"
 
 // CostAuthorizer applies route-level authorization after token verification.
 // User principals may read data only within their signed organization and may
-// check their own budget. Ledger writes require cost:write; service org-wide
-// reads and budget checks require cost:read.
+// check their own budget. Ledger writes require cost:write. A service principal
+// checks a budget only with cost:budget:check, and reads org-wide data with
+// cost:read.
 func CostAuthorizer(principal authctx.Principal, r *http.Request) error {
 	if principal.PrincipalType == "user" {
 		if r.URL.Path == "/api/v1/cost/azure/actual" && !principal.HasScope("cost:org:read") {
@@ -266,6 +268,14 @@ func CostAuthorizer(principal authctx.Principal, r *http.Request) error {
 			return nil
 		}
 		return errors.New("cost:write scope is required")
+	}
+	if r.Method == http.MethodPost && r.URL.Path == "/api/v1/budget/check" {
+		// F-f10-23a: a service's budget check needs its own scope. cost:write (the
+		// Data Plane forwarder) and cost:read do not admit it.
+		if principal.HasScope(ScopeBudgetCheck) {
+			return nil
+		}
+		return errors.New("cost:budget:check scope is required")
 	}
 	if principal.HasScope("cost:read") {
 		return nil

@@ -846,6 +846,9 @@ services:
             NATS_SHARED_ALLOW_TOKEN_FALLBACK: "0"
             DRAGONFLY_ADDR: controlplane-dragonfly:6379
             DRAGONFLY_PASSWORD: ${DRAGONFLY_PASSWORD:?DRAGONFLY_PASSWORD must be set in Control Plane .env}
+            # org-core has no static entry here (P2-cp-07-rel1, P2-cp-10-rel1). Its thread receipt is read with a
+            # token Auth Core mints from ORG_CORE_SESSION_SERVICE_API_KEY, org-core's consumerEnv. A static entry
+            # would copy that live API key into session-core's environment and grant it a read the receipt does not use.
             SESSION_CORE_SERVICE_CREDENTIALS: >-
                 [{"principal":"verevon-gateway","audience":"session-core","token":"${SESSION_CORE_SERVICE_TOKEN:?SESSION_CORE_SERVICE_TOKEN is required}","scopes":["sessions:read","sessions:write"]}]
             USER_CORE_SERVICE_TOKEN: ${USER_CORE_SESSION_TOKEN:?USER_CORE_SESSION_TOKEN is required}

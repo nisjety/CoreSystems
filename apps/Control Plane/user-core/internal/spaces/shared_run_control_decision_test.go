@@ -191,6 +191,48 @@ func TestRunControlDecisionCarriesTheZDRClaimAndIsDisjointFromThreadAuthority(t 
 	}
 }
 
+// R-sws-01: Control signs the since_join history floor on a run-control decision, as a thread read does. The
+// floor is outside the payload digest, and a decision with no floor carries no claim at all, so with no floor
+// (switch off, or a full-history room) the decision is what it was before the claim existed.
+func TestRunControlDecisionSignsTheHistoryFloorOutsideTheDigest(t *testing.T) {
+	now := time.Now().UTC()
+	plain, err := IssueSharedRunControlDecision(validRunControlEvidence(), validRunControlRequest(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "history_floor_revision") {
+		t.Fatalf("a run-control decision without a floor must omit the claim: %s", raw)
+	}
+
+	evidence := validRunControlEvidence()
+	evidence.HistoryFloorRevision = 7
+	decision, err := IssueSharedRunControlDecision(evidence, validRunControlRequest(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.HistoryFloorRevision != 7 {
+		t.Fatalf("floor = %d, want 7", decision.HistoryFloorRevision)
+	}
+	raw, err = json.Marshal(decision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"history_floor_revision":7`) {
+		t.Fatalf("the run-control decision must sign the floor: %s", raw)
+	}
+	if decision.PayloadDigest != plain.PayloadDigest {
+		t.Fatal("the history floor must stay outside the run-control payload digest")
+	}
+	if decision.ActionID != plain.ActionID || decision.ActionSchemaHash != plain.ActionSchemaHash ||
+		decision.ServiceAudience != plain.ServiceAudience || !reflect.DeepEqual(decision.Permissions, plain.Permissions) {
+		t.Fatalf("the floor must not change the target: %+v, want %+v", decision, plain)
+	}
+}
+
 func TestRunControlEntitlementCatalogueRow(t *testing.T) {
 	spec, ok := EntitlementSpecByKey("run_control")
 	if !ok {

@@ -65,6 +65,17 @@ func Enabled(getenv func(string) string) bool {
 	return getenv(EnvEnabled) == "true"
 }
 
+// EnvThreadReceiptCheck is the switch for session-core's thread receipt check (F-f10-03). On, a
+// thread hold asks session-core whether the thread retained anything and is refused
+// CodeNothingRetained when it did not. Off, thread holds are placed without the check, as before.
+// Only the literal "true" turns it on.
+const EnvThreadReceiptCheck = "ORG_RETENTION_THREAD_RECEIPT_CHECK"
+
+// ThreadReceiptCheckEnabled reads EnvThreadReceiptCheck strictly, as Enabled does.
+func ThreadReceiptCheckEnabled(getenv func(string) string) bool {
+	return getenv(EnvThreadReceiptCheck) == "true"
+}
+
 // Policy is the organisation's retention record. A zero Revision means nothing
 // was ever written. A nil ThreadDays means keep: no thread is ever past a window.
 type Policy struct {

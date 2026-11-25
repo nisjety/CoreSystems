@@ -209,9 +209,16 @@ func IssueThreadReviseDecision(evidence PersonalThreadDecisionEvidence, request 
 	if err := request.Validate(); err != nil || now.IsZero() {
 		return Decision{}, fmt.Errorf("thread revise decision request is invalid")
 	}
-	return newEvidenceDecision(
+	decision := newEvidenceDecision(
 		evidence, request.DecisionRef, threadReviseAudience, threadReviseAction, threadReviseSchema,
 		ThreadRevisePayloadDigest(evidence, request), request.IdempotencyKey, request.Nonce,
 		threadRevisePermissions(evidence), evidence.Privacy.ZeroDataRetention, now,
-	), nil
+	)
+	// R-sws-07 (WS04-S11): the same signed floor the shared thread-read decision carries. It is set only
+	// for a shared Space whose resolver found a since_join floor; a personal Space has no history window.
+	// It is outside the payload digest, so the digest and its golden are unchanged.
+	if evidence.Membership.Kind != KindPersonal && evidence.HistoryFloorRevision > 0 {
+		decision.HistoryFloorRevision = evidence.HistoryFloorRevision
+	}
+	return decision, nil
 }

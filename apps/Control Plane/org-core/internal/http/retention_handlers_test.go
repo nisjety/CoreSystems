@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -366,6 +367,27 @@ func TestThreadHoldOnAZDRThreadIsRefusedWithTheTypedCode(t *testing.T) {
 	// An org hold on a ZDR organisation is allowed.
 	if org := harness.do(http.MethodPost, legalHoldsV1Path, "u-owner", jsonBody(map[string]any{"scope": "org", "hold_ref": "Matter"})); org.Code != http.StatusCreated {
 		t.Fatalf("org hold: status=%d body=%s", org.Code, org.Body.String())
+	}
+}
+
+// failingThreads is a receipt reader that cannot answer. The hold is placed anyway: an unneeded
+// hold deletes nothing, while a refused one could let held content be swept.
+type failingThreads struct{}
+
+func (failingThreads) NothingRetained(context.Context, string, string) (bool, error) {
+	return false, errors.New("session-core unavailable")
+}
+
+func TestThreadHoldsArePlacedWhenTheReceiptIsNotEmptyOrUnknown(t *testing.T) {
+	for name, threads := range map[string]retention.ThreadRetention{
+		"retained": zdrThreads{},
+		"unknown":  failingThreads{},
+	} {
+		harness := newRetentionHarness(t, map[string]string{"u-owner": "owner"}, threads)
+		response := harness.do(http.MethodPost, legalHoldsV1Path, "u-owner", jsonBody(map[string]any{"scope": "thread", "thread_id": "thr-1", "hold_ref": "Matter"}))
+		if response.Code != http.StatusCreated {
+			t.Fatalf("%s: a thread hold whose receipt is not known to be empty must be placed: status=%d body=%s", name, response.Code, response.Body.String())
+		}
 	}
 }
 

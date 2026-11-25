@@ -66,9 +66,9 @@ fi
 # The audit-chain signing keypair is only needed once the chain, or pruning of
 # chained rows, is switched on (audit-core refuses to sign without it). Both
 # halves are base64 of 32 bytes, so they pass the length floor below. Only the
-# literal 1 enables, like audit-core's own switches.
+# literal true enables, like audit-core's own switches.
 audit_chain_keys_required=0
-if [[ "${AUDIT_CHAIN_ENABLED:-0}" == "1" || "${AUDIT_CHAIN_PRUNE_ENABLED:-0}" == "1" ]]; then
+if [[ "${AUDIT_CHAIN_ENABLED:-false}" == "true" || "${AUDIT_CHAIN_PRUNE_ENABLED:-false}" == "true" ]]; then
   audit_chain_keys_required=1
   credential_names+=(AUDIT_CHAIN_PRIVATE_KEY_BASE64 AUDIT_CHAIN_PUBLIC_KEY_BASE64)
 fi

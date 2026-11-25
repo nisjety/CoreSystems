@@ -35,6 +35,8 @@ const (
 	DocumentsOrgPurgeDLQSubject                       = "verevon.gdpr.erasure.dlq.documents-api-org-purge"
 	ConversationOrgErasureConsumerName                = "conversation-core-org-erasure"
 	ConversationOrgErasureDelivery                    = "_VEREVON.CONTROL.SHARED.DELIVER.application.conversation.gdpr-erasure"
+	NotificationCoreOrgErasureConsumerName            = "notification-core-org-erasure"
+	NotificationCoreOrgErasureDelivery                = "_VEREVON.CONTROL.SHARED.DELIVER.application.notification.org-erasure"
 	ConversationInteractiveRetentionConsumerName      = "conversation-core-interactive-retention"
 	ConversationInteractiveRetentionDelivery          = "_VEREVON.CONTROL.SHARED.DELIVER.application.conversation.interactive-retention"
 	ConversationSupportRecurrenceZDRPurgeConsumerName = "conversation-core-support-recurrence-zdr-purge"
@@ -525,6 +527,9 @@ func ProvisionControlSharedRuntime(ctx context.Context, js nats.JetStreamContext
 			return err
 		}
 	}
+	if err := ensureFixedConsumer(js, ControlSharedStreamName, notificationCoreOrgErasureConsumerConfig()); err != nil {
+		return err
+	}
 	if err := ensureFixedConsumer(js, ControlSharedStreamName, indexEngineOrgErasureConsumerConfig()); err != nil {
 		return err
 	}
@@ -635,6 +640,21 @@ func notificationOrgDeletionConsumerConfigs() []*nats.ConsumerConfig {
 		})
 	}
 	return configs
+}
+
+// notificationCoreOrgErasureConsumerConfig is notification-core's org-erasure
+// push/queue consumer on the shared GDPR erasure fan-out (F-f05-11). Its durable
+// must match notification-core's orgErasureDurable, which binds with nats.Bind,
+// so a name mismatch here silently breaks the org-scoped purge there. The
+// consumer delivers only once notification-core binds it, which it does only
+// under NOTIFICATION_ORG_ERASURE_ENABLED=true; with that off, nothing is delivered.
+func notificationCoreOrgErasureConsumerConfig() *nats.ConsumerConfig {
+	return &nats.ConsumerConfig{
+		Durable: NotificationCoreOrgErasureConsumerName, DeliverSubject: NotificationCoreOrgErasureDelivery,
+		DeliverGroup: NotificationCoreOrgErasureConsumerName, FilterSubject: GDPRErasureRequestedSubject,
+		DeliverPolicy: nats.DeliverAllPolicy, AckPolicy: nats.AckExplicitPolicy,
+		AckWait: 30 * time.Second, MaxDeliver: 20, ReplayPolicy: nats.ReplayInstantPolicy,
+	}
 }
 
 // indexEngineOrgErasureConsumerConfig is Data Plane v2's index-engine-rs GDPR
@@ -939,7 +959,7 @@ func ensureBillingPlanConsumer(js nats.JetStreamContext) error {
 	return nil
 }
 
-// orgErasureConsumerConfigs maps every one of the 15 org-erasure/GDPR durable
+// orgErasureConsumerConfigs maps every one of the 17 org-erasure/GDPR durable
 // consumer names on ControlSharedStreamName to its current wanted config.
 // Exists so a single named consumer can be converged (see
 // EnsureOrgErasureConsumer) without depending on every OTHER resource in
@@ -967,10 +987,11 @@ func orgErasureConsumerConfigs() map[string]*nats.ConsumerConfig {
 		UserCoreOrgErasureConsumerName:         userCoreOrgErasureConsumerConfig(),
 		EmbeddingEngineOrgErasureConsumerName:  embeddingEngineOrgErasureConsumerConfig(),
 		VerevonGatewayOrgErasureConsumerName:   verevonGatewayOrgErasureConsumerConfig(),
+		NotificationCoreOrgErasureConsumerName: notificationCoreOrgErasureConsumerConfig(),
 	}
 }
 
-// EnsureOrgErasureConsumer converges exactly one of the 15 named org-erasure
+// EnsureOrgErasureConsumer converges exactly one of the 17 named org-erasure
 // consumers on the given stream to its current wanted config (create if
 // missing; error, never mutate, if an existing one has drifted -- same
 // contract as ensureFixedConsumer). The desired shape lives in exactly one

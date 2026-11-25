@@ -579,14 +579,22 @@ func TestHashRendersAsHexJSON(t *testing.T) {
 	}
 }
 
-func TestEnabledFollowsTheChainUnlessSwitchedOff(t *testing.T) {
+// Blank (spaces only included), or the exact literal true, follows the chain. Every other
+// value reads as off, the former spellings 1, on and yes included, and the chain off always wins.
+func TestEnabledFollowsTheChainOnlyForBlankOrTheLiteral(t *testing.T) {
 	cases := []struct {
 		raw   string
 		chain bool
 		want  bool
 	}{
-		{"", true, true}, {"1", true, true}, {"0", true, false},
-		{"", false, false}, {"1", false, false}, {"garbage", true, true},
+		{"", true, true}, {"true", true, true},
+		// Spaces only are blank, so they follow the chain as they did under the old reader.
+		{" ", true, true}, {"\t", true, true},
+		{"false", true, false}, {"0", true, false}, {"off", true, false},
+		{"1", true, false}, {"on", true, false}, {"yes", true, false},
+		{"TRUE", true, false}, {"True", true, false}, {"garbage", true, false},
+		{" true", true, false}, {"true ", true, false},
+		{"", false, false}, {"true", false, false}, {"1", false, false}, {" ", false, false},
 	}
 	for _, tc := range cases {
 		if got := Enabled(tc.raw, tc.chain); got != tc.want {

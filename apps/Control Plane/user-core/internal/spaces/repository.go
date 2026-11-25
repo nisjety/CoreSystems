@@ -1296,6 +1296,12 @@ func (r *Repository) ResolveSharedRunControlDecisionEvidence(ctx context.Context
 	if err != nil {
 		return PersonalThreadDecisionEvidence{}, fmt.Errorf("resolve shared Space run control authority: %w", err)
 	}
+	// R-sws-01: a since_join room signs the same history floor a shared thread read carries, so a late joiner
+	// with run-control authority cannot stop a run stamped before they joined. The floor is outside the payload
+	// digest and is filled only while SPACE_HISTORY_WINDOW_CLAIM is on.
+	if err := r.applyHistoryFloor(ctx, &evidence); err != nil {
+		return PersonalThreadDecisionEvidence{}, err
+	}
 	evidence.ResourceAuthorizationRef = fmt.Sprintf("control:%s:run-control:%d", evidence.Membership.SpaceRef, evidence.Membership.Revisions.Authority)
 	if err := evidence.ValidateForSharedRunControl(); err != nil {
 		return PersonalThreadDecisionEvidence{}, fmt.Errorf("invalid shared Space run control authority: %w", err)

@@ -133,3 +133,70 @@ func TestOwnScheduledThreadReadNeverCarriesAFloor(t *testing.T) {
 		t.Fatalf("a personal Space has no history window, got %d", decision.HistoryFloorRevision)
 	}
 }
+
+// R-sws-07 pure legs: the same signed floor on the model.thread.revise decision. A since_join member's
+// revise decision carries the floor; a full-history member's (no floor on the evidence) does not.
+
+func TestThreadReviseDecisionCarriesTheFloorButDigestIgnoresIt(t *testing.T) {
+	now := time.Now().UTC()
+	plain := validSharedReviseEvidence()
+	windowed := validSharedReviseEvidence()
+	windowed.HistoryFloorRevision = 7
+
+	base, err := IssueThreadReviseDecision(plain, validReviseRequest(), now)
+	if err != nil {
+		t.Fatalf("issue plain: %v", err)
+	}
+	with, err := IssueThreadReviseDecision(windowed, validReviseRequest(), now)
+	if err != nil {
+		t.Fatalf("issue windowed: %v", err)
+	}
+	if with.HistoryFloorRevision != 7 {
+		t.Fatalf("floor = %d, want 7", with.HistoryFloorRevision)
+	}
+	raw, err := json.Marshal(with)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(raw), `"history_floor_revision":7`) {
+		t.Fatalf("the floor must be signed with the revise decision: %s", raw)
+	}
+	if base.PayloadDigest != threadReviseGoldenDigest || with.PayloadDigest != threadReviseGoldenDigest {
+		t.Fatalf("the floor must not change the revise digest: %s vs %s", base.PayloadDigest, with.PayloadDigest)
+	}
+	if ThreadRevisePayloadDigest(plain, validReviseRequest()) != ThreadRevisePayloadDigest(windowed, validReviseRequest()) {
+		t.Fatal("the revise digest function must ignore the floor")
+	}
+}
+
+func TestThreadReviseDecisionOmitsHistoryFloorWhenZero(t *testing.T) {
+	decision, err := IssueThreadReviseDecision(validSharedReviseEvidence(), validReviseRequest(), time.Now().UTC())
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+	if decision.HistoryFloorRevision != 0 {
+		t.Fatalf("no floor expected, got %d", decision.HistoryFloorRevision)
+	}
+	raw, err := json.Marshal(decision)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(raw), "history_floor_revision") {
+		t.Fatalf("a revise decision without a floor must omit the claim: %s", raw)
+	}
+}
+
+func TestThreadReviseDecisionNeverCarriesAFloorInAPersonalSpace(t *testing.T) {
+	evidence := validPersonalThreadEvidence()
+	evidence.MessageReviseEntitled = true
+	evidence.OriginalRetention = OriginalRetentionPurge
+	evidence.ResourceAuthorizationRef = "control:space-personal:thread-revise:7"
+	evidence.HistoryFloorRevision = 9
+	decision, err := IssueThreadReviseDecision(evidence, validReviseRequest(), time.Now().UTC())
+	if err != nil {
+		t.Fatalf("issue personal revise: %v", err)
+	}
+	if decision.HistoryFloorRevision != 0 {
+		t.Fatalf("a personal Space has no history window, got %d", decision.HistoryFloorRevision)
+	}
+}

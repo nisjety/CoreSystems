@@ -106,7 +106,8 @@ pub(crate) const API_KEY_SCOPE: &str = "agent:runs";
 /// durable state. A key creates and reads its own threads and runs and nothing else (EP-12 D2,
 /// D5): memory, approvals, Space, attention and every RPC added later are refused because they
 /// are not listed. A key's run is terminalized by model-gateway's own service credential, never
-/// by the key, so no terminal RPC is listed.
+/// by the key, so no terminal RPC is listed. A key starts a managed run on its own thread and
+/// streams that run's events (F-f10-22); both are owner-bound, and a key may not wake or use a Space.
 pub(crate) const API_KEY_METHODS: &[(&str, bool)] = &[
     ("/model_plane.v1.SessionCore/CreateThread", true),
     ("/model_plane.v1.SessionCore/AppendMessage", true),
@@ -115,6 +116,11 @@ pub(crate) const API_KEY_METHODS: &[(&str, bool)] = &[
     ("/model_plane.v1.RunService/GetRun", false),
     ("/model_plane.v1.RunService/ListRuns", false),
     ("/model_plane.v1.RunService/CancelRun", true),
+    ("/model_plane.v1.ManagedRunLifecycle/StartManagedRun", true),
+    (
+        "/model_plane.v1.OrchestrationCoreService/StreamRunEvents",
+        false,
+    ),
 ];
 
 /// Whether `path` is one of [`API_KEY_METHODS`] and, when it is, whether it writes. Exact match
@@ -399,6 +405,20 @@ impl VerifiedIdentity {
         }
     }
 
+    /// A person whose verified credential carries `scopes`. No verifier mints a person a service scope;
+    /// the test uses this to show a scope never widens a person's server-origin refusal.
+    #[cfg(test)]
+    pub(crate) fn user_for_test_with_scopes(org_id: &str, user_id: &str, scopes: &[&str]) -> Self {
+        Self {
+            scopes: scopes
+                .iter()
+                .map(|scope| (*scope).to_owned())
+                .collect::<Vec<_>>()
+                .into(),
+            ..Self::user_for_test_with_zdr(org_id, user_id, false)
+        }
+    }
+
     /// A persistent user identity carrying `waiver`, shaped as the verifier
     /// shapes one: the claim only ever rides a token whose `zdr` is false.
     #[cfg(test)]
@@ -591,6 +611,36 @@ pub fn authorize_run_action_authority_service(caller: &VerifiedIdentity) -> Resu
     caller.require_service_scope(RUN_ACTION_AUTHORITY_SCOPE)
 }
 
+/// The scope of the thread retention read. It is the scope `CountWaivedRuns` already requires, so one
+/// retention read scope stays one scope. Granting it to a principal is a registry change, made apart from
+/// this crate.
+pub const THREAD_RETENTION_READ_SCOPE: &str = "session:retention:read";
+
+/// The one Control workload that may read a thread's retention: org-core, whose legal-hold placement asks
+/// before it places a hold. Auth Core signs a service token's subject as `service:<serviceId>`, and org-core's
+/// service id is `org-core`.
+pub const THREAD_RETENTION_READ_SERVICE: &str = "service:org-core";
+
+/// Verify org-core's thread retention read: the exact service identity holding the read scope, and not a
+/// zero-retention credential. A user credential is refused as any other service is, whatever it claims. A
+/// zero-retention credential is refused with the `legal_hold` feature, the one a thread hold names, because
+/// the read exists to place or refuse that hold.
+#[allow(clippy::result_large_err)]
+pub fn authorize_thread_retention_read_service(caller: &VerifiedIdentity) -> Result<(), Status> {
+    if caller.zdr() {
+        return Err(
+            mp_contracts::zdr_refusal::Refusal::feature_not_supported("legal_hold")
+                .grpc_status(tonic::Code::FailedPrecondition),
+        );
+    }
+    if !caller.is_service() || caller.principal_id() != THREAD_RETENTION_READ_SERVICE {
+        return Err(Status::permission_denied(
+            "only org-core may read thread retention",
+        ));
+    }
+    caller.require_service_scope(THREAD_RETENTION_READ_SCOPE)
+}
+
 /// Verify the Control workload allowed to resolve one prepared scheduled run
 /// before it issues a per-step decision. Keep this identity separate from
 /// Execution Core's claim/receipt scope and from generic run inspection.
@@ -618,6 +668,12 @@ pub const THREAD_OWNER_RESOLVE_SCOPE: &str = "session:thread-owner:resolve";
 /// Auth Core signs a service token's `sub` and `service_id` as `service:<serviceId>`, and sandbox-manager's
 /// registry row is keyed `sandbox-manager`.
 pub const THREAD_OWNER_RESOLVE_SERVICE: &str = "service:sandbox-manager";
+
+/// Scope execution-core holds on session-core to name an MCP server's question (`origin = mcp_elicitation`,
+/// EP-4 S7, DEC-F08-05). It is granted to execution-core's principal on the session-core audience only, and it
+/// replaces `orchestration:write` for that one origin: a model question keeps the `orchestration:write` gate.
+/// A person, or any other service, is refused a server origin whatever scopes it holds.
+pub(crate) const QUESTION_SERVICE_ORIGIN_SCOPE: &str = "orchestration:question:service-origin";
 
 /// Verify sandbox-manager's narrow ownership read: the exact service identity holding the exact scope, and
 /// not a zero-retention credential. A ZDR credential is refused the way the other narrow service authorities
@@ -2109,6 +2165,106 @@ mod tests {
         }
     }
 
+    /// F-f10-02: the thread retention read is org-core's alone, with the read scope and no zero-retention posture.
+    #[test]
+    fn thread_retention_read_is_org_core_with_the_read_scope_and_non_zdr() {
+        assert_eq!(THREAD_RETENTION_READ_SERVICE, "service:org-core");
+        assert_eq!(
+            THREAD_RETENTION_READ_SCOPE,
+            crate::grpc::WAIVED_RUN_COUNT_SCOPE
+        );
+        let authorized = VerifiedIdentity::service_for_test_as(
+            "org-1",
+            THREAD_RETENTION_READ_SERVICE,
+            &[THREAD_RETENTION_READ_SCOPE],
+            false,
+        );
+        authorize_thread_retention_read_service(&authorized)
+            .expect("org-core with the read scope may read thread retention");
+
+        for (principal, scopes, zdr, expected) in [
+            (
+                THREAD_RETENTION_READ_SERVICE,
+                Vec::<&str>::new(),
+                false,
+                Code::PermissionDenied,
+            ),
+            (
+                THREAD_RETENTION_READ_SERVICE,
+                vec!["session:read"],
+                false,
+                Code::PermissionDenied,
+            ),
+            (
+                "service:org-core-copy",
+                vec![THREAD_RETENTION_READ_SCOPE],
+                false,
+                Code::PermissionDenied,
+            ),
+            (
+                "service:session-core",
+                vec![THREAD_RETENTION_READ_SCOPE],
+                false,
+                Code::PermissionDenied,
+            ),
+            (
+                "service:sandbox-manager",
+                vec![THREAD_RETENTION_READ_SCOPE],
+                false,
+                Code::PermissionDenied,
+            ),
+            (
+                THREAD_RETENTION_READ_SERVICE,
+                vec![THREAD_RETENTION_READ_SCOPE],
+                true,
+                Code::FailedPrecondition,
+            ),
+        ] {
+            let caller = VerifiedIdentity::service_for_test_as("org-1", principal, &scopes, zdr);
+            assert_eq!(
+                authorize_thread_retention_read_service(&caller)
+                    .expect_err(
+                        "only the exact non-ZDR org-core principal with the read scope may read"
+                    )
+                    .code(),
+                expected,
+                "{principal} {scopes:?} zdr={zdr}"
+            );
+        }
+    }
+
+    /// F-f10-02: a person never reads thread retention, even holding the scope, and a ZDR refusal names the
+    /// `legal_hold` feature.
+    #[test]
+    fn thread_retention_read_refuses_a_user_and_names_the_legal_hold_feature_for_zdr() {
+        let user = VerifiedIdentity {
+            org_id: Arc::from("org-1"),
+            principal_id: Arc::from("user-1"),
+            user_id: Some(Arc::from("user-1")),
+            scopes: Arc::from([THREAD_RETENTION_READ_SCOPE.to_owned()]),
+            kind: PrincipalKind::User,
+            zdr: false,
+            zdr_waiver: None,
+            acting_user_id: None,
+        };
+        let status = authorize_thread_retention_read_service(&user).expect_err("a user is refused");
+        assert_eq!(status.code(), Code::PermissionDenied, "{status:?}");
+
+        let zdr = VerifiedIdentity::service_for_test_as(
+            "org-1",
+            THREAD_RETENTION_READ_SERVICE,
+            &[THREAD_RETENTION_READ_SCOPE],
+            true,
+        );
+        let status = authorize_thread_retention_read_service(&zdr).expect_err("ZDR is refused");
+        assert_typed(
+            &status,
+            Code::FailedPrecondition,
+            "zdr_feature_not_supported",
+            Some("legal_hold"),
+        );
+    }
+
     /// A human never reaches the system branch: the kind is asserted explicitly
     /// rather than inferred from a missing user_id.
     #[test]
@@ -2909,6 +3065,49 @@ mod tests {
                 .code(),
             Code::PermissionDenied
         );
+    }
+
+    /// F-f10-22: a key starts a managed run and streams its run's events. The scope stays the only
+    /// gate; a ZDR key writes nothing, so it starts no run, and a read it may still make.
+    #[test]
+    fn api_key_admits_the_managed_run_start_and_its_event_stream() {
+        let verifier = api_key_verifier();
+        let start = "/model_plane.v1.ManagedRunLifecycle/StartManagedRun";
+        let stream = "/model_plane.v1.OrchestrationCoreService/StreamRunEvents";
+        for path in [start, stream] {
+            assert!(
+                verifier.intercept(call_on(path, &api_key_claims())).is_ok(),
+                "{path}"
+            );
+        }
+        let mut unscoped = api_key_claims();
+        unscoped["scopes"] = json!(["session:write"]);
+        for path in [start, stream] {
+            assert_eq!(
+                verifier
+                    .intercept(call_on(path, &unscoped))
+                    .expect_err("the agent:runs scope is required")
+                    .code(),
+                Code::PermissionDenied,
+                "{path}"
+            );
+        }
+        let mut zdr = api_key_claims();
+        zdr["zdr"] = json!(true);
+        zdr["org_zdr"] = json!(true);
+        assert_typed(
+            &verifier
+                .intercept(call_on(start, &zdr))
+                .expect_err("a ZDR key starts no run"),
+            Code::FailedPrecondition,
+            mp_contracts::zdr_refusal::code::FEATURE_NOT_SUPPORTED,
+            Some("agent_api"),
+        );
+        assert!(verifier.intercept(call_on(stream, &zdr)).is_ok());
+        // The owner a key's run is recorded under is the key, never the person it is attributed to.
+        let key = VerifiedIdentity::api_key_for_test("org-1", "key-1", "user-1", false);
+        assert_eq!(key.owner_id(), Some("apikey:key-1"));
+        assert_eq!(key.user_id(), None);
     }
 
     #[test]

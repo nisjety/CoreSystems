@@ -175,6 +175,7 @@
     },
     "scopes": [
       "approval:deliver",
+      "approval:grant_use",
       "browser:execute",
       "capability:health:global:write",
       "capability:read",
@@ -183,6 +184,7 @@
       "jobs:control",
       "jobs:read",
       "map:read",
+      "orchestration:question:service-origin",
       "parse:write",
       "sandbox:read",
       "sandbox:write",
@@ -213,6 +215,8 @@
       ],
       "session-core": [
         "approval:deliver",
+        "approval:grant_use",
+        "orchestration:question:service-origin",
         "session:heartbeat",
         "session:terminalize"
       ]
@@ -350,21 +354,27 @@
     "tenancy": "directory",
     "audiences": [
       "session-core",
-      "quarry"
+      "quarry",
+      "cost-core"
     ],
     "consumerEnv": "MODEL_GATEWAY_SERVICE_API_KEY",
     "orgIds": [],
     "retentionByAudience": {
+      "cost-core": "persistent",
       "quarry": "zdr",
       "session-core": "zdr"
     },
     "scopes": [
+      "cost:budget:check",
       "scrape:read",
       "search:read",
       "session:heartbeat",
       "session:terminalize"
     ],
     "scopesByAudience": {
+      "cost-core": [
+        "cost:budget:check"
+      ],
       "quarry": [
         "scrape:read",
         "search:read"
@@ -466,6 +476,25 @@
         "session:memory-controls:read",
         "session:runs:system-owner",
         "session:write"
+      ]
+    }
+  },
+  "org-core": {
+    "tenancy": "directory",
+    "audiences": [
+      "session-core"
+    ],
+    "consumerEnv": "ORG_CORE_SESSION_SERVICE_API_KEY",
+    "orgIds": [],
+    "retentionByAudience": {
+      "session-core": "persistent"
+    },
+    "scopes": [
+      "session:retention:read"
+    ],
+    "scopesByAudience": {
+      "session-core": [
+        "session:retention:read"
       ]
     }
   },

@@ -162,7 +162,7 @@ func TestControlComposeScanReadsLiteralAndInterpolatedSwitches(t *testing.T) {
 	}{
 		{"PPROF_ENABLED", false, "false", true},
 		{"SPACE_POLICY_ADMIN_WRITES", true, "false", true},
-		{"AUDIT_CHAIN_PRUNE_DRYRUN", true, "0", true},
+		{"AUDIT_CHAIN_PRUNE_DRYRUN", true, "false", true},
 		{"GIN_MODE", false, "release", false},
 	}
 	for _, c := range cases {

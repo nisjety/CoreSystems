@@ -413,6 +413,27 @@ zero-retention or waived run never presents it.
 Nothing presents it until `EXECUTION_SCREEN_INFERENCE_CREDENTIAL` is the literal `true` (and
 `CONTENT_SAFETY_SCREEN_RPC` is on).
 
+### Thread retention read and the batch 11 scopes (dark)
+
+`org-core` reads whether a thread keeps anything, for a legal hold (F-f10-03, DEC-M4). It calls
+session-core's `GetThreadRetention` with the one scope that RPC checks, `session:retention:read`, on the
+`session-core` audience. The answer is two booleans and no content, so the lane is `persistent`, as for
+other control-plane reads. Nothing presents it until `ORG_RETENTION_THREAD_RECEIPT_CHECK` is the literal `true`.
+
+| principal | audience | scopes | retention | key published to |
+| --- | --- | --- | --- | --- |
+| `org-core` | `session-core` | `session:retention:read` | `persistent` | `ORG_CORE_SESSION_SERVICE_API_KEY` (org-core) |
+
+Batch 11 of the train (`PRINCIPAL-TRAIN.md`) also adds two scopes to `execution-core` on `session-core`:
+`approval:grant_use`, which stays dormant until `APPROVAL_SCOPE_GRANTS_ENABLED` is on (the one existing
+caller, execution-core's standing-grant release, sends no bearer today, so the grant stays inert until a
+minted `approval:grant_use` bearer is wired there), and
+`orchestration:question:service-origin`, which is minted only on the MCP form path, so it needs
+`MCP_DO_ELICITATION` and the model-gateway's `MCP_ELICITATION_ENABLED` on. The `model-gateway` grant on
+`capability-core` for skill bundle bodies is held and not in the policy: `capability-core` has no narrow scope
+for it yet, and its bundle reader takes `capability:read`, which browser-broker, execution-core and
+orchestrator-core already hold there. The owner decides whether to accept that broad scope first.
+
 ### Organization binding (`tenancy`): the production principal model
 
 Auth Core's production loader refuses `allowAnyOrg: true` (a leaked workload

@@ -192,6 +192,13 @@ func loadServiceCredentials() []serviceCredential {
 		credential.Principal = strings.TrimSpace(credential.Principal)
 		credential.Audience = strings.TrimSpace(credential.Audience)
 		credential.Token = strings.TrimSpace(credential.Token)
+		// An empty token is an unset slot, not an invalid entry: compose may write an optional credential as
+		// ${NAME:-} and leave it empty. Such an entry is dropped without a log line, so a boot that leaves it
+		// unset stays silent. A non-empty token that is short, or that has the wrong principal, audience or
+		// scope set, is still logged as invalid below.
+		if credential.Token == "" {
+			continue
+		}
 		if credential.Principal == "" || credential.Audience != serviceCredentialAudience || len(credential.Token) < 32 {
 			log.Error().Str("principal", credential.Principal).Msg("session service credentials: invalid entry ignored")
 			continue
