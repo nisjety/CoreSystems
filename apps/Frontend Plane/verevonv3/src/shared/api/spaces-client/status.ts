@@ -1,7 +1,7 @@
 // WS11-S10: org-scoped member status and agent availability chips.
 //
 // Wire (gateway: apps/gateway/src/domains/spaces/status.rs; flag `space_status_api`):
-//   GET /api/v1/spaces/status                         -> { data: { state, text, expires_at } }  (all null when none set)
+//   GET /api/v1/spaces/status                         -> { data: { state, text, expires_at }, meta: { text_allowed } }  (all null when none set)
 //   PUT /api/v1/spaces/status {state, text?, expires_at?} -> { data: { state, text, expires_at } }
 //   DELETE /api/v1/spaces/status                      -> { data: { state: null, text: null, expires_at: null } }  (clears it; idempotent)
 //   GET /api/v1/spaces/{ref}/roster   user members carry `status` ({state, text, expires_at} | null)
@@ -13,7 +13,7 @@
 // 503 `status_unavailable`. The status belongs to one organization and is never shown in another.
 // The text is the one free-text field: it is rendered as plain text only and never fed to a model.
 // `spaces.set_status` is the action contract (shared/actions/domains/spaces/ws11.ts).
-import { requestJson } from '../http'
+import { requestJson, requestJsonPage } from '../http'
 
 export type SpaceMemberStatusState = 'available' | 'away' | 'dnd' | 'offline'
 export type SpaceAgentActivity = 'working' | 'waiting' | 'idle'
@@ -56,6 +56,22 @@ export function spaceStatusFrom(raw: unknown): SpaceMemberStatus | null {
 export async function getOwnSpaceStatus(): Promise<SpaceMemberStatus | null> {
   const response = await requestJson<unknown>('/api/v1/spaces/status')
   return spaceStatusFrom(response)
+}
+
+export type OwnSpaceStatusView = {
+  readonly status: SpaceMemberStatus | null
+  /**
+   * Whether this organization may set status text: the server's `meta.text_allowed`. Only a literal
+   * `true` counts; an absent or unknown posture reads false, so a Zero Data Retention org never gets
+   * the field before the posture is known. Display only: the server refuses text writes on its own.
+   */
+  readonly textAllowed: boolean
+}
+
+/** The caller's own status together with whether a status text may be offered at all. */
+export async function getOwnSpaceStatusView(): Promise<OwnSpaceStatusView> {
+  const { data, meta } = await requestJsonPage<unknown>('/api/v1/spaces/status')
+  return { status: spaceStatusFrom(data), textAllowed: meta?.text_allowed === true }
 }
 
 export type SetSpaceStatusInput = {

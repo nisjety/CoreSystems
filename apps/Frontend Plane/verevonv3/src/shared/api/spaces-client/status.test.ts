@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { clearOwnSpaceStatus, getOwnSpaceStatus, setOwnSpaceStatus, spaceStatusFrom } from './status'
+import {
+  clearOwnSpaceStatus,
+  getOwnSpaceStatus,
+  getOwnSpaceStatusView,
+  setOwnSpaceStatus,
+  spaceStatusFrom,
+} from './status'
 
 type FetchCall = { url: string; init: RequestInit | undefined }
 
@@ -89,6 +95,29 @@ describe('getOwnSpaceStatus (WS11-S10)', () => {
 
     stubFetch(200, { data: { state: 'offline', text: null, expires_at: 1760000000000 } })
     expect(await getOwnSpaceStatus()).toEqual({ state: 'offline', text: null, expiresAt: 1760000000000 })
+  })
+})
+
+describe('getOwnSpaceStatusView (WS11-S10)', () => {
+  it('reads meta.text_allowed, and only a literal true allows text', async () => {
+    const calls = stubFetch(200, {
+      data: { state: 'away', text: 'brb', expires_at: null },
+      meta: { text_allowed: true },
+    })
+    expect(await getOwnSpaceStatusView()).toEqual({
+      status: { state: 'away', text: 'brb', expiresAt: null },
+      textAllowed: true,
+    })
+    expect(calls[0]?.url.endsWith('/api/v1/spaces/status')).toBe(true)
+
+    stubFetch(200, { data: { state: null, text: null, expires_at: null }, meta: { text_allowed: false } })
+    expect(await getOwnSpaceStatusView()).toEqual({ status: null, textAllowed: false })
+
+    // An older gateway that states no posture, or a malformed one, fails closed.
+    stubFetch(200, { data: { state: 'dnd', text: null, expires_at: null } })
+    expect((await getOwnSpaceStatusView()).textAllowed).toBe(false)
+    stubFetch(200, { data: { state: 'dnd', text: null, expires_at: null }, meta: { text_allowed: 'true' } })
+    expect((await getOwnSpaceStatusView()).textAllowed).toBe(false)
   })
 })
 

@@ -3,7 +3,7 @@ import { createSignal, For, onCleanup, onSettled, Show } from 'solid-js'
 import { hasErrorCode } from '@/shared/api/http'
 import {
   clearOwnSpaceStatus,
-  getOwnSpaceStatus,
+  getOwnSpaceStatusView,
   setOwnSpaceStatus,
   SPACE_STATUS_STATES,
   SPACE_STATUS_TEXT_MAX,
@@ -32,9 +32,11 @@ const DURATIONS: readonly { readonly id: string; readonly ms: number | null; rea
  * Your status in this organization (WS11-S10): one of four states, an optional short text and an
  * optional expiry. It is shown next to your name in the rooms of this organization only, never in
  * another one; `dnd` mutes out-of-app notifications and nothing else. The text is plain text and is
- * never given to a model. Under Zero Data Retention no text field is drawn (the organization's posture
- * as the chat listing stated it, or a 412 the server answered once in this page session); the server refuses
- * any text with a typed 412 and accepts the state alone. With the gateway flag off (404
+ * never given to a model. The text field is drawn only when the status read itself stated
+ * `text_allowed` (a positive "not ZDR"; unknown reads as no), so a Zero Data Retention org never sees it,
+ * not even before the chat listing has loaded. A ZDR verdict from the chat listing, or a 412 on a save,
+ * takes it away while the menu is open; the next mount asks the server again. The server refuses any
+ * text with a typed 412 and accepts the state alone. With the gateway flag off (404
  * `space_status_disabled`) the control is not rendered at all.
  */
 export function SpaceStatusMenu() {
@@ -49,8 +51,9 @@ export function SpaceStatusMenu() {
   const [busy, setBusy] = createSignal(false)
   const [message, setMessage] = createSignal('')
   const [error, setError] = createSignal('')
-  // Zero data retention takes the text field away: the posture the chat listing stated (allowed until it
-  // does), and the server's typed 412 on a text write, learned once for this page session.
+  // The text field needs all three: the status read's `text_allowed` (false until it answers, and false
+  // for an unknown posture), the chat listing's posture, and no typed 412 on a text write in this mount.
+  const [serverTextAllowed, setServerTextAllowed] = createSignal(false)
   const [retention, setRetention] = createSignal(isLocalRetentionAllowed())
   const [textRefused, setTextRefused] = createSignal(false)
   onCleanup(
@@ -60,7 +63,7 @@ export function SpaceStatusMenu() {
       if (!allowed) setText('')
     }),
   )
-  const textOffered = () => retention() && !textRefused()
+  const textOffered = () => serverTextAllowed() && retention() && !textRefused()
 
   const adopt = (status: SpaceMemberStatus | null) => {
     setCurrent(status)
@@ -70,8 +73,11 @@ export function SpaceStatusMenu() {
   }
 
   onSettled(() => {
-    getOwnSpaceStatus()
-      .then(adopt)
+    getOwnSpaceStatusView()
+      .then((view) => {
+        setServerTextAllowed(view.textAllowed)
+        adopt(view.status)
+      })
       .catch((err: unknown) => {
         if (hasErrorCode(err, 'space_status_disabled')) setAvailable(false)
         else {
@@ -98,7 +104,7 @@ export function SpaceStatusMenu() {
       setMessage(i18n.tr('Statusen er lagret.', 'Status saved.'))
     } catch (err) {
       if (hasErrorCode(err, 'zdr_durable_mutation_forbidden')) {
-        // The server keeps no text for this organization: the field goes for the rest of this page session.
+        // The server keeps no text for this organization: the field goes while this menu is mounted.
         setTextRefused(true)
         setText('')
         setError(

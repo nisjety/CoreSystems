@@ -1,6 +1,7 @@
 //! Org-scoped member status and agent availability chips: the BFF half of WS11-S10.
 //!
-//! * `GET /api/v1/spaces/status` reads the caller's own status in their organization;
+//! * `GET /api/v1/spaces/status` reads the caller's own status in their organization, with
+//!   `meta.text_allowed` (whether this organization may set status text; unknown reads false);
 //!   `PUT /api/v1/spaces/status {state, text?, expires_at?}` replaces it; `DELETE` clears it
 //!   (idempotent, and allowed under Zero Data Retention because it keeps no content). A status is one
 //!   Application row keyed by (organization, subject), so a text written in one organization is
@@ -145,6 +146,10 @@ async fn get_status(
         Err(reply) => return reply,
     };
     let include_text = text_allowed(&state, &user).await;
+    // `meta.text_allowed` states the same posture the read used, so the status menu draws the text
+    // field only for an organization positively known not to be ZDR (unknown fails closed to false).
+    // It is display only: the write path refuses text on its own (`durable_write_refusal`).
+    let meta = json!({"text_allowed": include_text});
     match convex_gateway_call(
         &state,
         "query",
@@ -160,9 +165,12 @@ async fn get_status(
         // No row, or an expired one, reads as cleared: every field null.
         Ok(value) if value.is_null() => (
             StatusCode::OK,
-            Json(json!({"data": {"state": null, "text": null, "expires_at": null}})),
+            Json(json!({"data": {"state": null, "text": null, "expires_at": null}, "meta": meta})),
         ),
-        Ok(value) => (StatusCode::OK, Json(json!({"data": status_json(&value)}))),
+        Ok(value) => (
+            StatusCode::OK,
+            Json(json!({"data": status_json(&value), "meta": meta})),
+        ),
         Err(()) => unavailable(),
     }
 }
@@ -725,6 +733,8 @@ mod tests {
                 body["data"],
                 json!({"state": "away", "text": "brb", "expires_at": 1_900_000_000_000_i64})
             );
+            // The menu's text field follows this: only a positive "not ZDR" offers it.
+            assert_eq!(body["meta"]["text_allowed"], include_text, "{zdr:?}");
             let asked = convex_calls(&fx, read).await;
             assert_eq!(asked[0]["args"]["includeText"], include_text, "{zdr:?}");
             assert_eq!(asked[0]["args"]["externalAuthId"], "user-1");
@@ -737,6 +747,7 @@ mod tests {
         let (status, body) = call(&fx, "GET", None, false).await;
         assert_eq!(status, 200);
         assert_eq!(body["data"], json!({"state": null, "text": null, "expires_at": null}));
+        assert_eq!(body["meta"], json!({"text_allowed": true}));
 
         // Application failing is a 503 that says so, never a cleared status.
         let down = self::fx(Some(false)).await;
