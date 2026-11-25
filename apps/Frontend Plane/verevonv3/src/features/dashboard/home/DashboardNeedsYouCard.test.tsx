@@ -20,7 +20,7 @@ vi.mock('@/shared/api/spaces-attention-items-client', async (importOriginal) => 
   ...(await importOriginal<typeof import('@/shared/api/spaces-attention-items-client')>()),
   listAttentionItems: inbox.listAttentionItems,
 }))
-vi.mock('@/shared/api/spaces-client', () => ({ getSpaceRoster: inbox.getSpaceRoster }))
+vi.mock('@/shared/api/spaces-client', () => ({ getSpaceRoster: inbox.getSpaceRoster, getSpaceAgents: async () => [] }))
 vi.mock('@/features/spaces/lib/space-attention', () => ({
   spaceAttentionAvailable: () => shell.available(),
   spaceAttentionTotals: () => shell.totals(),

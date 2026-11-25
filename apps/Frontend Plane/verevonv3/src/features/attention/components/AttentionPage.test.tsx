@@ -23,6 +23,7 @@ const inbox = vi.hoisted(() => ({
   getThreadFollow: vi.fn(),
   setThreadFollow: vi.fn(),
   getSpaceRoster: vi.fn(),
+  getSpaceAgents: vi.fn(),
 }))
 
 vi.mock('@/shared/api/spaces-attention-items-client', async (importOriginal) => ({
@@ -38,6 +39,7 @@ vi.mock('@/features/spaces/lib/space-attention', () => ({
 vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/shared/api/spaces-client')>()),
   getSpaceRoster: inbox.getSpaceRoster,
+  getSpaceAgents: inbox.getSpaceAgents,
 }))
 
 const NOW = Date.parse('2026-11-18T09:00:00Z')
@@ -103,6 +105,8 @@ beforeEach(() => {
   resetRosterNamesForTests()
   inbox.getSpaceRoster.mockReset()
   inbox.getSpaceRoster.mockResolvedValue([])
+  inbox.getSpaceAgents.mockReset()
+  inbox.getSpaceAgents.mockResolvedValue([])
 })
 
 afterEach(() => cleanup())
@@ -282,10 +286,15 @@ describe('AttentionPage', () => {
     expect(inbox.getThreadFollow).not.toHaveBeenCalled()
   })
 
-  it('names the person and the agent from the room roster, and keeps the fallback words where the roster is silent', async () => {
+  it('names the person from the roster and the agent from the room agents, and keeps the fallback words where both are silent', async () => {
+    // Control's real shape: a service (agent) member comes back with an empty display name.
     inbox.getSpaceRoster.mockResolvedValue([
       { subject_type: 'user', subject_id: 'user-1', role: 'editor', revision: 1, display_name: 'Ola Nordmann' },
-      { subject_type: 'service', subject_id: 'agent-1', role: 'editor', revision: 1, display_name: 'Research bot' },
+      { subject_type: 'service', subject_id: 'agent-1', role: 'editor', revision: 1, display_name: '' },
+      { subject_type: 'service', subject_id: 'agent-2', role: 'editor', revision: 1, display_name: '' },
+    ])
+    inbox.getSpaceAgents.mockResolvedValue([
+      { subject_id: 'agent-1', role: 'editor', revision: 1, identity_published: true, name: 'Research bot', delivery_targets: [] },
     ])
     inbox.listAttentionItems.mockResolvedValue(
       page({
@@ -293,6 +302,7 @@ describe('AttentionPage', () => {
           item({ itemId: 'item-person', kind: 'mention', actor: { kind: 'user', subjectId: 'user-1', agentRef: null } }),
           item({ itemId: 'item-agent', kind: 'mention', actor: { kind: 'agent', subjectId: null, agentRef: 'agent-1' } }),
           item({ itemId: 'item-stranger', kind: 'mention', actor: { kind: 'user', subjectId: 'user-9', agentRef: null } }),
+          item({ itemId: 'item-unnamed-agent', kind: 'mention', actor: { kind: 'agent', subjectId: null, agentRef: 'agent-2' } }),
         ],
       }),
     )
@@ -302,8 +312,10 @@ describe('AttentionPage', () => {
     expect(await screen.findByText('Ola Nordmann nevnte deg i Room Alpha')).toBeTruthy()
     expect(await screen.findByText('Research bot nevnte deg i Room Alpha')).toBeTruthy()
     expect(screen.getByText('Noen nevnte deg i Room Alpha')).toBeTruthy()
-    // Three rows of one room share one roster read.
+    expect(screen.getByText('En agent nevnte deg i Room Alpha')).toBeTruthy()
+    // Four rows of one room share one roster read and one agent read.
     expect(inbox.getSpaceRoster).toHaveBeenCalledTimes(1)
+    expect(inbox.getSpaceAgents).toHaveBeenCalledTimes(1)
     expect(inbox.getSpaceRoster).toHaveBeenCalledWith('room-a')
   })
 
