@@ -1,4 +1,4 @@
-import { createSignal, For, onSettled, Show } from 'solid-js'
+import { createSignal, For, onCleanup, onSettled, Show } from 'solid-js'
 
 import { hasErrorCode } from '@/shared/api/http'
 import {
@@ -12,6 +12,7 @@ import {
 } from '@/shared/api/spaces-client'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import { useFormat } from '@/shared/preferences/use-format'
+import { isLocalRetentionAllowed, subscribeLocalRetention } from '@/features/chat/lib/chat-retention'
 import { formatWhenWithTime } from '../lib/space-thread-presentation'
 import { SpaceMemberStatusChip, statusStateLabel } from './SpaceStatusChip'
 import './space-status.css'
@@ -31,9 +32,10 @@ const DURATIONS: readonly { readonly id: string; readonly ms: number | null; rea
  * Your status in this organization (WS11-S10): one of four states, an optional short text and an
  * optional expiry. It is shown next to your name in the rooms of this organization only, never in
  * another one; `dnd` mutes out-of-app notifications and nothing else. The text is plain text and is
- * never given to a model. Under Zero Data Retention the server refuses text (a typed 412) and
- * accepts the state alone. With the gateway flag off (404 `space_status_disabled`) the control is
- * not rendered at all.
+ * never given to a model. Under Zero Data Retention no text field is drawn (the organization's posture
+ * as the chat listing stated it, or a 412 the server answered once in this page session); the server refuses
+ * any text with a typed 412 and accepts the state alone. With the gateway flag off (404
+ * `space_status_disabled`) the control is not rendered at all.
  */
 export function SpaceStatusMenu() {
   const i18n = useI18n()
@@ -47,6 +49,18 @@ export function SpaceStatusMenu() {
   const [busy, setBusy] = createSignal(false)
   const [message, setMessage] = createSignal('')
   const [error, setError] = createSignal('')
+  // Zero data retention takes the text field away: the posture the chat listing stated (allowed until it
+  // does), and the server's typed 412 on a text write, learned once for this page session.
+  const [retention, setRetention] = createSignal(isLocalRetentionAllowed())
+  const [textRefused, setTextRefused] = createSignal(false)
+  onCleanup(
+    subscribeLocalRetention((allowed) => {
+      setRetention(allowed)
+      // A posture that turns zero retention on while the menu is open: the typed text goes with the field.
+      if (!allowed) setText('')
+    }),
+  )
+  const textOffered = () => retention() && !textRefused()
 
   const adopt = (status: SpaceMemberStatus | null) => {
     setCurrent(status)
@@ -84,6 +98,9 @@ export function SpaceStatusMenu() {
       setMessage(i18n.tr('Statusen er lagret.', 'Status saved.'))
     } catch (err) {
       if (hasErrorCode(err, 'zdr_durable_mutation_forbidden')) {
+        // The server keeps no text for this organization: the field goes for the rest of this page session.
+        setTextRefused(true)
+        setText('')
         setError(
           i18n.tr(
             'Organisasjonen lagrer ikke innhold, så statustekst er ikke tilgjengelig. Du kan fortsatt velge en tilstand.',
@@ -106,7 +123,7 @@ export function SpaceStatusMenu() {
   const submit = (event: Event) => {
     event.preventDefault()
     const chosen = DURATIONS.find((item) => item.id === duration())
-    void save({ state: state(), text: text(), expiresInMs: chosen?.ms ?? null })
+    void save({ state: state(), text: textOffered() ? text() : '', expiresInMs: chosen?.ms ?? null })
   }
 
   // Clear removes the row through the clear route (DELETE): no state, text or expiry remains, and it is
@@ -181,18 +198,30 @@ export function SpaceStatusMenu() {
           </For>
         </fieldset>
 
-        <div class="verevon-space-status-menu__row">
-          <label for="space-status-text">{i18n.tr('Tekst (valgfri)', 'Text (optional)')}</label>
-          <input
-            id="space-status-text"
-            class="verevon-settings-input"
-            type="text"
-            maxlength={SPACE_STATUS_TEXT_MAX}
-            autocomplete="off"
-            value={text()}
-            onInput={(event) => setText(event.currentTarget.value)}
-          />
-        </div>
+        <Show
+          when={textOffered()}
+          fallback={
+            <p class="verevon-space-status-menu__hint">
+              {i18n.tr(
+                'Statustekst er ikke tilgjengelig i denne organisasjonen. Du kan fortsatt velge en tilstand.',
+                'Status text is not available in this organization. You can still choose a state.',
+              )}
+            </p>
+          }
+        >
+          <div class="verevon-space-status-menu__row">
+            <label for="space-status-text">{i18n.tr('Tekst (valgfri)', 'Text (optional)')}</label>
+            <input
+              id="space-status-text"
+              class="verevon-settings-input"
+              type="text"
+              maxlength={SPACE_STATUS_TEXT_MAX}
+              autocomplete="off"
+              value={text()}
+              onInput={(event) => setText(event.currentTarget.value)}
+            />
+          </div>
+        </Show>
 
         <div class="verevon-space-status-menu__row">
           <label for="space-status-duration">{i18n.tr('Varighet', 'Duration')}</label>

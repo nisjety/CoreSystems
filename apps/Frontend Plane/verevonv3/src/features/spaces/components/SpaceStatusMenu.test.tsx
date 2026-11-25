@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-li
 import { flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { __resetRetentionForTests, applyServerRetention } from '@/features/chat/lib/chat-retention'
 import { ApiError } from '@/shared/api/http'
 
 const spacesClient = vi.hoisted(() => ({
@@ -37,6 +38,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   vi.useRealTimers()
+  __resetRetentionForTests()
 })
 
 describe('SpaceStatusMenu (WS11-S10)', () => {
@@ -101,6 +103,57 @@ describe('SpaceStatusMenu (WS11-S10)', () => {
     flush()
     expect((screen.getByLabelText('Tekst (valgfri)') as HTMLInputElement).value).toBe('')
     expect(screen.queryByText(/Nå:/)).toBeNull()
+  })
+
+  it('draws no text field under zero data retention, and saves the state alone', async () => {
+    applyServerRetention(true)
+    spacesClient.getOwnSpaceStatus.mockResolvedValue(null)
+    spacesClient.setOwnSpaceStatus.mockResolvedValue({ state: 'away', text: null, expiresAt: null })
+    render(() => <SpaceStatusMenu />)
+    await settle()
+    expect(screen.queryByLabelText('Tekst (valgfri)')).toBeNull()
+    expect(
+      screen.getByText('Statustekst er ikke tilgjengelig i denne organisasjonen. Du kan fortsatt velge en tilstand.'),
+    ).toBeTruthy()
+    fireEvent.click(screen.getByRole('radio', { name: 'Borte' }))
+    flush()
+    fireEvent.click(screen.getByRole('button', { name: 'Lagre status' }))
+    await waitFor(() => expect(spacesClient.setOwnSpaceStatus).toHaveBeenCalledTimes(1))
+    expect(spacesClient.setOwnSpaceStatus).toHaveBeenCalledWith({ state: 'away', text: '', expiresAt: undefined })
+  })
+
+  it('a zero-retention verdict that arrives while the menu is open takes the typed text away', async () => {
+    spacesClient.getOwnSpaceStatus.mockResolvedValue(null)
+    spacesClient.setOwnSpaceStatus.mockResolvedValue(null)
+    render(() => <SpaceStatusMenu />)
+    await settle()
+    fireEvent.input(screen.getByLabelText('Tekst (valgfri)'), { target: { value: 'På møte' } })
+    flush()
+    applyServerRetention(true)
+    flush()
+    expect(screen.queryByLabelText('Tekst (valgfri)')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Lagre status' }))
+    await waitFor(() => expect(spacesClient.setOwnSpaceStatus).toHaveBeenCalledTimes(1))
+    expect(spacesClient.setOwnSpaceStatus).toHaveBeenLastCalledWith(expect.objectContaining({ text: '' }))
+  })
+
+  it('a 412 on the text takes the field away for the rest of the page session', async () => {
+    spacesClient.getOwnSpaceStatus.mockResolvedValue(null)
+    spacesClient.setOwnSpaceStatus.mockRejectedValue(new ApiError('Refused.', 412, 'zdr_durable_mutation_forbidden'))
+    render(() => <SpaceStatusMenu />)
+    await settle()
+    fireEvent.input(screen.getByLabelText('Tekst (valgfri)'), { target: { value: 'På møte' } })
+    flush()
+    fireEvent.click(screen.getByRole('button', { name: 'Lagre status' }))
+    expect(await screen.findByRole('alert')).toBeTruthy()
+    flush()
+    expect(screen.queryByLabelText('Tekst (valgfri)')).toBeNull()
+    expect(
+      screen.getByText('Statustekst er ikke tilgjengelig i denne organisasjonen. Du kan fortsatt velge en tilstand.'),
+    ).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Lagre status' }))
+    await waitFor(() => expect(spacesClient.setOwnSpaceStatus).toHaveBeenCalledTimes(2))
+    expect(spacesClient.setOwnSpaceStatus).toHaveBeenLastCalledWith(expect.objectContaining({ text: '' }))
   })
 
   it('Clear keeps the status and says so when the clear fails', async () => {
