@@ -872,6 +872,34 @@ describe('run questions', () => {
     expect(stored?.state).toBe('skipped')
   })
 
+  it('names the message that carries an answer only when the caller has one, and never for a skip (F-f07-01b)', async () => {
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) =>
+      jsonResponse({ question: rawQuestion({ state: 'answered' }) }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const answers = [{ itemId: 'scope', optionIds: ['main'], text: '' }]
+
+    await answerQuestion('q_1', { answers, answeredMessageId: 'msg-7', answerSummary: 'Svar: main' })
+    const [, named] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(named.body as string)).toEqual({
+      answers: [{ item_id: 'scope', option_ids: ['main'], text: '' }],
+      skip: false,
+      answered_message_id: 'msg-7',
+      answer_summary: 'Svar: main',
+    })
+
+    await answerQuestion('q_1', { answers })
+    const [, unnamed] = fetchMock.mock.calls[1] as [string, RequestInit]
+    expect(JSON.parse(unnamed.body as string)).toEqual({
+      answers: [{ item_id: 'scope', option_ids: ['main'], text: '' }],
+      skip: false,
+    })
+
+    await answerQuestion('q_1', { skip: true, answeredMessageId: 'msg-7' })
+    const [, skipped] = fetchMock.mock.calls[2] as [string, RequestInit]
+    expect(JSON.parse(skipped.body as string)).toEqual({ answers: [], skip: true })
+  })
+
   it('reads each typed refusal by its code and its status together', async () => {
     const cases: Array<[number, string]> = [
       [404, 'question_not_found'],

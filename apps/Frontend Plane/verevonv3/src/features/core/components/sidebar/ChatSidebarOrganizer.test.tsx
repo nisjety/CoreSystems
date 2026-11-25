@@ -1,10 +1,11 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
-import { flush } from 'solid-js'
+import { createSignal, flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ChatSidebarOrganizer } from './ChatSidebarOrganizer'
 import { chatOrganizationStorageKey, emptyChatOrganization, readChatOrganization, saveChatOrganization } from '@/features/chat/lib/chat-organization'
 import type { ChatSearchHit } from '@/shared/api/chat-client'
 import { SEARCH_DEBOUNCE_MS } from './ChatSearchResults'
+import type { ChatThreadHistoryItem } from '@/features/chat/lib/chat-thread-history'
 
 const { searchChatThreads } = vi.hoisted(() => ({ searchChatThreads: vi.fn() }))
 vi.mock('@/shared/api/chat-client', () => ({ searchChatThreads }))
@@ -361,5 +362,108 @@ describe('chat organizer server search', () => {
     typeQuery('r')
     await new Promise((resolve) => setTimeout(resolve, SEARCH_DEBOUNCE_MS))
     expect(searchChatThreads).not.toHaveBeenCalled()
+  })
+})
+
+describe('chat organizer starred chats from the server', () => {
+  const planning = { threadId: 'thread-a', title: 'Planning', preview: 'A draft', updatedAt: '2026-09-28T12:00:00Z' }
+  const research = { threadId: 'thread-b', title: 'Research', preview: 'Notes', updatedAt: '2026-09-27T12:00:00Z', starred: true }
+
+  function mountStarred(loadStarred: () => Promise<ChatThreadHistoryItem[]>) {
+    render(() => (
+      <ChatSidebarOrganizer
+        sessions={[planning]}
+        loading={false}
+        onNewChat={() => {}}
+        renderRow={(item) => <span>{item.title}</span>}
+        starredThreadIds={new Set(['thread-a'])}
+        loadStarred={loadStarred}
+      />
+    ))
+    flush()
+  }
+
+  beforeEach(() => {
+    localStorage.clear()
+    sessionStorage.clear()
+  })
+  afterEach(cleanup)
+
+  it('lists the starred chats the server answers with once the Starred filter turns on', async () => {
+    const loadStarred = vi.fn().mockResolvedValue([research])
+    mountStarred(loadStarred)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Starred' }))
+    flush()
+
+    expect(loadStarred).toHaveBeenCalledTimes(1)
+    expect(await screen.findByText('Research')).toBeTruthy()
+    expect(screen.queryByText('Planning')).toBeNull()
+  })
+
+  it('keeps the loaded starred chats and says so when the server answer fails', async () => {
+    const loadStarred = vi.fn().mockRejectedValue(new Error('network'))
+    mountStarred(loadStarred)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Starred' }))
+    flush()
+
+    expect(await screen.findByText('Could not load saved conversations.')).toBeTruthy()
+    expect(screen.getByText('Planning')).toBeTruthy()
+    expect(screen.queryByText('No chats match this view.')).toBeNull()
+  })
+
+  it('turns the Starred filter off when the starred set is withdrawn, so the archive lists only its own chats', async () => {
+    const archived = { threadId: 'thread-c', title: 'Old chat', preview: 'Archived', updatedAt: '2026-07-01T12:00:00Z' }
+    const starredSet = new Set(['thread-a'])
+    const loadStarred = vi.fn().mockResolvedValue([research])
+    const [showArchived, setShowArchived] = createSignal(false)
+    render(() => (
+      <ChatSidebarOrganizer
+        sessions={showArchived() ? [archived] : [planning]}
+        loading={false}
+        onNewChat={() => {}}
+        renderRow={(item) => <span>{item.title}</span>}
+        starredThreadIds={showArchived() ? undefined : starredSet}
+        loadStarred={showArchived() ? undefined : loadStarred}
+      />
+    ))
+    flush()
+    fireEvent.click(screen.getByRole('button', { name: 'Starred' }))
+    flush()
+    expect(await screen.findByText('Research')).toBeTruthy()
+
+    setShowArchived(true)
+    flush()
+    expect(screen.getByText('Old chat')).toBeTruthy()
+    expect(screen.queryByText('Research')).toBeNull()
+
+    setShowArchived(false)
+    flush()
+    expect(screen.getByRole('button', { name: 'Starred' }).getAttribute('aria-pressed')).toBe('false')
+    expect(screen.getByText('Planning')).toBeTruthy()
+  })
+
+  it('offers no Load more while the Starred filter is on, since the starred view is its first page only', async () => {
+    const loadStarred = vi.fn().mockResolvedValue([research])
+    render(() => (
+      <ChatSidebarOrganizer
+        sessions={[planning]}
+        loading={false}
+        hasMore
+        onLoadMore={() => {}}
+        onNewChat={() => {}}
+        renderRow={(item) => <span>{item.title}</span>}
+        starredThreadIds={new Set(['thread-a'])}
+        loadStarred={loadStarred}
+      />
+    ))
+    flush()
+    expect(screen.getByRole('button', { name: 'Load more chats' })).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Starred' }))
+    flush()
+    expect(await screen.findByText('Research')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Load more chats' })).toBeNull()
   })
 })

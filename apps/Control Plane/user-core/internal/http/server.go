@@ -41,11 +41,16 @@ type Server struct {
 	mailTaskEffectPolicy   MailTaskEffectPolicyResolver
 	runActionAuthority     RunActionAuthorityResolver
 	scheduledStepAuthority ScheduledStepAuthorityResolver
+	// scheduledRunAuthority proves the prepared run, and the stored-consent contract Session
+	// Core holds for it, before a run-execution decision is signed (F-f10-27 rel1).
+	scheduledRunAuthority ScheduledRunAuthorityResolver
 	// runActionTargets is RUN_ACTION_TARGETS, read once at construction (F-f03-10). Only the exact
 	// literal "table" widens the owner actions a Model may be offered; unset or unknown is tickets_only.
 	runActionTargets spaces.RunActionTargetsMode
-	// scheduleContractsEnabled is SCHEDULE_CONTRACT_ENABLED. Off by default: a
-	// create request carrying a stored-consent contract is refused.
+	// scheduleContractsEnabled is SCHEDULE_CONTRACT_ENABLED. Off by default: a create request
+	// carrying a stored-consent contract is refused, and a run-execution decision keeps its
+	// legacy binding. On, a run-execution decision binds only the contract of its prepared
+	// Session Core run (F-f10-27 rel1).
 	scheduleContractsEnabled bool
 	// ownerAssertedGrants is CONTROL_OWNER_ASSERTED_GRANTS (WS14-S2). Off: the
 	// authz grant write surface stays fenced. On: only the registered owner
@@ -120,6 +125,13 @@ type ScheduledStepAuthorityResolver interface {
 	ResolveScheduledStepAuthority(context.Context, spaces.ScheduledStepIntent) (spaces.ScheduledStepAuthority, error)
 }
 
+// ScheduledRunAuthorityResolver proves the prepared scheduled run, and the stored-consent
+// contract Session Core holds for it, before Control signs a run-execution decision while
+// SCHEDULE_CONTRACT_ENABLED is on (F-f10-27 rel1).
+type ScheduledRunAuthorityResolver interface {
+	ResolveScheduledRunAuthority(context.Context, spaces.ScheduledRunIntent, string) (spaces.ScheduledRunAuthority, error)
+}
+
 // SetRunActionAuthorityResolver wires the only source Control accepts for a
 // Model-originated owner action. A nil resolver leaves the route fail-closed.
 func (s *Server) SetRunActionAuthorityResolver(resolver RunActionAuthorityResolver) {
@@ -132,8 +144,15 @@ func (s *Server) SetScheduledStepAuthorityResolver(resolver ScheduledStepAuthori
 	s.scheduledStepAuthority = resolver
 }
 
-// SetScheduleContractsEnabled wires SCHEDULE_CONTRACT_ENABLED. It gates only the
-// stored-consent contract fields of a schedule create decision.
+// SetScheduledRunAuthorityResolver wires the Session Core prepared-run read that the
+// run-execution decision uses while SCHEDULE_CONTRACT_ENABLED is on. A nil resolver
+// leaves that decision fail-closed.
+func (s *Server) SetScheduledRunAuthorityResolver(resolver ScheduledRunAuthorityResolver) {
+	s.scheduledRunAuthority = resolver
+}
+
+// SetScheduleContractsEnabled wires SCHEDULE_CONTRACT_ENABLED. It gates the stored-consent
+// contract fields of a schedule create decision and the run-execution binding (F-f10-27 rel1).
 func (s *Server) SetScheduleContractsEnabled(enabled bool) {
 	s.scheduleContractsEnabled = enabled
 }

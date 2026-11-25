@@ -239,6 +239,11 @@ export type ConversationNodeContext = {
    * finishes. Absent means an ordinary thread.
    */
   temporaryChat?: boolean
+  /**
+   * False on a project thread: a failed answer offers no retry, since a retry would send the turn again (F-f06-16).
+   * Absent means allowed.
+   */
+  turnActionsAllowed?: boolean
   /** Absent means nothing of this turn is docked: every control renders in full. */
   docked?: DockedNodes
 }

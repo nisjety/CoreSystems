@@ -369,6 +369,19 @@ pub(crate) struct SpaceFeatureFlags {
     /// authorization input: the Space role and the Model Plane decide each turn. The first release is append-only;
     /// live following, approvals and plan hydration for project threads are not part of it.
     pub(crate) chat_projects: bool,
+    /// `GATEWAY_QUESTION_ANSWER_MESSAGE_LINK` (F-f07-01b, owner decision D-f06-D): the answer route reads the message
+    /// that carries the answer, so the summary is sent as that message and the link is an id equality. Only the
+    /// literal `true` turns it on. Off, the answer route is what it was and a body that names a message is refused.
+    /// A rollout control: the model gateway validates the id, and Session Core owns the link. It takes effect with
+    /// `MODEL_GATEWAY_QUESTION_ANSWER_MESSAGE_LINK` and `MODEL_GATEWAY_SEND_RECEIPTS` on, and with this switch off a
+    /// linked answer is refused 422 `answer not saved`, so the SPA's `VITE_QUESTION_ANSWER_MESSAGE_LINK` goes with it.
+    pub(crate) question_answer_message_link: bool,
+    /// `GATEWAY_AGENT_API_IDEMPOTENCY` (F-f08-13): the Agent API ingress forwards the caller's one `Idempotency-Key`,
+    /// so a retry of a start answers the run the first start began. Only the literal `true` turns it on. Off, the
+    /// ingress neither reads nor forwards the header, so a malformed key is not refused and the start is what it was.
+    /// It takes effect with `MODEL_GATEWAY_AGENT_API_IDEMPOTENCY` on the model gateway too. A rollout control, never an
+    /// authorization input: the model gateway hashes the key and Session Core owns the managed start.
+    pub(crate) agent_api_idempotency: bool,
     /// `CHAT_RESEARCH_RUNS` (Quarry v2 E4.6, Q4-062b): `GET /api/v1/chat/research-runs/{id}` and
     /// `POST /api/v1/chat/research-runs/{id}/cancel`, the person's read and stop of one addressable
     /// research run. Only the literal `true` turns it on; default off, never by default in development.
@@ -736,6 +749,14 @@ impl SpaceFeatureFlags {
             ),
             chat_projects: chat_projects_from(
                 env::var("GATEWAY_CHAT_PROJECTS_ENABLED").ok().as_deref(),
+            ),
+            question_answer_message_link: question_answer_message_link_from(
+                env::var("GATEWAY_QUESTION_ANSWER_MESSAGE_LINK")
+                    .ok()
+                    .as_deref(),
+            ),
+            agent_api_idempotency: agent_api_idempotency_from(
+                env::var("GATEWAY_AGENT_API_IDEMPOTENCY").ok().as_deref(),
             ),
             chat_research_runs: env_exact_true("CHAT_RESEARCH_RUNS"),
             web_domain_policy_bff: env_exact_true("WEB_DOMAIN_POLICY_BFF"),
@@ -1505,6 +1526,18 @@ fn chat_artifact_promote_from(value: Option<&str>) -> bool {
 /// Exactly the word `true` (WS18-S4, D-f06-C): a stray `1` would let a project start reach the model before anyone
 /// chose to. Read once in `SpaceFeatureFlags::from_env`, and the stream handler sees it only through `AppState`.
 fn chat_projects_from(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+/// Exactly the word `true` (F-f07-01b, owner decision D-f06-D): a stray `1` would let a message be named for a
+/// summary before anyone chose to link answers. Read once in `SpaceFeatureFlags::from_env`.
+fn question_answer_message_link_from(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+/// Exactly the word `true` (F-f08-13): a stray `1` would let an Idempotency-Key be read and forwarded before anyone
+/// chose to honour it. Read once in `SpaceFeatureFlags::from_env`.
+fn agent_api_idempotency_from(value: Option<&str>) -> bool {
     value == Some("true")
 }
 

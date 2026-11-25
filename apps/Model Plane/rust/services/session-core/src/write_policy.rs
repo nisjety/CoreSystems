@@ -266,12 +266,106 @@ fn text_rule(text: &str) -> Option<Code> {
     None
 }
 
-/// The credential rule on `text`: a credential's shape, as listed in [`SECRET_SHAPES`].
+/// The credential rule on `text`: a credential's shape, as listed in [`SECRET_SHAPES`]. A prose-prone shape
+/// ([`PROSE_PRONE_SHAPES`]) refuses only when the whole non-whitespace run its value begins ([`credential_run`])
+/// looks like a credential ([`looks_like_credential`]). Every other shape refuses on any match, as it always did.
 fn secret_rule(text: &str) -> Option<Code> {
     secret_shapes()
         .iter()
-        .any(|shape| shape.is_match(text))
+        .any(|shape| match prose_prone_label(shape.as_str()) {
+            None => shape.is_match(text),
+            Some(label) => prose_prone_refuses(shape, label, text),
+        })
         .then_some(Code::SecretLike)
+}
+
+/// The two [`SECRET_SHAPES`] entries whose match is a word or keyword followed by a value, so the value decides
+/// the rule: `basic` followed by a word, and a keyword such as `token` followed by `:` or `=`. Each pattern is
+/// held to its entry of [`SECRET_SHAPES`] by a test, and the label is the closed value of the refusal-avoided
+/// counter.
+const PROSE_PRONE_SHAPES: &[(&str, &str)] = &[
+    ("basic", r"(?i)basic\s+[A-Za-z0-9+/=]{8,}"),
+    (
+        "keyword",
+        r#"(?i)\b([a-z0-9_]*(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?key|secret[_-]?key|auth[_-]?token|client[_-]?secret|private[_-]?key|token))(\s*[:=]\s*)("?)([^\s"'&,;]{3,})"#,
+    ),
+];
+
+/// The label of a prose-prone shape, or `None` for every other shape of [`SECRET_SHAPES`].
+fn prose_prone_label(pattern: &str) -> Option<&'static str> {
+    PROSE_PRONE_SHAPES
+        .iter()
+        .find(|(_, shape)| *shape == pattern)
+        .map(|(label, _)| *label)
+}
+
+/// Whether a prose-prone shape refuses `text`: one of its matches begins a run that looks like a credential.
+/// A shape that matched and whose every run failed that test is counted under `label` (the label is closed;
+/// no value is recorded), so report mode shows what the refinement lets through.
+fn prose_prone_refuses(shape: &Regex, label: &'static str, text: &str) -> bool {
+    let mut matched = false;
+    for captures in shape.captures_iter(text) {
+        matched = true;
+        if credential_run(text, &captures).is_some_and(looks_like_credential) {
+            return true;
+        }
+    }
+    if matched {
+        counter!("mp_session_memory_policy_prose_allowed_total", "shape" => label).increment(1);
+    }
+    false
+}
+
+/// The whole non-whitespace run a prose-prone match's value begins, which is what the credential test judges. The
+/// keyword shape carries its value as its last group. The run runs from the value's first byte to the next
+/// whitespace, so a comma, semicolon or ampersand that ends the captured value does not end the judged text:
+/// `password: Sommer,2026!` is judged as `Sommer,2026!`. The basic shape has no group, and its match is `basic`,
+/// whitespace, then the value, so the value is the match's last word and the run starts there. One leading and one
+/// trailing quote are dropped.
+fn credential_run<'t>(text: &'t str, captures: &regex::Captures<'_>) -> Option<&'t str> {
+    let start = if captures.len() > 1 {
+        captures.get(captures.len() - 1)?.start()
+    } else {
+        let whole = captures.get(0)?;
+        whole.end() - whole.as_str().split_whitespace().last()?.len()
+    };
+    let run = text.get(start..)?.split(char::is_whitespace).next()?;
+    let run = run
+        .strip_prefix('"')
+        .or_else(|| run.strip_prefix('\''))
+        .unwrap_or(run);
+    Some(
+        run.strip_suffix('"')
+            .or_else(|| run.strip_suffix('\''))
+            .unwrap_or(run),
+    )
+}
+
+/// Whether the run a prose-prone shape's value begins (see [`credential_run`]) looks like a credential rather than
+/// a word. Pure. It needs at least eight characters and at least two of the classes {ASCII digit, uppercase,
+/// lowercase, one of `+/=_-.~`}, and it is not a plain word: letters only, with no capital after the first
+/// character. So `understanding`, `Bitwarden` and `bucket` are prose, while `dXNlcjpwYXNz`, `Tr0ub4dor` and
+/// `a1b2c3d4e5` are credentials. No word list, so the rule does not depend on the language of the text.
+/// The length is read on the whole run; the classes and the plain-word test are read on the run without its
+/// trailing sentence punctuation (`.,;:!?`), so a word that ends a sentence (`knowledge.`, `Authentication.`)
+/// stays prose, while `Tr0ub4d!` is still judged by `Tr0ub4d`.
+fn looks_like_credential(value: &str) -> bool {
+    if value.chars().count() < 8 {
+        return false;
+    }
+    let body = value.trim_end_matches(['.', ',', ';', ':', '!', '?']);
+    let classes = [
+        body.chars().any(|c| c.is_ascii_digit()),
+        body.chars().any(char::is_uppercase),
+        body.chars().any(char::is_lowercase),
+        body.chars().any(|c| "+/=_-.~".contains(c)),
+    ]
+    .into_iter()
+    .filter(|present| *present)
+    .count();
+    let plain_word =
+        body.chars().all(char::is_alphabetic) && !body.chars().skip(1).any(char::is_uppercase);
+    classes >= 2 && !plain_word
 }
 
 /// The first rule `content` breaks when it is written to `scope` by `origin`.
@@ -723,6 +817,136 @@ mod tests {
         for shape in SECRET_SHAPES {
             assert!(scrub.contains(shape), "{shape} is not in mp-scrub's lib.rs");
         }
+    }
+
+    /// The prose-prone patterns are entries of SECRET_SHAPES, so the refinement cannot drift from the list it
+    /// refines.
+    #[test]
+    fn the_prose_prone_shapes_are_entries_of_the_secret_shapes() {
+        for (label, pattern) in PROSE_PRONE_SHAPES {
+            assert!(
+                SECRET_SHAPES.contains(pattern),
+                "{label} is not a SECRET_SHAPES entry"
+            );
+        }
+    }
+
+    /// Prose that follows `basic` or a keyword is not a credential, in English and Norwegian alike.
+    #[test]
+    fn prose_after_a_keyword_or_basic_is_not_refused() {
+        for text in [
+            "basic understanding of cabling",
+            "Basic knowledge of networking",
+            "Basic Understanding is enough",
+            "Basic Authentication",
+            "basic installation procedure",
+            "basisk kunnskap om nettverk",
+            "token: bucket",
+            "password: hunter",
+            "secret = value",
+            "secret: Sjokoladekake",
+            "pwd: sekvensen",
+            "Husk: password manager heter Bitwarden",
+            "Husk at jeg heter Ima.",
+            "Jeg bruker token-basert innlogging.",
+            "Prefers tea over coffee in the morning.",
+            // Sentence-final punctuation ends the word, it does not make it a credential.
+            "I have basic knowledge.",
+            "Basic Authentication.",
+            "Har basic kunnskap.",
+            "secret: Sjokoladekake.",
+        ] {
+            assert_eq!(secret_rule(text), None, "{text}");
+            assert_eq!(refused(text, "user", Origin::ModelTool), None, "{text}");
+        }
+    }
+
+    /// A value that looks like a credential is refused wherever a prose-prone shape captures it, and the other
+    /// shapes refuse as they always did, whatever the value looks like.
+    #[test]
+    fn credential_looking_values_after_a_keyword_or_basic_are_refused() {
+        for text in [
+            "Basic dXNlcjpwYXNz",
+            "basic Tr0ub4dor",
+            "basic a1b2c3d4e5",
+            "Basic dXNlcjpwYXNz+/==",
+            "token: Tr0ub4dor",
+            "password = a1b2c3d4e5",
+            "secret: dXNlcjpwYXNz",
+            "api_key=Tr0ub4dor",
+            "password:Hunter2Hunter2",
+            "pwd = S3cr3t-Pass",
+            "secret=Zx9qLm2Pw",
+            "token: \"Tr0ub4dor\"",
+            "Bearer understanding",
+            "password: Sommer,2026!",
+            "password: Tr0ub4d!",
+            "password: abc,Tr0ub4dor9",
+            "basic understanding-Tr0ub4dor9",
+        ] {
+            assert_eq!(secret_rule(text), Some(Code::SecretLike), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_word_is_not_a_credential_and_a_random_value_is() {
+        for word in [
+            "understanding",
+            "Understanding",
+            "Bitwarden",
+            "bucket",
+            "hunter",
+            "sekvensen",
+            "KUNNSKAP",
+            "Sjokoladekake",
+            "knowledge.",
+            "Authentication.",
+            "Sjokoladekake?!",
+        ] {
+            assert!(!looks_like_credential(word), "{word}");
+        }
+        for value in [
+            "dXNlcjpwYXNz",
+            "Tr0ub4dor",
+            "a1b2c3d4e5",
+            "S3cr3t-Pass",
+            "aBcDeFgH",
+            "abc+def/g",
+            "Tr0ub4d!",
+            "Tr0ub4dor.",
+        ] {
+            assert!(looks_like_credential(value), "{value}");
+        }
+        assert!(
+            !looks_like_credential("Tr0ub4"),
+            "fewer than eight characters"
+        );
+    }
+
+    /// A skill's fields meet the same credential rule as a memory, field by field.
+    #[test]
+    fn a_skill_and_a_memory_agree_on_the_credential_rule() {
+        let none: &[String] = &[];
+        assert_eq!(
+            check_skill(&skill_text(
+                "Weekly",
+                "basic understanding of cabling",
+                "steps",
+                none,
+                none
+            )),
+            Ok(())
+        );
+        assert_eq!(
+            check_skill(&skill_text(
+                "Weekly",
+                "d",
+                "password: Tr0ub4dor",
+                none,
+                none
+            )),
+            Err(Code::SecretLike)
+        );
     }
 
     #[test]

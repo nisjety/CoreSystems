@@ -97,9 +97,9 @@ type AcquireGrantRequest struct {
 	// no path, query or fragment) the code may be typed into: required for a
 	// fill_otp approval and refused for any other grant.
 	GrantOrigin string `protobuf:"bytes,24,opt,name=grant_origin,json=grantOrigin,proto3" json:"grant_origin,omitempty"`
-	// The Space the run belongs to (WS21-S8). Reserved: the broker refuses a
-	// non-empty value until the Space floor is wired (space_floor_unavailable).
-	// Empty outside a Space. Tag 11 (R-6 allocates 10 to zdr).
+	// The Space the run belongs to (WS21-S8). The broker refuses a non-empty value
+	// unless BROWSER_SPACE_FLOOR_ENABLED is true (space_floor_unavailable). Empty
+	// outside a Space. Tag 11 (R-6 allocates 10 to zdr).
 	SpaceId string `protobuf:"bytes,11,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
 	// Ask for a read-only grant (WS21-S4): the broker narrows the grant to the
 	// read level and reports read_only. Until the durable store persists the

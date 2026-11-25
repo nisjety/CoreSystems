@@ -27,6 +27,7 @@ describe('getComposerCapabilities', () => {
           deep_research_knowledge: true,
           wide_research: true,
           chat_projects: true,
+          agent_modes: true,
         },
       }),
     )
@@ -41,6 +42,7 @@ describe('getComposerCapabilities', () => {
       deepResearchKnowledge: true,
       wideResearch: true,
       chatProjects: true,
+      agentModes: true,
     })
     expect(String(fetchMock.mock.calls[0]![0])).toMatch(/\/api\/v1\/chat\/composer-capabilities$/)
   })
@@ -87,6 +89,32 @@ describe('getComposerCapabilities', () => {
     const capabilities = await getComposerCapabilities()
     expect(capabilities.deepResearchKnowledge).toBe(false)
     expect(capabilities.contextRefs).toBe(true)
+  })
+
+  // F-f06-17 (WS25-S6): the agent-mode picker is offered only on the literal true the gateway answers (its AGENT_MODES
+  // switch, off for a ZDR caller). Any other value, an older gateway, or a failed read reads as no picker.
+  it('offers the agent-mode picker only when the gateway answers agent_modes true', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(reply(200, { agent_modes: true })))
+    await expect(getComposerCapabilities()).resolves.toEqual({
+      ...NO_COMPOSER_CAPABILITIES,
+      agentModes: true,
+    })
+  })
+
+  it.each([
+    ['false', false],
+    ['the string "true"', 'true'],
+    ['1', 1],
+    ['null', null],
+    ['an answer without the field', undefined],
+  ])('does not offer the agent-mode picker for %s', async (_label, value) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(reply(200, { agent_modes: value })))
+    expect((await getComposerCapabilities()).agentModes).toBe(false)
+  })
+
+  it('reads a failed capability request as no agent-mode picker', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('network')))
+    expect((await getComposerCapabilities()).agentModes).toBe(false)
   })
 
   it.each([

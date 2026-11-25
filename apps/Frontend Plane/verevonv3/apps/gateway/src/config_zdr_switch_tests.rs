@@ -31,6 +31,7 @@ fn the_test_state_has_every_phase_switch_off() {
     assert!(!state.zdr_waiver_ui_enabled);
     assert!(state.retention_decision_service_api_key.is_none());
     assert!(!state.space_features.thread_scope_resolve);
+    assert!(!state.space_features.question_answer_message_link);
 }
 
 /// Every BFF switch `build_state` reads for this phase is declared in the gateway's compose block,
@@ -57,7 +58,7 @@ fn every_phase_switch_is_declared_in_the_gateway_compose_block() {
 // the three ZDR ones above.
 
 /// Every switch the gateway reads that this phase added.
-const PHASE_SWITCHES: [&str; 13] = [
+const PHASE_SWITCHES: [&str; 15] = [
     "GATEWAY_ZDR_EFFECTIVE_POSTURE_ENABLED",
     "ZDR_WAIVER_UI_ENABLED",
     "SPACE_THREAD_SCOPE_RESOLVE",
@@ -71,11 +72,13 @@ const PHASE_SWITCHES: [&str; 13] = [
     "CLIENT_ENV_IDENTITY",
     "AUTH_STEP_UP_ROUTE_ENABLED",
     "GATEWAY_CHAT_PROJECTS_ENABLED",
+    "GATEWAY_QUESTION_ANSWER_MESSAGE_LINK",
+    "GATEWAY_AGENT_API_IDEMPOTENCY",
 ];
 
 #[test]
 fn every_strict_phase_switch_is_on_only_for_the_exact_word_true() {
-    let parsers: [(&str, fn(Option<&str>) -> bool); 9] = [
+    let parsers: [(&str, fn(Option<&str>) -> bool); 11] = [
         (
             "VEREVON_GATEWAY_CONTINUE_QUESTION_ENABLED",
             super::continue_question_form_from,
@@ -100,6 +103,14 @@ fn every_strict_phase_switch_is_on_only_for_the_exact_word_true() {
         ),
         ("CLIENT_ENV_IDENTITY", super::client_env_identity_from),
         ("GATEWAY_CHAT_PROJECTS_ENABLED", super::chat_projects_from),
+        (
+            "GATEWAY_QUESTION_ANSWER_MESSAGE_LINK",
+            super::question_answer_message_link_from,
+        ),
+        (
+            "GATEWAY_AGENT_API_IDEMPOTENCY",
+            super::agent_api_idempotency_from,
+        ),
     ];
     for (name, parse) in parsers {
         assert!(parse(Some("true")), "{name}");

@@ -493,6 +493,13 @@ func main() {
 		log.Println("ℹ️  Run action authority client not configured — agent owner actions remain fail-closed")
 	}
 
+	// F-f10-27 rel1: with SCHEDULE_CONTRACT_ENABLED on, every run-execution decision binds to the
+	// Session Core prepared-run authority. A start with the switch on and no such resolver is
+	// refused here, instead of 503-ing every scheduled run at execution. Off, this is a no-op.
+	if err := httpServer.ValidateScheduleContractWiring(); err != nil {
+		log.Fatalf("FATAL [user-core startup] %v", err)
+	}
+
 	// Prometheus /metrics on a dedicated port (default 9091), scraped by the
 	// Control-Plane Prometheus (Phase 6 B13).
 	metricsPort := 9091

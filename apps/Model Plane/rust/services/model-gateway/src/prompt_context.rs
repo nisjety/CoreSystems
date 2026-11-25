@@ -12,11 +12,15 @@
 //! one prefix that later turns repeat byte for byte.
 //!
 //! Every option here is off unless its flag is set, and applies only to a turn
-//! pinned to an `OpenAI`-API chat-completions provider ([`CacheRoute`]).
-//! Anthropic joins every system message into one block before caching, so a
-//! reorder changes nothing there, and the `ChatGPT` subscription broker starts
-//! a fresh Codex thread per call and caches nothing between calls. Both routes
-//! keep exactly the prompt they had.
+//! pinned to an `OpenAI`-API chat-completions provider ([`CacheRoute`]), or,
+//! for the stable order alone, to a Claude API turn once
+//! [`ANTHROPIC_STABLE_ORDER_ENV`] is on as well. Anthropic joins every system
+//! message into one block before caching, so a reorder changes nothing there
+//! unless inference-core is also sent the tier plan
+//! (`INFERENCE_ANTHROPIC_TIERED_SYSTEM`), which turns the plan's tiers into
+//! separate cached blocks. The `ChatGPT` subscription broker starts a fresh
+//! Codex thread per call and caches nothing between calls, so every
+//! subscription route keeps exactly the prompt it had.
 
 use mp_contracts::model_plane::v1::{
     ChatMessage, PromptTierPlan as WirePromptTierPlan, ToolDefinition,
@@ -27,6 +31,12 @@ use mp_contracts::prompt_tier::{plan_of, PromptTier, PromptTierPlan};
 /// moved to the end of the tool list, and the final answer resending the tool
 /// rounds' tools. Off unless set to the exact literal `true`.
 pub const STABLE_PROMPT_ORDER_ENV: &str = "MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER";
+
+/// Operator switch that carries the stable order to Claude API routes, where inference-core caches the
+/// standing blocks once the tier plan names them. Off unless set to the exact literal `true`, and effective
+/// only with [`STABLE_PROMPT_ORDER_ENV`] on as well. Deploy order: `INFERENCE_ANTHROPIC_TIERED_SYSTEM=true` on
+/// inference-core first, then this switch and [`STABLE_PROMPT_ORDER_ENV`] on the gateway.
+pub const ANTHROPIC_STABLE_ORDER_ENV: &str = "MODEL_GATEWAY_CACHE_ANTHROPIC_STABLE_ORDER";
 
 /// Operator switch for token-budget compaction: the budget in estimated
 /// tokens. Unset or 0 keeps the 24/23 message-count compaction.
@@ -54,8 +64,11 @@ const OPENAI_CHAT_COMPLETIONS_HINTS: [&str; 3] = ["openai", "azure-openai", "azu
 pub enum CacheRoute {
     /// Pinned to an `OpenAI`-API or Azure `OpenAI` chat-completions provider.
     OpenAiChatCompletions,
-    /// Claude, the `ChatGPT` subscription, or a route the gateway cannot know
-    /// before the first call.
+    /// A Claude model on an API route. Only the stable order reaches it, and only with
+    /// [`ANTHROPIC_STABLE_ORDER_ENV`] on; the compaction budget and the context dedup never do.
+    Anthropic,
+    /// A subscription route (the `ChatGPT` broker, a Claude subscription connection), or a route the
+    /// gateway cannot know before the first call.
     Other,
 }
 
@@ -64,9 +77,11 @@ impl CacheRoute {
     ///
     /// The gateway learns which provider served a call only from the reply
     /// (`provider_used`), and the prompt is assembled before the first call,
-    /// so this reads what the turn pins: an `OpenAI` provider hint, no
-    /// subscription, and a model that is not Claude. An unhinted turn is
-    /// [`CacheRoute::Other`]: inference-core walks `INFERENCE_PROVIDER_ORDER`
+    /// so this reads what the turn pins, in this order: a subscription
+    /// connection or subscription provider is [`CacheRoute::Other`]; a Claude
+    /// model is [`CacheRoute::Anthropic`], whatever the hint says; an `OpenAI`
+    /// provider hint is [`CacheRoute::OpenAiChatCompletions`]. Any other turn
+    /// is [`CacheRoute::Other`]: inference-core walks `INFERENCE_PROVIDER_ORDER`
     /// (Anthropic first by default), and where it lands is not known here.
     ///
     /// Hints are compared the way inference-core's `hint_matches` compares
@@ -77,13 +92,14 @@ impl CacheRoute {
         let subscription =
             crate::pricing::CostBasis::of_route(provider_hint, subscription_connection_id)
                 == crate::pricing::CostBasis::Subscription;
-        if subscription
-            || crate::compaction::is_anthropic_family_model(model)
-            || !OPENAI_CHAT_COMPLETIONS_HINTS.contains(&hint.as_str())
-        {
+        if subscription {
             Self::Other
-        } else {
+        } else if crate::compaction::is_anthropic_family_model(model) {
+            Self::Anthropic
+        } else if OPENAI_CHAT_COMPLETIONS_HINTS.contains(&hint.as_str()) {
             Self::OpenAiChatCompletions
+        } else {
+            Self::Other
         }
     }
 }
@@ -132,12 +148,24 @@ impl CacheOptions {
     }
 
     /// These settings as they apply on `route`: unchanged on an `OpenAI`
-    /// chat-completions route, all off anywhere else.
+    /// chat-completions route; on a Claude route the stable order alone, and only
+    /// while [`ANTHROPIC_STABLE_ORDER_ENV`] is on; all off anywhere else.
     #[must_use]
     pub fn for_route(self, route: CacheRoute) -> Self {
         match route {
             CacheRoute::OpenAiChatCompletions => self,
+            CacheRoute::Anthropic => self.for_anthropic(anthropic_stable_order_enabled()),
             CacheRoute::Other => Self::default(),
+        }
+    }
+
+    /// The Claude route's options: the stable order alone, and only when both it and the Anthropic
+    /// switch are on. The compaction budget and the context dedup stay off for Claude, since they
+    /// change what is sent and not only where it sits.
+    fn for_anthropic(self, anthropic_switch_on: bool) -> Self {
+        Self {
+            stable_prompt_order: self.stable_prompt_order && anthropic_switch_on,
+            ..Self::default()
         }
     }
 
@@ -166,6 +194,21 @@ impl CacheOptions {
 /// `yes`, `enabled`, `TRUE` and surrounding whitespace leave the switch off.
 fn enabled(value: Option<&str>) -> bool {
     mp_contracts::loop_fold::switch_from(value)
+}
+
+/// Whether [`ANTHROPIC_STABLE_ORDER_ENV`] is on, read once like the other cache switches.
+#[must_use]
+pub fn anthropic_stable_order_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        anthropic_stable_order_from(std::env::var(ANTHROPIC_STABLE_ORDER_ENV).ok().as_deref())
+    })
+}
+
+/// The strict reader of [`ANTHROPIC_STABLE_ORDER_ENV`]: only the exact literal `true` is on.
+#[must_use]
+pub fn anthropic_stable_order_from(value: Option<&str>) -> bool {
+    enabled(value)
 }
 
 fn token_budget(value: Option<&str>) -> Option<usize> {
@@ -458,6 +501,14 @@ pub fn wire_plan(plan: PromptTierPlan) -> Option<WirePromptTierPlan> {
         stable_messages: u32::try_from(plan.stable).ok()?,
         context_messages: u32::try_from(plan.context).ok()?,
     })
+}
+
+/// The plan a turn's calls carry: the standing blocks its stable order leads with, as the wire names
+/// them, and none under ZDR. A ZDR turn names no cache block on any route, so inference-core marks
+/// none for it; the messages it sends are the same either way.
+#[must_use]
+pub fn turn_plan(standing: Option<PromptTierPlan>, zdr: bool) -> Option<WirePromptTierPlan> {
+    standing.filter(|_| !zdr).and_then(wire_plan)
 }
 
 /// `plan`, if it still describes the messages `outgoing` sends; otherwise `None`.
@@ -1089,7 +1140,7 @@ mod tests {
 
     #[test]
     fn only_a_pinned_openai_chat_completions_route_is_eligible() {
-        use CacheRoute::{OpenAiChatCompletions, Other};
+        use CacheRoute::{Anthropic, OpenAiChatCompletions, Other};
         for (hint, connection, model, expected) in [
             ("openai", "", "gpt-4o-mini", OpenAiChatCompletions),
             ("azure-openai", "", "gpt-5-mini", OpenAiChatCompletions),
@@ -1107,11 +1158,15 @@ mod tests {
             ("chatgpt-codex", "conn-1", "", Other),
             // A subscription connection decides even under an OpenAI hint.
             ("openai", "conn-1", "gpt-5.6-terra", Other),
-            // Claude, by hint or by model.
-            ("anthropic", "", "claude-sonnet-4-6", Other),
+            // A Claude model is the Anthropic route, whatever the hint says.
+            ("anthropic", "", "claude-sonnet-4-6", Anthropic),
+            ("azure-anthropic", "", "claude-haiku-4-5", Anthropic),
+            ("openai", "", "claude-haiku-4-5", Anthropic),
+            // A Claude subscription connection is a subscription route, under any hint.
+            ("anthropic", "conn-1", "claude-sonnet-4-6", Other),
+            // Without a Claude model name, a Claude hint decides nothing by itself.
             ("azure-anthropic", "", "", Other),
             ("claude", "", "", Other),
-            ("openai", "", "claude-haiku-4-5", Other),
             // Other providers, and a turn whose provider is chosen downstream.
             ("cohere", "", "cohere-command-a", Other),
             ("", "", "gpt-4o-mini", Other),
@@ -1167,6 +1222,124 @@ mod tests {
             CacheOptions::parse(None, Some("lots"), None).compaction_token_budget,
             None
         );
+    }
+
+    /// The Claude route takes the stable order alone, and only with both switches on. The compaction budget
+    /// and the context dedup stay off there, and the OpenAI route keeps every option it has.
+    #[test]
+    fn the_claude_route_takes_the_stable_order_alone_and_only_with_both_switches() {
+        let all = CacheOptions::parse(Some("true"), Some("12000"), Some("true"));
+        assert_eq!(
+            all.for_anthropic(true),
+            CacheOptions {
+                stable_prompt_order: true,
+                compaction_token_budget: None,
+                dedup_context_history: false,
+            }
+        );
+        assert_eq!(
+            all.for_anthropic(false),
+            CacheOptions::default(),
+            "the Anthropic switch alone does nothing"
+        );
+        let stable_off = CacheOptions::parse(None, Some("12000"), Some("true"));
+        assert_eq!(
+            stable_off.for_anthropic(true),
+            CacheOptions::default(),
+            "the stable order must be on as well"
+        );
+        assert_eq!(
+            all.for_anthropic(true).prompt_order(),
+            PromptOrder::StablePrefix
+        );
+        assert_eq!(all.for_anthropic(false).prompt_order(), PromptOrder::Legacy);
+        assert_eq!(
+            all.for_route(CacheRoute::OpenAiChatCompletions),
+            all,
+            "the OpenAI route is unchanged"
+        );
+        // The route-level entry point reads the Anthropic switch once; follow its live value.
+        if anthropic_stable_order_enabled() {
+            assert_eq!(
+                all.for_route(CacheRoute::Anthropic),
+                all.for_anthropic(true)
+            );
+        } else {
+            assert_eq!(
+                all.for_route(CacheRoute::Anthropic),
+                CacheOptions::default()
+            );
+        }
+    }
+
+    #[test]
+    fn the_anthropic_switch_is_on_for_the_exact_literal_true_only() {
+        assert!(anthropic_stable_order_from(Some("true")));
+        for off in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("TRUE"),
+            Some(" true "),
+            Some("true "),
+            Some("yes"),
+            Some("on"),
+            Some("false"),
+        ] {
+            assert!(!anthropic_stable_order_from(off), "{off:?}");
+        }
+    }
+
+    /// An Anthropic turn with the stable order sends the messages the stable order sends everywhere else,
+    /// and its tiers never decrease from the first message to the last.
+    #[test]
+    fn an_anthropic_turn_sends_the_stable_prefix_order_with_non_decreasing_tiers() {
+        let options = CacheOptions::parse(Some("true"), None, None).for_anthropic(true);
+        assert_eq!(options.prompt_order(), PromptOrder::StablePrefix);
+        let context = full_context(history_with_pins_and_summary());
+        let (messages, plan) = context.clone().render_planned(options.prompt_order());
+        assert_eq!(messages, context.clone().render(PromptOrder::StablePrefix));
+        let tiered = context
+            .render_tiered(options.prompt_order())
+            .expect("the stable order is tiered");
+        assert_eq!(tiered.messages, messages);
+        assert!(
+            tiered.tiers.windows(2).all(|pair| pair[0] <= pair[1]),
+            "{:?}",
+            tiered.tiers
+        );
+        assert_eq!(
+            plan,
+            Some(PromptTierPlan {
+                stable: 2,
+                context: 4
+            })
+        );
+    }
+
+    /// A ZDR turn on the Claude route names no cache block: the plan is withheld, and only then. The order of
+    /// the messages is the same as for a persistent turn, since reordering the same blocks sends the same text.
+    #[test]
+    fn a_zdr_turn_on_the_claude_route_carries_no_cache_marker() {
+        let options = CacheOptions::parse(Some("true"), None, None).for_anthropic(true);
+        let context = full_context(history_with_pins_and_summary());
+        let (messages, standing) = context.clone().render_planned(options.prompt_order());
+        let plan = PromptTierPlan {
+            stable: 2,
+            context: 4,
+        };
+        assert_eq!(standing, Some(plan));
+        assert!(
+            turn_plan(standing, false).is_some(),
+            "a persistent turn carries the plan"
+        );
+        assert_eq!(
+            turn_plan(standing, true),
+            None,
+            "a ZDR turn carries no plan"
+        );
+        assert_eq!(turn_plan(None, false), None);
+        assert_eq!(messages, context.render(PromptOrder::StablePrefix));
     }
 
     fn tool(name: &str) -> ToolDefinition {

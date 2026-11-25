@@ -1320,6 +1320,17 @@ export async function listRunQuestions(runId: string, signal?: AbortSignal): Pro
 export type RunQuestionResponse = { answers: QuestionAnswer[] } | { skip: true }
 
 /**
+ * What a question is answered with on the answer route. `answeredMessageId` (F-f07-01b) is the client message id of
+ * the message that carries the answer, and `answerSummary` (O-15) is that message's text: the server appends the
+ * message under the id in the same transaction as the answer, so the two commit together. Only an answer names one;
+ * a skip never does, and an absent id is not sent at all.
+ */
+export type RunQuestionAnswerInput = RunQuestionResponse & {
+  answeredMessageId?: string
+  answerSummary?: string
+}
+
+/**
  * The closed set of codes an answer can be refused with, each under its own status: 404
  * `question_not_found` (another person's question answers the same), 410 `question_expired`,
  * 409 `question_already_answered`, 422 `invalid_answer`. The transport error carries the code
@@ -1347,12 +1358,12 @@ export function runQuestionErrorCodeOf(error: unknown): RunQuestionErrorCode | n
 /**
  * Answer, or skip, one question. An identical retry is accepted again and returns the stored
  * question; a different second answer is refused (see `RUN_QUESTION_ERRORS`). Only the answers
- * or the skip go on the wire: the org, the owner and the message that carries the answer are
- * the server's.
+ * or the skip go on the wire, and the message that carries an answer only when the caller names one
+ * (F-f07-01b): the org and the owner are the server's.
  */
 export async function answerQuestion(
   questionId: string,
-  response: RunQuestionResponse,
+  response: RunQuestionAnswerInput,
   signal?: AbortSignal,
 ): Promise<RunQuestion | null> {
   const body =
@@ -1366,9 +1377,16 @@ export async function answerQuestion(
           })),
           skip: false,
         }
+  // F-f07-01b: an answer names the message that carries it when the caller has one; a skip never does. Absent, the
+  // body is the one it has always been. O-15: the named message travels with its summary, the text the server stores.
+  const answeredMessageId = 'skip' in response ? undefined : response.answeredMessageId
+  const answerSummary = 'skip' in response ? undefined : response.answerSummary
+  const sent = answeredMessageId
+    ? { ...body, answered_message_id: answeredMessageId, answer_summary: answerSummary ?? '' }
+    : body
   const payload = await requestJson<{ question?: unknown }>(
     `/api/v1/orchestration/questions/${encodeURIComponent(questionId)}/answer`,
-    { method: 'POST', body: JSON.stringify(body), signal },
+    { method: 'POST', body: JSON.stringify(sent), signal },
   )
   return normalizeRunQuestion(payload.question)
 }

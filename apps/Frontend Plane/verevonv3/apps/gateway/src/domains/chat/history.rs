@@ -97,6 +97,10 @@ struct ChatThreadSummary {
     /// The thread this one was forked from, when it is a fork (build plan WS17 S6).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     forked_from_thread_id: Option<String>,
+    /// How many threads were forked from this one (F-f05-23). Present only when there is at least one, so the
+    /// delete confirmation can say that they keep their own copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fork_count: Option<u32>,
     /// The status of the thread's latest goal (EP-7 S5), relayed from Model Gateway: one closed
     /// token. Absent while the thread has no goal or the goal or attention switch is off, so the
     /// sidebar chip needs no second call.
@@ -250,6 +254,8 @@ struct DurableThreadSummary {
     attention_unseen: bool,
     #[serde(default, alias = "forkedFromThreadId")]
     forked_from_thread_id: String,
+    #[serde(default, alias = "forkCount")]
+    fork_count: i32,
     #[serde(default, alias = "goalStatus")]
     goal_status: String,
 }
@@ -1395,6 +1401,10 @@ fn durable_to_summary(item: DurableThreadSummary, now: &str) -> Option<ChatThrea
         attention_unseen: (!item.attention_state.is_empty()).then_some(item.attention_unseen),
         forked_from_thread_id: Some(item.forked_from_thread_id.trim().to_owned())
             .filter(|value| !value.is_empty()),
+        // Only a count above zero is relayed; a thread nobody forked from carries none.
+        fork_count: u32::try_from(item.fork_count)
+            .ok()
+            .filter(|count| *count > 0),
         attention_state: Some(item.attention_state.trim().to_owned())
             .filter(|value| !value.is_empty()),
         attention_since: Some(item.attention_since.trim().to_owned())
@@ -2175,6 +2185,7 @@ mod tests {
                 attention_since: String::new(),
                 attention_unseen: false,
                 forked_from_thread_id: String::new(),
+                fork_count: 0,
                 goal_status: String::new(),
             },
             now,
@@ -2202,6 +2213,7 @@ mod tests {
                 attention_since: String::new(),
                 attention_unseen: false,
                 forked_from_thread_id: String::new(),
+                fork_count: 0,
                 goal_status: String::new(),
             },
             now,
@@ -2248,6 +2260,7 @@ mod tests {
                     attention_since: String::new(),
                     attention_unseen: false,
                     forked_from_thread_id: String::new(),
+                    fork_count: 0,
                     goal_status: String::new(),
                 },
                 now,
@@ -2299,6 +2312,7 @@ mod tests {
                 attention_since: String::new(),
                 attention_unseen: false,
                 forked_from_thread_id: String::new(),
+                fork_count: 0,
                 goal_status: String::new(),
             },
             now,
@@ -2332,6 +2346,7 @@ mod tests {
                 attention_since: String::new(),
                 attention_unseen: false,
                 forked_from_thread_id: String::new(),
+                fork_count: 0,
                 goal_status: String::new(),
             },
             "2026-08-11T12:00:00Z",
@@ -2920,6 +2935,7 @@ mod thread_paging_tests {
                 attention_since: String::new(),
                 attention_unseen: false,
                 forked_from_thread_id: String::new(),
+                fork_count: 0,
                 goal_status: String::new(),
             },
             "2026-10-28T11:00:00Z",
@@ -3316,6 +3332,28 @@ mod fork_handler_tests {
             serde_json::from_value(json!({"threadId": "thread-plain"})).unwrap();
         let summary = durable_to_summary(plain, "2026-10-31T00:00:00Z").unwrap();
         assert!(summary.forked_from_thread_id.is_none());
+    }
+
+    #[test]
+    fn a_thread_relays_its_fork_count_only_when_it_has_forks() {
+        let forked: DurableThreadSummary =
+            serde_json::from_value(json!({"threadId": "thread-source", "forkCount": 3})).unwrap();
+        let summary = durable_to_summary(forked, "2026-10-31T00:00:00Z").unwrap();
+        assert_eq!(summary.fork_count, Some(3));
+        let wire = serde_json::to_value(&summary).unwrap();
+        assert_eq!(wire["forkCount"], json!(3));
+
+        for raw in [
+            json!({"threadId": "thread-zero", "forkCount": 0}),
+            json!({"threadId": "thread-negative", "forkCount": -2}),
+            json!({"threadId": "thread-plain"}),
+        ] {
+            let item: DurableThreadSummary = serde_json::from_value(raw).unwrap();
+            let summary = durable_to_summary(item, "2026-10-31T00:00:00Z").unwrap();
+            assert!(summary.fork_count.is_none());
+            let wire = serde_json::to_value(&summary).unwrap();
+            assert!(wire.get("forkCount").is_none());
+        }
     }
 }
 

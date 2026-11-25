@@ -340,6 +340,7 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'membership.update_member_role': exempt('human_identity_or_security', 'external_write'),
   'organization.switch_active': exempt('human_identity_or_security', 'external_write'),
   'chat.approve_plan': exempt('approval_authority', 'destructive'),
+  'chat.reject_plan': exempt('approval_authority', 'destructive'),
   'chat.execute_approved_plan': exempt('irreversible_destructive', 'destructive'),
   'chat.cancel_invocation': exempt('no_owner_executor', 'context_write'),
   'chat.queue_invocation_input': exempt('no_owner_executor', 'context_write'),

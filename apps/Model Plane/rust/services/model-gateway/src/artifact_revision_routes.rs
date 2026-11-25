@@ -239,8 +239,8 @@ pub(crate) async fn list_artifact_revisions(
 
 /// What the composer and the Output panel may offer, from this gateway's own switches. Each field
 /// follows the switch behind it; the two reference fields are set by `with_reference_switches`,
-/// `deep_research_knowledge` by `with_deep_research_switch` and `wide_research` by
-/// `with_wide_research_switch`.
+/// `deep_research_knowledge` by `with_deep_research_switch`, `wide_research` by `with_wide_research_switch`
+/// and `agent_modes` by `with_agent_modes_switch`.
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub(crate) struct ComposerCapabilities {
     artifact_history: bool,
@@ -250,6 +250,7 @@ pub(crate) struct ComposerCapabilities {
     selection_edit: bool,
     deep_research_knowledge: bool,
     wide_research: bool,
+    agent_modes: bool,
 }
 
 fn capabilities_for(mode: ArtifactRevisionsMode, editing: bool, zdr: bool) -> ComposerCapabilities {
@@ -266,6 +267,8 @@ fn capabilities_for(mode: ArtifactRevisionsMode, editing: bool, zdr: bool) -> Co
         deep_research_knowledge: false,
         // Set by `with_wide_research_switch`, which reads the switch this pure function does not.
         wide_research: false,
+        // Set by `with_agent_modes_switch`, which reads the switch this pure function does not.
+        agent_modes: false,
     }
 }
 
@@ -306,6 +309,19 @@ fn with_wide_research_switch(
     capabilities
 }
 
+/// The agent modes picker follows its own switch (WS25-S6, read by `profile::agent_modes_enabled`: the literal
+/// `true` only). A ZDR caller is offered none, as the composer's ZDR floor requires. The chat path does not refuse
+/// every mode under ZDR: `zdr_features` honours `agent_mode` and refuses only a plan-gate mode (`read_only`, through
+/// `plan_mode`). Whether ZDR callers should see the picker is an open owner question.
+fn with_agent_modes_switch(
+    mut capabilities: ComposerCapabilities,
+    enabled: bool,
+    zdr: bool,
+) -> ComposerCapabilities {
+    capabilities.agent_modes = enabled && !zdr;
+    capabilities
+}
+
 pub(crate) async fn composer_capabilities(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -319,20 +335,25 @@ pub(crate) async fn composer_capabilities(
     let context_refs = crate::context_refs::enabled();
     let deep_research_knowledge = crate::deep_research::knowledge_sources_enabled();
     let wide_research = crate::http_routes::wide_research_entry_enabled();
+    let agent_modes = crate::profile::agent_modes_enabled();
     Json(json!({
-        "data": with_wide_research_switch(
-            with_deep_research_switch(
-                with_reference_switches(
-                    capabilities_for(state.artifact_revisions_mode, state.artifact_editing_enabled, zdr),
-                    context_refs,
-                    // A thread is referenced only through a reference, so its tools need the reference switch too.
-                    context_refs && crate::thread_reference_tools::enabled(),
+        "data": with_agent_modes_switch(
+            with_wide_research_switch(
+                with_deep_research_switch(
+                    with_reference_switches(
+                        capabilities_for(state.artifact_revisions_mode, state.artifact_editing_enabled, zdr),
+                        context_refs,
+                        // A thread is referenced only through a reference, so its tools need the reference switch too.
+                        context_refs && crate::thread_reference_tools::enabled(),
+                        zdr,
+                    ),
+                    deep_research_knowledge,
                     zdr,
                 ),
-                deep_research_knowledge,
+                wide_research,
                 zdr,
             ),
-            wide_research,
+            agent_modes,
             zdr,
         )
     }))
@@ -741,6 +762,32 @@ mod tests {
         assert_eq!(json["deep_research_knowledge"], true, "{json}");
     }
 
+    /// WS25-S6: `agent_modes` follows its own switch and nothing else, and a ZDR caller is never offered it, pending
+    /// the owner's decision on ZDR modes (see `zdr_features` for what the chat path honours).
+    #[test]
+    fn agent_modes_follows_its_switch_and_is_never_offered_under_zdr() {
+        for (mode, editing) in [
+            (ArtifactRevisionsMode::On, true),
+            (ArtifactRevisionsMode::Off, false),
+        ] {
+            let base = |zdr| capabilities_for(mode, editing, zdr);
+            assert!(with_agent_modes_switch(base(false), true, false).agent_modes);
+            assert!(!with_agent_modes_switch(base(false), false, false).agent_modes);
+            assert!(!with_agent_modes_switch(base(false), true, true).agent_modes);
+            // The switch changes this one field and no other.
+            let mut on = with_agent_modes_switch(base(false), true, false);
+            on.agent_modes = false;
+            assert_eq!(on, base(false));
+        }
+        let json = serde_json::to_value(with_agent_modes_switch(
+            capabilities_for(ArtifactRevisionsMode::Off, false, false),
+            true,
+            false,
+        ))
+        .expect("serialises");
+        assert_eq!(json["agent_modes"], true, "{json}");
+    }
+
     #[tokio::test]
     async fn the_capabilities_route_answers_every_key_in_the_envelope() {
         let state = state_with(FakeStore::default(), ArtifactRevisionsMode::On).await;
@@ -756,6 +803,7 @@ mod tests {
                 "selection_edit": false,
                 "deep_research_knowledge": false,
                 "wide_research": false,
+                "agent_modes": false,
             }})
         );
     }

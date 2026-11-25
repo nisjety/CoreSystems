@@ -9,6 +9,7 @@
  */
 
 import {
+  chatSidebarThreadStateEnabled,
   readChatThreadHistory,
   readChatThreadTranscript,
   removeChatThreadHistoryItem,
@@ -291,7 +292,11 @@ type ChatThreadPaletteInput = { readonly threadId: string; readonly starred?: bo
 
 const CHAT_THREAD_RUNNERS: Partial<Record<ActionId, (input: ChatThreadPaletteInput) => Promise<unknown>>> = {
   'chat.thread.archive': (input) => archiveThreadFromPalette(input.threadId),
-  'chat.thread.star': (input) => setChatThreadStarred(input.threadId, input.starred === true),
+  // With the thread-state switch off, a star stays as quiet as before: no attention event, so no attention re-read.
+  'chat.thread.star': (input) =>
+    setChatThreadStarred(input.threadId, input.starred === true).then(() => {
+      if (chatSidebarThreadStateEnabled()) announceAttentionChanged()
+    }),
   'chat.thread.mark_unread': (input) => markChatThreadUnread(input.threadId).then(() => announceAttentionChanged()),
 }
 

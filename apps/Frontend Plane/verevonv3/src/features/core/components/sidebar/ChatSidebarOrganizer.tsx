@@ -37,6 +37,8 @@ export function ChatSidebarOrganizer(props: {
   unreadThreadIds?: ReadonlySet<string>
   /** Threads copied from another chat (WS17 S6); each one shows a Forked chip while forking is on. */
   forkedThreadIds?: ReadonlySet<string>
+  /** The server's first page of starred chats, asked for when the Starred filter turns on. Absent: the filter narrows the loaded chats only. */
+  loadStarred?: () => Promise<ChatThreadHistoryItem[]>
 }) {
   const i18n = useI18n()
   const session = getSession()
@@ -44,6 +46,40 @@ export function ChatSidebarOrganizer(props: {
   const [organization, setOrganization] = createSignal(emptyChatOrganization())
   const [query, setQuery] = createSignal('')
   const [starredOnly, setStarredOnly] = createSignal(false)
+  // The Starred filter asks the server for its first page of starred chats as it turns on. A failed answer keeps the loaded
+  // chats that are starred and says so, rather than reading as "no starred chats". A later toggle drops an older answer.
+  const [starredServer, setStarredServer] = createSignal<ChatThreadHistoryItem[] | null>(null)
+  const [starredPending, setStarredPending] = createSignal(false)
+  const [starredFailed, setStarredFailed] = createSignal(false)
+  let starredRequest = 0
+  const setStarredFilter = (on: boolean) => {
+    const request = ++starredRequest
+    setStarredOnly(on)
+    setStarredServer(null)
+    setStarredFailed(false)
+    if (!on || !props.loadStarred) {
+      setStarredPending(false)
+      return
+    }
+    setStarredPending(true)
+    void props.loadStarred().then(
+      (items) => {
+        if (request !== starredRequest) return
+        setStarredServer(items)
+        setStarredPending(false)
+      },
+      () => {
+        if (request !== starredRequest) return
+        setStarredFailed(true)
+        setStarredPending(false)
+      },
+    )
+  }
+  // The starred set is withdrawn while the archive is shown. The filter turns off with it, so it does not come back
+  // unannounced when the active list returns.
+  createEffect(() => props.starredThreadIds === undefined, (withdrawn) => {
+    if (withdrawn && starredOnly()) setStarredFilter(false)
+  })
   const [searchOpen, setSearchOpen] = createSignal(false)
   const [serverHits, setServerHits] = createSignal<ChatSearchHit[]>([])
   const [serverStatus, setServerStatus] = createSignal<ChatSearchStatus>('idle')
@@ -217,8 +253,10 @@ export function ChatSidebarOrganizer(props: {
     setOrganization(next)
   }
   const matches = createMemo(() => {
-    const source = starredOnly()
-      ? props.sessions.filter((item) => props.starredThreadIds?.has(item.threadId))
+    // The Starred filter narrows the active chats. With the starred set withdrawn (the archive is shown) it does not apply,
+    // and the server's starred answer, which lists active chats only, is not read there.
+    const source = starredOnly() && props.starredThreadIds !== undefined
+      ? (starredServer() ?? props.sessions.filter((item) => props.starredThreadIds?.has(item.threadId)))
       : props.sessions
     return selectOrganizedChats(source, organization(), query())
   })
@@ -295,15 +333,16 @@ export function ChatSidebarOrganizer(props: {
       <ChatWorkLinks />
       {/* Shown only once the caller passes the starred set; without it the filter would empty the list. */}
       <Show when={props.starredThreadIds}>
-        <button type="button" class="chat-organizer__starred-toggle" aria-pressed={starredOnly() ? 'true' : 'false'} onClick={() => setStarredOnly((on) => !on)}>{i18n.tr('Stjernemerkede', 'Starred')}</button>
+        <button type="button" class="chat-organizer__starred-toggle" aria-pressed={starredOnly() ? 'true' : 'false'} onClick={() => setStarredFilter(!starredOnly())}>{i18n.tr('Stjernemerkede', 'Starred')}</button>
       </Show>
-      <Show when={organization().view.filter !== 'all' || query().trim() || starredOnly()}><button type="button" class="chat-organizer__clear-filter" onClick={() => { setSearchText(''); setStarredOnly(false); updateView({ filter: 'all' }) }}>{i18n.tr('Fjern filtre', 'Clear filters')} · {matches().length}<X size={12} /></button></Show>
+      <Show when={starredFailed()}><p class="chat-organizer__empty" role="alert">{i18n.tr('Kunne ikke laste lagrede samtaler.', 'Could not load saved conversations.')}</p></Show>
+      <Show when={organization().view.filter !== 'all' || query().trim() || starredOnly()}><button type="button" class="chat-organizer__clear-filter" onClick={() => { setSearchText(''); setStarredFilter(false); updateView({ filter: 'all' }) }}>{i18n.tr('Fjern filtre', 'Clear filters')} · {matches().length}<X size={12} /></button></Show>
       <Show when={searchOpen() && query().trim().length >= SEARCH_MIN_CHARS}>
         <ChatSearchResults idPrefix={SEARCH_ID_PREFIX} hits={serverHits()} status={serverStatus()} activeIndex={activeHit()} onOpen={openSearchHit} onActiveChange={(index) => setActiveHit(index)} />
       </Show>
       <Show when={props.attentionSections}>{(sections) => <ChatAttentionSections sections={sections()} renderRow={props.renderRow} onMove={beginMove} />}</Show>
       <nav class="chat-organizer__list core-chat-sidebar__sessions" aria-label={i18n.tr('Chat-samtaler', 'Chat conversations')}>
-        <Show when={!props.loading} fallback={<p class="chat-organizer__empty">{i18n.tr('Laster samtaler …', 'Loading chats…')}</p>}>
+        <Show when={!props.loading && !starredPending()} fallback={<p class="chat-organizer__empty">{i18n.tr('Laster samtaler …', 'Loading chats…')}</p>}>
           <Show when={groups().length} fallback={<p class="chat-organizer__empty">{i18n.tr('Ingen samtaler passer dette utvalget.', 'No chats match this view.')}</p>}>
             <For each={groups()}>{(group) => (
               <details class="chat-organizer__group" open
@@ -337,7 +376,8 @@ export function ChatSidebarOrganizer(props: {
           </Show>
         </Show>
       </nav>
-      <Show when={props.hasMore}>
+      {/* The starred view is the server's first page of starred chats only, so Load more would widen nothing there. */}
+      <Show when={props.hasMore && !starredOnly()}>
         <button type="button" class="chat-organizer__load-more" onClick={() => props.onLoadMore?.()}>{i18n.tr('Last flere samtaler', 'Load more chats')}</button>
       </Show>
       <p class="chat-organizer__move-notice" role="status" aria-live="polite">{moveNotice()}</p>

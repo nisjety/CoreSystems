@@ -19,11 +19,16 @@ use mp_contracts::telemetry_labels::disallowed_metric_labels;
 /// six-value `write_policy::Origin::label()` (user, model_tool, delegation, workflow,
 /// dreaming, background_review): no id reaches it. They are exempted as exact pairs until
 /// `origin` is added to the reviewed list in `mp-contracts`.
+///
+/// F-f03-19: `mp_session_memory_policy_prose_allowed_total` carries `shape`, the closed two-value
+/// write_policy label (`basic`, `keyword`) of a prose-prone secret shape. No value or id reaches it.
+/// Exempted as an exact pair until `shape` is added to `METRIC_LABELS` in `mp-contracts`.
 const KNOWN_EXEMPTIONS: &[(&str, &str)] = &[
     ("mp_session_space_zdr_flag_total", "action"),
     ("mp_session_space_zdr_flag_total", "enforced"),
     ("mp_session_memory_policy_refused_total", "origin"),
     ("mp_session_skill_policy_refused_total", "origin"),
+    ("mp_session_memory_policy_prose_allowed_total", "shape"),
 ];
 
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {

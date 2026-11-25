@@ -4516,8 +4516,16 @@ type ApprovedAuthority struct {
 	// Absent when the descriptor predates the field; a continuation then holds the taint as marked.
 	// Not covered by `digest`.
 	ConnectorTaint *bool `protobuf:"varint,13,opt,name=connector_taint,json=connectorTaint,proto3,oneof" json:"connector_taint,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// The documents the paused Do turn attached (RunAgentRequest.context_document_ids, F-f09-05). A
+	// continuation narrows every knowledge_search of the run to them and to no others. Empty when the
+	// turn attached none, or when the descriptor predates the field. Not covered by `digest`.
+	ContextDocumentIds []string `protobuf:"bytes,14,rep,name=context_document_ids,json=contextDocumentIds,proto3" json:"context_document_ids,omitempty"`
+	// The skills the paused Do turn attached (RunAgentRequest.context_skill_ids, F-f09-05). A continuation
+	// puts them first, as the paused run did. Empty when none, or when the descriptor predates the field.
+	// Not covered by `digest`.
+	ContextSkillIds []string `protobuf:"bytes,15,rep,name=context_skill_ids,json=contextSkillIds,proto3" json:"context_skill_ids,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *ApprovedAuthority) Reset() {
@@ -4639,6 +4647,20 @@ func (x *ApprovedAuthority) GetConnectorTaint() bool {
 		return *x.ConnectorTaint
 	}
 	return false
+}
+
+func (x *ApprovedAuthority) GetContextDocumentIds() []string {
+	if x != nil {
+		return x.ContextDocumentIds
+	}
+	return nil
+}
+
+func (x *ApprovedAuthority) GetContextSkillIds() []string {
+	if x != nil {
+		return x.ContextSkillIds
+	}
+	return nil
 }
 
 // One offered tool, with the definition the model was given.
@@ -8184,8 +8206,12 @@ type AnswerRunQuestionRequest struct {
 	// The user message that carries the answer. Empty when the answer arrives on
 	// its own.
 	AnsweredMessageId string `protobuf:"bytes,5,opt,name=answered_message_id,json=answeredMessageId,proto3" json:"answered_message_id,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// The text of that message (the answer's summary). Read only with `answered_message_id`, and
+	// never for a skip: the message is appended under that id in the same transaction as the answer
+	// (O-15), so the answer and its message commit together or not at all.
+	AnswerSummary string `protobuf:"bytes,6,opt,name=answer_summary,json=answerSummary,proto3" json:"answer_summary,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *AnswerRunQuestionRequest) Reset() {
@@ -8249,6 +8275,13 @@ func (x *AnswerRunQuestionRequest) GetSkip() bool {
 func (x *AnswerRunQuestionRequest) GetAnsweredMessageId() string {
 	if x != nil {
 		return x.AnsweredMessageId
+	}
+	return ""
+}
+
+func (x *AnswerRunQuestionRequest) GetAnswerSummary() string {
+	if x != nil {
+		return x.AnswerSummary
 	}
 	return ""
 }
@@ -11523,7 +11556,7 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\astep_id\x18\x06 \x01(\tR\x06stepId\x12?\n" +
 	"\tauthority\x18\a \x01(\v2!.model_plane.v1.ApprovedAuthorityR\tauthority\x12\x1a\n" +
 	"\brevision\x18\b \x01(\rR\brevision\x12>\n" +
-	"\x1boriginal_action_fingerprint\x18\t \x01(\tR\x19originalActionFingerprint\"\x93\x04\n" +
+	"\x1boriginal_action_fingerprint\x18\t \x01(\tR\x19originalActionFingerprint\"\xf1\x04\n" +
 	"\x11ApprovedAuthority\x12\x12\n" +
 	"\x04mode\x18\x01 \x01(\tR\x04mode\x12\x1b\n" +
 	"\tplan_mode\x18\x02 \x01(\bR\bplanMode\x12#\n" +
@@ -11540,7 +11573,9 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	" \x01(\tR\x06digest\x12I\n" +
 	"\x11coordinator_tools\x18\v \x03(\v2\x1c.model_plane.v1.ApprovedToolR\x10coordinatorTools\x12'\n" +
 	"\x0fconnector_scope\x18\f \x03(\tR\x0econnectorScope\x12,\n" +
-	"\x0fconnector_taint\x18\r \x01(\bH\x00R\x0econnectorTaint\x88\x01\x01B\x12\n" +
+	"\x0fconnector_taint\x18\r \x01(\bH\x00R\x0econnectorTaint\x88\x01\x01\x120\n" +
+	"\x14context_document_ids\x18\x0e \x03(\tR\x12contextDocumentIds\x12*\n" +
+	"\x11context_skill_ids\x18\x0f \x03(\tR\x0fcontextSkillIdsB\x12\n" +
 	"\x10_connector_taint\"m\n" +
 	"\fApprovedTool\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
@@ -11961,14 +11996,15 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x15\n" +
 	"\x06org_id\x18\x02 \x01(\tR\x05orgId\"U\n" +
 	"\x18ListRunQuestionsResponse\x129\n" +
-	"\tquestions\x18\x01 \x03(\v2\x1b.model_plane.v1.RunQuestionR\tquestions\"\xd4\x01\n" +
+	"\tquestions\x18\x01 \x03(\v2\x1b.model_plane.v1.RunQuestionR\tquestions\"\xfb\x01\n" +
 	"\x18AnswerRunQuestionRequest\x12\x1f\n" +
 	"\vquestion_id\x18\x01 \x01(\tR\n" +
 	"questionId\x12\x15\n" +
 	"\x06org_id\x18\x02 \x01(\tR\x05orgId\x12<\n" +
 	"\aanswers\x18\x03 \x03(\v2\".model_plane.v1.QuestionAnswerItemR\aanswers\x12\x12\n" +
 	"\x04skip\x18\x04 \x01(\bR\x04skip\x12.\n" +
-	"\x13answered_message_id\x18\x05 \x01(\tR\x11answeredMessageId\"T\n" +
+	"\x13answered_message_id\x18\x05 \x01(\tR\x11answeredMessageId\x12%\n" +
+	"\x0eanswer_summary\x18\x06 \x01(\tR\ranswerSummary\"T\n" +
 	"\x19AnswerRunQuestionResponse\x127\n" +
 	"\bquestion\x18\x01 \x01(\v2\x1b.model_plane.v1.RunQuestionR\bquestion\"\x8b\x01\n" +
 	"\x19ConsumeRunQuestionRequest\x12\x1f\n" +

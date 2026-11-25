@@ -90,6 +90,14 @@ use crate::{
 };
 
 pub(crate) fn router(state: AppState) -> Router<AppState> {
+    // F-f07-01b: the answer route reads the message that carries the answer only while
+    // GATEWAY_QUESTION_ANSWER_MESSAGE_LINK is on. Off, it is the route it has always been, so a body
+    // that names a message is refused as before.
+    let answer_route = if state.space_features.question_answer_message_link {
+        post(answer_run_question_linked)
+    } else {
+        post(answer_run_question)
+    };
     Router::new()
         // ── reads ──────────────────────────────────────────────────────────
         .route("/api/v1/orchestration/runs/{run_id}/plans", get(list_plans))
@@ -157,7 +165,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         )
         .route(
             "/api/v1/orchestration/questions/{question_id}/answer",
-            post(answer_run_question),
+            answer_route,
         )
         .route(
             "/api/v1/orchestration/plans/{plan_id}/approve",
@@ -1391,14 +1399,82 @@ struct AnswerQuestionBody {
 
 /// The upstream body, rebuilt from the accepted fields alone.
 fn answer_upstream_body(body: &AnswerQuestionBody) -> Value {
+    answer_upstream_fields(&body.answers, body.skip)
+}
+
+/// The answer fields the upstream reads, shared by both answer routes.
+fn answer_upstream_fields(answers: &[AnswerItemBody], skip: bool) -> Value {
     serde_json::json!({
-        "answers": body.answers.iter().map(|answer| serde_json::json!({
+        "answers": answers.iter().map(|answer| serde_json::json!({
             "item_id": answer.item_id,
             "option_ids": answer.option_ids,
             "text": answer.text,
         })).collect::<Vec<_>>(),
-        "skip": body.skip,
+        "skip": skip,
     })
+}
+
+/// The answer body of the route that carries the message link (F-f07-01b, `GATEWAY_QUESTION_ANSWER_MESSAGE_LINK`).
+/// It is the answer body plus one field: the client message id of the message that carries the answer. Read only
+/// by the route the switch registers; off, every body is read by [`AnswerQuestionBody`] as before.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnswerQuestionLinkBody {
+    #[serde(default)]
+    answers: Vec<AnswerItemBody>,
+    #[serde(default)]
+    skip: bool,
+    #[serde(default)]
+    answered_message_id: Option<String>,
+    /// The text of the message that carries the answer (O-15): the answer's summary. Required with a named message.
+    #[serde(default)]
+    answer_summary: Option<String>,
+}
+
+/// The most characters an answer's summary may carry, as the model gateway and Session Core check it (O-15).
+const ANSWER_SUMMARY_MAX_CHARS: usize = 32_000;
+
+/// The upstream body of a linked answer (F-f07-01b, O-15). A named message must be a valid client message id, and it
+/// comes with its summary, non-empty and within [`ANSWER_SUMMARY_MAX_CHARS`]: Session Core appends the summary under
+/// the id in the same transaction as the answer. Any other value is refused as the typed `invalid_answer` 422 naming
+/// its field, and the value itself is never echoed.
+fn linked_answer_upstream_body(body: &AnswerQuestionLinkBody) -> Result<Value, Response> {
+    let mut upstream = answer_upstream_fields(&body.answers, body.skip);
+    // A skip never carries a message (F-f07-01b): a name on a skip is dropped here, as the model gateway drops it too.
+    if body.skip {
+        return Ok(upstream);
+    }
+    if let Some(message_id) = body.answered_message_id.as_deref() {
+        let refuse = |field: &str, reason: &str| {
+            let refusal = crate::envelope::error_with_details(
+                "invalid_answer",
+                "The answer does not fit the question.",
+                serde_json::json!({ "field": field, "reason": reason }),
+            );
+            (StatusCode::UNPROCESSABLE_ENTITY, Json(refusal)).into_response()
+        };
+        if !valid_answer_message_id(message_id) {
+            return Err(refuse("answered_message_id", "not a valid message id"));
+        }
+        let summary = body.answer_summary.as_deref().unwrap_or_default().trim();
+        if summary.is_empty() || summary.chars().count() > ANSWER_SUMMARY_MAX_CHARS {
+            return Err(refuse("answer_summary", "not a message text"));
+        }
+        upstream["answered_message_id"] = Value::String(message_id.to_owned());
+        upstream["answer_summary"] = Value::String(summary.to_owned());
+    }
+    Ok(upstream)
+}
+
+/// Whether `id` has the shape of a client message id that the gateway and Session Core accept (F-f07-01b): a letter
+/// or digit first, then letters, digits, `_` or `-`, at most 128 characters. That is visible ASCII by construction.
+fn valid_answer_message_id(id: &str) -> bool {
+    let mut bytes = id.bytes();
+    bytes
+        .next()
+        .is_some_and(|first| first.is_ascii_alphanumeric())
+        && id.len() <= 128
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 /// Answer, or skip, one of the caller's questions once. An answer is information, never a
@@ -1418,6 +1494,29 @@ async fn answer_run_question(
         answer_upstream_body(&body),
     )
     .await
+}
+
+/// The answer route once `GATEWAY_QUESTION_ANSWER_MESSAGE_LINK` is on (F-f07-01b): the same answer, and the message
+/// that carries it when one is named. Registered by [`router`] only while the switch is on.
+async fn answer_run_question_linked(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(question_id): Path<String>,
+    Json(body): Json<AnswerQuestionLinkBody>,
+) -> Response {
+    match linked_answer_upstream_body(&body) {
+        Ok(upstream) => mg_post(
+            &state,
+            &user,
+            &headers,
+            &format!("/v1/orchestration/questions/{}/answer", enc(&question_id)),
+            upstream,
+        )
+        .await
+        .into_response(),
+        Err(refusal) => refusal,
+    }
 }
 
 async fn update_todo_status(
@@ -3182,7 +3281,8 @@ mod tests {
 
     #[test]
     fn run_question_the_answer_body_refuses_a_field_the_client_does_not_own() {
-        use super::AnswerQuestionBody;
+        use super::{AnswerQuestionBody, AnswerQuestionLinkBody};
+        // Off (the default): the answer body is the one it always was, so a message field is refused like any other.
         for body in [
             json!({"skip": true, "org_id": "org-forged"}),
             json!({"skip": true, "user_id": "user-forged"}),
@@ -3194,6 +3294,101 @@ mod tests {
                 "{body} must be refused, not ignored"
             );
         }
+        // On: the message link is the one field read; the org, the owner and anything else stay refused.
+        for body in [
+            json!({"skip": true, "org_id": "org-forged"}),
+            json!({"skip": true, "user_id": "user-forged"}),
+            json!({"answers": [{"item_id": "scope", "user_id": "user-forged"}]}),
+            json!({"skip": true, "answered_message_id": 7}),
+        ] {
+            assert!(
+                serde_json::from_value::<AnswerQuestionLinkBody>(body.clone()).is_err(),
+                "{body} must be refused, not ignored"
+            );
+        }
+    }
+
+    /// F-f07-01b: a named message is forwarded only when it is a client message id; a skip names none.
+    #[test]
+    fn run_question_a_message_link_is_forwarded_only_when_it_is_a_message_id() {
+        use super::{linked_answer_upstream_body, valid_answer_message_id, AnswerQuestionLinkBody};
+        for good in ["msg-7", "a", "0", "msg_01-X", &"a".repeat(128)] {
+            assert!(valid_answer_message_id(good), "{good}");
+        }
+        for bad in [
+            "",
+            "-a",
+            "_a",
+            "a b",
+            "a.b",
+            "a/b",
+            "é",
+            "a\n",
+            &"a".repeat(129),
+        ] {
+            assert!(!valid_answer_message_id(bad), "{bad:?}");
+        }
+        let linked: AnswerQuestionLinkBody = serde_json::from_value(json!({
+            "answers": [{"item_id": "scope", "option_ids": ["main"]}],
+            "answered_message_id": "msg-7",
+            "answer_summary": "  Svar: main  ",
+        }))
+        .expect("accepted");
+        let upstream = linked_answer_upstream_body(&linked)
+            .ok()
+            .expect("a message id with its summary is forwarded");
+        assert_eq!(upstream["answered_message_id"], "msg-7");
+        assert_eq!(
+            upstream["answer_summary"], "Svar: main",
+            "the summary is forwarded trimmed (O-15)"
+        );
+        // O-15: a named message without its summary, or with an empty or oversized one, is refused before the upstream.
+        let oversized = "a".repeat(super::ANSWER_SUMMARY_MAX_CHARS + 1);
+        for summaryless in [
+            json!({"answers": [], "answered_message_id": "msg-7"}),
+            json!({"answers": [], "answered_message_id": "msg-7", "answer_summary": "   "}),
+            json!({"answers": [], "answered_message_id": "msg-7", "answer_summary": oversized}),
+        ] {
+            let refused: AnswerQuestionLinkBody =
+                serde_json::from_value(summaryless.clone()).expect("accepted");
+            assert!(
+                linked_answer_upstream_body(&refused).is_err(),
+                "{}: a message needs its summary",
+                summaryless["answer_summary"]
+            );
+        }
+        let none: AnswerQuestionLinkBody =
+            serde_json::from_value(json!({"skip": true})).expect("accepted");
+        let upstream = linked_answer_upstream_body(&none)
+            .ok()
+            .expect("no id is forwarded");
+        assert!(
+            upstream.get("answered_message_id").is_none(),
+            "the upstream names no message when none is named"
+        );
+        // A skip that names a message is answered without it: the name is dropped, valid or not.
+        for skip_naming in [
+            json!({"skip": true, "answered_message_id": "msg-7"}),
+            json!({"skip": true, "answered_message_id": "msg 7"}),
+        ] {
+            let skipped: AnswerQuestionLinkBody =
+                serde_json::from_value(skip_naming.clone()).expect("accepted");
+            let upstream = linked_answer_upstream_body(&skipped)
+                .ok()
+                .expect("a skip is answered");
+            assert_eq!(upstream["skip"], true, "{skip_naming}");
+            assert!(
+                upstream.get("answered_message_id").is_none(),
+                "{skip_naming}: a skip never carries a message"
+            );
+        }
+        let forged: AnswerQuestionLinkBody =
+            serde_json::from_value(json!({"answers": [], "answered_message_id": "msg 7"}))
+                .expect("accepted");
+        assert!(
+            linked_answer_upstream_body(&forged).is_err(),
+            "a name that is not a message id is refused"
+        );
     }
 
     #[test]
@@ -3262,6 +3457,109 @@ mod tests {
         assert_eq!(body, typed);
     }
 
+    /// Drives the answer route through axum's extractors, the route the message-link switch chooses (F-f07-01b). Returns
+    /// the status and the JSON body (`Null` for a body that is not JSON, as an extractor refusal is). The router adds a
+    /// session layer, which is the production layer's to check, so the route stands alone here.
+    async fn post_answer(state: AppState, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+        use axum::{body::Body, http::Request, routing::post, Extension, Router};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let route = if state.space_features.question_answer_message_link {
+            post(super::answer_run_question_linked)
+        } else {
+            post(super::answer_run_question)
+        };
+        let app = Router::new()
+            .route("/questions/{question_id}/answer", route)
+            .layer(Extension(test_user()))
+            .with_state(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/questions/q-7/answer")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("request"),
+            )
+            .await
+            .expect("route answers");
+        let status = response.status();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    /// F-f07-01b: the answer route, as the message-link switch chooses it. On: a valid message id reaches the model
+    /// gateway, and a forged field or a malformed name is refused before the upstream is called. Off: a body that names
+    /// a message is refused 422, as it always was.
+    #[tokio::test]
+    async fn run_question_the_answer_route_links_a_named_message_only_while_its_switch_is_on() {
+        use wiremock::{
+            matchers::{body_partial_json, header, method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/session-core/token"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"token": "session-test-token"})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/orchestration/questions/q-7/answer"))
+            .and(header("x-session-authorization", "Bearer session-test-token"))
+            .and(body_partial_json(json!({"answered_message_id": "msg-7", "answer_summary": "Svar: main"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"question": {"id": "q-7", "state": "answered", "answered_message_id": "msg-7"}}),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut state = test_state(false);
+        state.auth_core_url = server.uri();
+        state.model_gateway_url = server.uri();
+        state.space_features.question_answer_message_link = true;
+        let named = json!({
+            "answers": [{"item_id": "scope", "option_ids": ["main"]}],
+            "answered_message_id": "msg-7",
+            "answer_summary": "Svar: main",
+        });
+        let (status, body) = post_answer(state.clone(), named.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        for refused in [
+            json!({"answers": [], "org_id": "org-forged"}),
+            json!({"answers": [], "answered_message_id": "msg 7", "answer_summary": "Svar"}),
+            json!({"answers": [], "answered_message_id": "msg-7"}),
+        ] {
+            let (status, body) = post_answer(state.clone(), refused.clone()).await;
+            assert_eq!(
+                status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "on: {refused} is refused before the upstream: {body}"
+            );
+        }
+
+        state.space_features.question_answer_message_link = false;
+        let (status, body) = post_answer(state.clone(), named).await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "off: a body that names a message is refused, as it always was: {body}"
+        );
+    }
+
     #[test]
     fn run_question_an_answer_is_not_an_approval_decision() {
         assert!(
@@ -3276,9 +3574,13 @@ mod tests {
         assert!(source.contains(
             "\"/api/v1/orchestration/runs/{run_id}/questions\",\n            get(list_run_questions),"
         ));
+        // F-f07-01b: the answer route is chosen by the message-link switch, and both of its handlers are
+        // registered through that choice.
         assert!(source.contains(
-            "\"/api/v1/orchestration/questions/{question_id}/answer\",\n            post(answer_run_question),"
+            "\"/api/v1/orchestration/questions/{question_id}/answer\",\n            answer_route,"
         ));
+        assert!(source.contains("post(answer_run_question)\n"));
+        assert!(source.contains("post(answer_run_question_linked)\n"));
     }
 
     /// EP-10-S1: the preview route is a GET pass-through to model-gateway's preview route.

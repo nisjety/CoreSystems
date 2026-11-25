@@ -839,6 +839,10 @@ impl OrchestrationCoreService for MockOrchestration {
             "q-bad" => Err(Status::invalid_argument(
                 "invalid_answer: answers[0].option_ids[0]: unknown_option",
             )),
+            // O-15: Session Core refuses an id that names another thread's message.
+            "q-foreign-message" => Err(Status::invalid_argument(
+                "invalid_answer: answered_message_id: names_another_thread",
+            )),
             _ => Ok(Response::new(AnswerRunQuestionResponse {
                 question: Some(scripted_question(
                     &request.question_id,
@@ -2775,7 +2779,271 @@ async fn run_question_a_skip_is_forwarded_as_a_skip() {
     assert!(sent.skip && sent.answers.is_empty());
     assert_eq!(
         sent.answered_message_id, "",
-        "the message that carries an answer is never taken from the caller"
+        "a skip names no message, so the id it carries is never forwarded, with the link on or off"
+    );
+}
+
+/// Sets one environment switch for one test and puts the previous value back afterwards.
+struct EnvSwitch {
+    name: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvSwitch {
+    fn set(name: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(name);
+        std::env::set_var(name, value);
+        Self { name, previous }
+    }
+}
+
+impl Drop for EnvSwitch {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => std::env::set_var(self.name, value),
+            None => std::env::remove_var(self.name),
+        }
+    }
+}
+
+/// F-f07-01b: an answer names the message that carries it only while
+/// `MODEL_GATEWAY_QUESTION_ANSWER_MESSAGE_LINK` is the literal `true` and send receipts are on. A message id is
+/// forwarded; a name that is not one is refused before Session Core is asked and never echoed; a skip never
+/// carries one; off, the name is dropped, as it always was.
+#[tokio::test]
+#[serial_test::serial]
+async fn run_question_the_answer_names_its_message_only_while_the_link_switch_is_on() {
+    const SWITCH: &str = "MODEL_GATEWAY_QUESTION_ANSWER_MESSAGE_LINK";
+    const RECEIPTS: &str = "MODEL_GATEWAY_SEND_RECEIPTS";
+    let _auth = AuthFixture::start().await;
+    let tokens = AuthFixture::user_tokens("org-1", "user-1");
+    let answer = |message: serde_json::Value| {
+        serde_json::json!({
+            "answers": [{"item_id": "scope", "option_ids": ["main"]}],
+            "answered_message_id": message,
+            "answer_summary": "Svar: main",
+        })
+    };
+
+    {
+        let _switch = EnvSwitch::set(SWITCH, "true");
+        let _receipts = EnvSwitch::set(RECEIPTS, "true");
+        let harness = question_harness().await;
+        let (status, body) = question_call(
+            &harness,
+            "POST",
+            "/v1/orchestration/questions/q-7/answer",
+            &tokens,
+            Some(answer(serde_json::json!("msg-7"))),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let sent = harness
+            .capture
+            .answer_question
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the answer reached Session Core");
+        assert_eq!(
+            sent.answered_message_id, "msg-7",
+            "a message id is forwarded"
+        );
+        assert_eq!(
+            sent.answer_summary, "Svar: main",
+            "the summary is forwarded with the id it belongs to (O-15)"
+        );
+
+        let harness = question_harness().await;
+        let (status, body) = question_call(
+            &harness,
+            "POST",
+            "/v1/orchestration/questions/q-7/answer",
+            &tokens,
+            Some(serde_json::json!({"skip": true, "answered_message_id": "msg-7"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let sent = harness
+            .capture
+            .answer_question
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the skip reached Session Core");
+        assert!(sent.skip);
+        assert_eq!(
+            sent.answered_message_id, "",
+            "a skip never carries a message"
+        );
+
+        let too_long = "a".repeat(129);
+        for forged in [
+            serde_json::json!("msg 7"),
+            serde_json::json!(""),
+            serde_json::json!(too_long),
+            serde_json::json!(7),
+        ] {
+            let harness = question_harness().await;
+            let (status, body) = question_call(
+                &harness,
+                "POST",
+                "/v1/orchestration/questions/q-7/answer",
+                &tokens,
+                Some(answer(forged.clone())),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{forged}: {body}");
+            assert_eq!(body["error"]["code"], "invalid_answer", "{forged}: {body}");
+            assert_eq!(
+                body["error"]["details"]["field"], "answered_message_id",
+                "{forged}: {body}"
+            );
+            assert!(
+                harness.capture.answer_question.lock().unwrap().is_none(),
+                "{forged}: a refused name never reaches Session Core"
+            );
+        }
+    }
+
+    // Off, the default: the name is dropped and any shape of it is ignored, as before.
+    std::env::remove_var(SWITCH);
+    let harness = question_harness().await;
+    let (status, body) = question_call(
+        &harness,
+        "POST",
+        "/v1/orchestration/questions/q-7/answer",
+        &tokens,
+        Some(answer(serde_json::json!("msg-7"))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sent = harness
+        .capture
+        .answer_question
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the answer reached Session Core");
+    assert_eq!(sent.answered_message_id, "", "off: the name is dropped");
+
+    let harness = question_harness().await;
+    let (status, body) = question_call(
+        &harness,
+        "POST",
+        "/v1/orchestration/questions/q-7/answer",
+        &tokens,
+        Some(answer(serde_json::json!(7))),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "off: a name of any shape is ignored: {body}"
+    );
+}
+
+/// F-f07-01b: the link is stored only where send receipts store the message's id, so with receipts off a named
+/// message is not forwarded. The answer is still recorded, as it is with the link off.
+#[tokio::test]
+#[serial_test::serial]
+async fn run_question_the_link_needs_send_receipts_so_no_message_is_named_without_them() {
+    let _auth = AuthFixture::start().await;
+    let _switch = EnvSwitch::set("MODEL_GATEWAY_QUESTION_ANSWER_MESSAGE_LINK", "true");
+    let _receipts = EnvSwitch::set("MODEL_GATEWAY_SEND_RECEIPTS", "false");
+    let tokens = AuthFixture::user_tokens("org-1", "user-1");
+    let harness = question_harness().await;
+    let (status, body) = question_call(
+        &harness,
+        "POST",
+        "/v1/orchestration/questions/q-7/answer",
+        &tokens,
+        Some(serde_json::json!({
+            "answers": [{"item_id": "scope", "option_ids": ["main"]}],
+            "answered_message_id": "msg-7",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["question"]["state"], "answered");
+    let sent = harness
+        .capture
+        .answer_question
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the answer reached Session Core");
+    assert_eq!(
+        sent.answered_message_id, "",
+        "receipts off: no message is named, since it would not be stored under its id"
+    );
+}
+
+/// O-15: a linked answer needs its summary, non-empty and within the bound, and the gateway refuses a missing or
+/// bad one before Session Core is asked. An id that names another thread's message is refused by Session Core,
+/// and the gateway returns that refusal as the typed 422, naming the field and never echoing the value.
+#[tokio::test]
+#[serial_test::serial]
+async fn run_question_a_linked_answer_needs_its_summary_and_a_foreign_message_is_refused() {
+    let _auth = AuthFixture::start().await;
+    let _switch = EnvSwitch::set("MODEL_GATEWAY_QUESTION_ANSWER_MESSAGE_LINK", "true");
+    let _receipts = EnvSwitch::set("MODEL_GATEWAY_SEND_RECEIPTS", "true");
+    let tokens = AuthFixture::user_tokens("org-1", "user-1");
+    let answers = serde_json::json!([{"item_id": "scope", "option_ids": ["main"]}]);
+
+    for body in [
+        serde_json::json!({"answers": answers, "answered_message_id": "msg-7"}),
+        serde_json::json!({"answers": answers, "answered_message_id": "msg-7", "answer_summary": "   "}),
+        serde_json::json!({"answers": answers, "answered_message_id": "msg-7", "answer_summary": "a".repeat(32_001)}),
+        serde_json::json!({"answers": answers, "answered_message_id": "msg-7", "answer_summary": 7}),
+    ] {
+        let harness = question_harness().await;
+        let (status, reply) = question_call(
+            &harness,
+            "POST",
+            "/v1/orchestration/questions/q-7/answer",
+            &tokens,
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{reply}");
+        assert_eq!(reply["error"]["code"], "invalid_answer", "{reply}");
+        assert_eq!(
+            reply["error"]["details"]["field"], "answer_summary",
+            "{reply}"
+        );
+        assert!(
+            harness.capture.answer_question.lock().unwrap().is_none(),
+            "a refused summary never reaches Session Core"
+        );
+    }
+
+    let harness = question_harness().await;
+    let (status, reply) = question_call(
+        &harness,
+        "POST",
+        "/v1/orchestration/questions/q-foreign-message/answer",
+        &tokens,
+        Some(serde_json::json!({
+            "answers": answers,
+            "answered_message_id": "msg-7",
+            "answer_summary": "Svar: main",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{reply}");
+    assert_eq!(reply["error"]["code"], "invalid_answer", "{reply}");
+    assert_eq!(
+        reply["error"]["details"]["field"], "answered_message_id",
+        "{reply}"
+    );
+    assert_eq!(
+        reply["error"]["details"]["reason"], "names_another_thread",
+        "{reply}"
+    );
+    assert!(
+        !reply.to_string().contains("Svar: main"),
+        "the summary is never echoed"
     );
 }
 

@@ -67,6 +67,68 @@ func (i ScheduledRunIntent) validateContract(now time.Time) error {
 	return validateScheduledContract(i.ContractDigest, i.ContractExpiresAt, now)
 }
 
+// ScheduledRunAuthority is the exact prepared-run projection Session Core returns
+// before Control signs a run-execution decision (F-f10-27 rel1). Its contract fields
+// are the stored-consent contract Session Core holds for the prepared run; zero values
+// keep the legacy v1 binding. No value the Orchestrator body claims is a source of truth.
+type ScheduledRunAuthority struct {
+	RunID          string
+	ThreadID       string
+	OrgID          string
+	SubjectID      string
+	SpaceRef       string
+	ScheduleID     string
+	FireKey        string
+	TemplateDigest string
+	IdempotencyKey string
+	// ContractDigest and ContractExpiresAt are the stored-consent contract of the prepared
+	// run; zero values keep the legacy binding.
+	ContractDigest    string
+	ContractExpiresAt time.Time
+}
+
+// Validate refuses a prepared run that does not name every binding of a run intent,
+// or that holds a half-bound contract (a digest without an expiry, or the reverse).
+func (a ScheduledRunAuthority) Validate() error {
+	intent := ScheduledRunIntent{
+		OrgID: a.OrgID, SpaceRef: a.SpaceRef, SubjectID: a.SubjectID, ScheduleID: a.ScheduleID,
+		FireKey: a.FireKey, TaskID: a.RunID, TemplateDigest: a.TemplateDigest, IdempotencyKey: a.IdempotencyKey,
+	}
+	if err := intent.Validate(); err != nil {
+		return fmt.Errorf("invalid scheduled run authority: %w", err)
+	}
+	if strings.TrimSpace(a.ThreadID) == "" {
+		return fmt.Errorf("scheduled run authority thread_id is required")
+	}
+	if hasScheduledContract(a.ContractDigest, a.ContractExpiresAt) &&
+		(!strings.HasPrefix(a.ContractDigest, "sha256:") || len(a.ContractDigest) != len("sha256:")+64 || a.ContractExpiresAt.IsZero()) {
+		return fmt.Errorf("scheduled run authority contract binding is invalid")
+	}
+	return nil
+}
+
+// BindScheduledRunContract returns the intent bound to the stored-consent contract that
+// Session Core prepared for this run (F-f10-27 rel1). A contract the intent already
+// carries is replaced, so no request body can name a digest or an expiry of its own. A
+// prepared run with no contract keeps the legacy v1 binding, with zero contract fields.
+// An expired contract is refused with ErrScheduledContractExpired.
+func BindScheduledRunContract(intent ScheduledRunIntent, prepared ScheduledRunAuthority, now time.Time) (ScheduledRunIntent, error) {
+	intent.ContractDigest = ""
+	intent.ContractExpiresAt = time.Time{}
+	if !hasScheduledContract(prepared.ContractDigest, prepared.ContractExpiresAt) {
+		return intent, nil
+	}
+	if !prepared.ContractExpiresAt.IsZero() && !now.Before(prepared.ContractExpiresAt) {
+		return ScheduledRunIntent{}, ErrScheduledContractExpired
+	}
+	if err := validateScheduledContract(prepared.ContractDigest, prepared.ContractExpiresAt, now); err != nil {
+		return ScheduledRunIntent{}, err
+	}
+	intent.ContractDigest = prepared.ContractDigest
+	intent.ContractExpiresAt = prepared.ContractExpiresAt.UTC()
+	return intent, nil
+}
+
 func scheduledRunPayloadDigest(action, schema string, evidence PersonalThreadDecisionEvidence, intent ScheduledRunIntent, threadID string, bindContract bool) string {
 	hash := sha256.New()
 	hash.Write([]byte(action + "\x00v1\x00"))

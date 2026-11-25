@@ -26,8 +26,12 @@ export type ChatThreadDraft = {
   /**
    * A send is starting from the composer, which it clears. The text stays stored until the send
    * settles: `accepted` discards it, `failed` gives it back to the composer.
+   *
+   * `external` is the text of a send that is not the composer's (an answer to a question): the composer is not
+   * cleared, `accepted` discards nothing, and `failed` gives the text to the composer, after its own text.
+   * When the person has left the sending thread, `failed` adds it to that thread's own stored draft instead.
    */
-  beginSend: () => (outcome: ChatDraftOutcome) => void
+  beginSend: (external?: string) => (outcome: ChatDraftOutcome) => void
   /**
    * The conversation takes a new id (a new chat's first send, or the id the server gives it), and its
    * draft moves with it. `from` is `null` for a chat that has no thread yet.
@@ -37,7 +41,9 @@ export type ChatThreadDraft = {
   reset: () => void
 }
 
-type Sent = { key: string | null; text: string }
+// `epoch` is the drafts' clear epoch and `keepable` whether the sending thread could keep a draft (not zero
+// retention), both read when the send began.
+type Sent = { key: string | null; text: string; external: boolean; epoch: number; keepable: boolean }
 
 // The unsent text of a chat thread's composer, kept for this tab only (sessionStorage) so that a reload,
 // a trip to another thread or a failed send does not lose it. Text only: attachments are never stored,
@@ -54,6 +60,12 @@ type Sent = { key: string | null; text: string }
 //
 // A send clears the composer, but the text it sends stays stored until the send settles, so that a failed
 // send can give it back. It is discarded only when the turn is accepted.
+//
+// A send of other text (`beginSend(text)`, an answer to a question the run asked) never touches the composer,
+// because that text was never in it. A failed one is added after the composer's own text, or becomes the
+// composer's text when the composer is empty; an accepted one discards nothing. A failed one from a thread the
+// person has left is added to that thread's own stored draft (not to the composer on screen), under the same
+// gate as any other draft write.
 
 export function useChatThreadDraft(options: {
   /** The thread on screen, or `null` for a chat that has none yet. */
@@ -183,9 +195,13 @@ export function useChatThreadDraft(options: {
     }
   }
 
-  const beginSend = () => {
+  const beginSend = (external?: string) => {
     save()
-    const sent: Sent = { key: bound, text: untrack(message) }
+    const epoch = chatDraftClearEpoch()
+    const keepable = !zeroRetention()
+    const sent: Sent = external === undefined
+      ? { key: bound, text: untrack(message), external: false, epoch, keepable }
+      : { key: bound, text: external, external: true, epoch, keepable }
     inFlight = sent
     return (outcome: ChatDraftOutcome) => {
       if (inFlight !== sent) return
@@ -195,8 +211,10 @@ export function useChatThreadDraft(options: {
     }
   }
 
-  // The turn is on the thread now: its draft goes, unless the person has typed a newer one since.
+  // The turn is on the thread now: its draft goes, unless the person has typed a newer one since. A send of other
+  // text was never in the composer or its draft, so there is nothing to discard.
   const accepted = (sent: Sent) => {
+    if (sent.external) return
     const sameThread = sent.key === bound
     if (sameThread && !untrack(message).trim()) {
       forget()
@@ -209,9 +227,30 @@ export function useChatThreadDraft(options: {
 
   // The send did not reach the gateway. Its text goes back to the composer if that composer still belongs to
   // the thread that sent it and the person has not started a new draft; otherwise the text stays in the
-  // draft of its own thread.
+  // draft of its own thread. A send of other text has no draft of its own: it is added after the composer's
+  // text. When the person has left the thread that sent it, it is added after that thread's own stored draft
+  // instead (never to the composer on screen), if that thread could keep a draft when the send began and no
+  // sign-out has cleared the drafts since.
   const failed = (sent: Sent) => {
-    if (sent.key !== bound || untrack(message).trim()) return
+    if (
+      sent.external &&
+      sent.key !== null &&
+      sent.key !== bound &&
+      sent.keepable &&
+      sent.epoch === chatDraftClearEpoch() &&
+      isLocalRetentionAllowed()
+    ) {
+      const stored = readHomeDraft(sent.key)
+      writeChatDraft(sent.key, stored.trim() ? `${stored}\n\n${sent.text}` : sent.text)
+      return
+    }
+    if (sent.key !== bound) return
+    const composer = untrack(message)
+    if (sent.external) {
+      setMessage(composer.trim() ? `${composer}\n\n${sent.text}` : sent.text)
+      return
+    }
+    if (composer.trim()) return
     setMessage(sent.text)
   }
 

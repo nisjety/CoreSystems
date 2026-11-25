@@ -249,4 +249,89 @@ describe('the chat thread draft', () => {
     pause()
     expect(sessionStorage.length).toBe(0)
   })
+
+  it('leaves the composer and its stored draft alone when a send of other text is accepted', () => {
+    const page = mount('thread-a')
+    type(page, 'Utkast')
+    pause()
+    const settle = page.draft.beginSend('Svar på spørsmålet')
+    flush()
+    expect(page.draft.message()).toBe('Utkast')
+
+    settle('accepted')
+    flush()
+    expect(page.draft.message()).toBe('Utkast')
+    pause()
+    expect(stored(keyA)).toBe('Utkast')
+  })
+
+  it('gives a failed send of other text back to an empty composer', () => {
+    const page = mount('thread-a')
+    const settle = page.draft.beginSend('Svar på spørsmålet')
+
+    settle('failed')
+    flush()
+    expect(page.draft.message()).toBe('Svar på spørsmålet')
+    pause()
+    expect(stored(keyA)).toBe('Svar på spørsmålet')
+  })
+
+  it('adds a failed send of other text after the text in a non-empty composer', () => {
+    const page = mount('thread-a')
+    type(page, 'Halvferdig')
+    const settle = page.draft.beginSend('Svar på spørsmålet')
+
+    settle('failed')
+    flush()
+    expect(page.draft.message()).toBe('Halvferdig\n\nSvar på spørsmålet')
+    pause()
+    expect(stored(keyA)).toBe('Halvferdig\n\nSvar på spørsmålet')
+  })
+
+  it('adds a failed send of other text to the stored draft of a thread the person has left', () => {
+    const page = mount('thread-a')
+    type(page, 'Utkast A')
+    const settle = page.draft.beginSend('Svar på spørsmålet')
+    page.go('thread-b')
+
+    settle('failed')
+    flush()
+    expect(page.draft.message()).toBe('')
+    pause()
+    expect(sessionStorage.getItem(keyB)).toBeNull()
+    expect(stored(keyA)).toBe('Utkast A\n\nSvar på spørsmålet')
+
+    page.go('thread-a')
+    flush()
+    expect(page.draft.message()).toBe('Utkast A\n\nSvar på spørsmålet')
+  })
+
+  it('stores a failed send of other text as the draft of a thread the person has left with no draft', () => {
+    const page = mount('thread-a')
+    const settle = page.draft.beginSend('Svar på spørsmålet')
+    page.go('thread-b')
+
+    settle('failed')
+    flush()
+    expect(page.draft.message()).toBe('')
+    pause()
+    expect(sessionStorage.getItem(keyB)).toBeNull()
+    expect(stored(keyA)).toBe('Svar på spørsmålet')
+
+    page.go('thread-a')
+    flush()
+    expect(page.draft.message()).toBe('Svar på spørsmålet')
+  })
+
+  it('never stores a failed send of other text from a Temporary chat the person has left', () => {
+    const page = mount('thread-a', true)
+    const settle = page.draft.beginSend('Svar på spørsmålet')
+    page.go('thread-b')
+
+    settle('failed')
+    flush()
+    expect(page.draft.message()).toBe('')
+    pause()
+    expect(sessionStorage.length).toBe(0)
+  })
 })
