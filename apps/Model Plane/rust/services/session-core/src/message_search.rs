@@ -735,6 +735,56 @@ mod tests {
         assert_eq!(ui_threads, expected, "UI search keeps the post");
     }
 
+    async fn seed_revision(pool: &PgPool, org: &str, thread: &str, message: &str, action: &str) {
+        sqlx::query(
+            "INSERT INTO message_revisions (revision_id, org_id, thread_id, message_id, revision_no,
+                                            action, actor_subject_id, actor_class, content,
+                                            content_digest, prev_content_digest, original_retention,
+                                            idempotency_hash, space_id, recipient_audience_revision,
+                                            authority_revision, resource_authorization_ref)
+             VALUES ($1, $2, $3, $4, 1, $5, 'actor', 'author',
+                     CASE WHEN $5 = 'edited' THEN 'rewritten words' END,
+                     'sha256:new', 'sha256:old', 'retain', $1, 'space-x', 1, 1, 'ref')",
+        )
+        .bind(new_ulid())
+        .bind(org)
+        .bind(thread)
+        .bind(message)
+        .bind(action)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// WS12-S4 behaviour (the source pin above only proves the clause is present): a message an
+    /// edit or a deletion touched is never a hit, while an untouched message with the same words is.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn search_never_returns_an_edited_or_deleted_message() {
+        let pool = connect().await;
+        let suffix = new_ulid();
+        let org = format!("search-revised-{suffix}");
+        let kept = format!("{suffix}-kept");
+        let edited = format!("{suffix}-edited");
+        let deleted = format!("{suffix}-deleted");
+        for thread in [&kept, &edited, &deleted] {
+            seed_thread(&pool, &org, "reviser", thread).await;
+        }
+        seed_message(&pool, &kept, &format!("{suffix}-k"), "revision marker untouched").await;
+        seed_message(&pool, &edited, &format!("{suffix}-e"), "revision marker original").await;
+        seed_message(&pool, &deleted, &format!("{suffix}-d"), "revision marker retracted").await;
+        seed_revision(&pool, &org, &edited, &format!("{suffix}-e"), "edited").await;
+        seed_revision(&pool, &org, &deleted, &format!("{suffix}-d"), "deleted").await;
+
+        let response = service(pool.clone())
+            .search_messages(request(&org, "reviser", "revision marker"))
+            .await
+            .expect("search")
+            .into_inner();
+        let thread_ids: Vec<&str> = response.hits.iter().map(|hit| hit.thread_id.as_str()).collect();
+        assert_eq!(thread_ids, vec![kept.as_str()], "a revised message is never a hit");
+    }
+
     /// The post predicate rides on the recall flag alone: it must stay in the statement and stay
     /// off for UI search (no database needed).
     #[test]
