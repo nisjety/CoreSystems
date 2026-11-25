@@ -2,6 +2,7 @@ import { cleanup, render, screen, waitFor } from '@solidjs/testing-library'
 import { flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { __resetRetentionForTests, applyServerRetention } from '@/features/chat/lib/chat-retention'
 import { clearSpaceRoomFeatures, publishSpaceRoomFeatures } from '../lib/space-room-features'
 
 // WS11-S11: "Remind me" on each post of the room timeline. The control is drawn only while the room's
@@ -63,6 +64,7 @@ beforeEach(() => {
 
 afterEach(() => {
   clearSpaceRoomFeatures()
+  __resetRetentionForTests()
   vi.unstubAllGlobals()
   cleanup()
 })
@@ -102,6 +104,43 @@ describe('SpaceRoomTimeline: the post reminder control (WS11-S11)', () => {
     ))
     await waitFor(() => expect(screen.queryAllByRole('button', { name: REMIND })).toHaveLength(1))
     publishSpaceRoomFeatures({ reminders: false })
+    flush()
+    await waitFor(() => expect(screen.queryAllByRole('button', { name: REMIND })).toHaveLength(0))
+  })
+
+  it('draws no control under zero data retention, even with the flag on, and draws it once that lifts', async () => {
+    applyServerRetention(true)
+    publishSpaceRoomFeatures({ reminders: true })
+    render(() => (
+      <SpaceRoomTimeline
+        spaceRef="room-1"
+        spaceName="Lager"
+        threads={() => [post('t-1', 5)] as never}
+        roster={() => roster as never}
+        agents={() => [agent] as never}
+      />
+    ))
+    flush()
+    expect(screen.queryAllByRole('button', { name: REMIND })).toHaveLength(0)
+
+    applyServerRetention(false)
+    flush()
+    await waitFor(() => expect(screen.queryAllByRole('button', { name: REMIND })).toHaveLength(1))
+  })
+
+  it('takes the control away when the organization turns zero data retention on while it is drawn', async () => {
+    publishSpaceRoomFeatures({ reminders: true })
+    render(() => (
+      <SpaceRoomTimeline
+        spaceRef="room-1"
+        spaceName="Lager"
+        threads={() => [post('t-1', 5)] as never}
+        roster={() => roster as never}
+        agents={() => [agent] as never}
+      />
+    ))
+    await waitFor(() => expect(screen.queryAllByRole('button', { name: REMIND })).toHaveLength(1))
+    applyServerRetention(true)
     flush()
     await waitFor(() => expect(screen.queryAllByRole('button', { name: REMIND })).toHaveLength(0))
   })

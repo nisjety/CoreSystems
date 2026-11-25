@@ -22,6 +22,7 @@ import type {
 import { SpaceRunWorkSummary } from '../SpaceRunCard'
 import { SpaceMessageEdit } from '../SpaceMessageEdit'
 import { SpaceMessageToolbar } from '../SpaceMessageToolbar'
+import { createRemindersOffered } from '../SpaceRemindMenu'
 import { spaceMessageLinkHref } from '../../lib/space-entity-link'
 import { SpaceReactionBar } from '../SpaceReactionBar'
 import type { SpaceTurnLifecycle } from '../../lib/space-message-lifecycle'
@@ -257,6 +258,13 @@ export interface SpaceTurnListProps {
 export function SpaceTurnList(props: SpaceTurnListProps) {
   const i18n = useI18n()
   const fmt = useFormat()
+  const remindersOffered = createRemindersOffered()
+  // WS11-S11: "Remind me" on one message. Offered only where reminders are (the room's flag, and an organization that
+  // keeps data), and only in a list that names its room, thread and message.
+  const remindFor = (turn: TranscriptTurn) =>
+    remindersOffered() && props.spaceRef && props.threadId && turn.messageId
+      ? { spaceRef: props.spaceRef, threadId: props.threadId, messageId: turn.messageId }
+      : undefined
   // Every name that can be mentioned in this room (people and agents), and the reader's own.
   const mentionNames = () => [
     ...props.roster().map((member) => member.display_name),
@@ -429,6 +437,7 @@ export function SpaceTurnList(props: SpaceTurnListProps) {
                   canReact={props.lifecycle?.canReact(turn) === true}
                   reacted={chips().filter((chip) => chip.reacted).map((chip) => chip.emoji)}
                   onReact={(emoji, present) => { void toggleReaction(emoji, present) }}
+                  remind={remindFor(turn)}
                 />
               </Show>
               <Show when={!grouped()}>

@@ -1,6 +1,7 @@
-import { cleanup, render } from '@solidjs/testing-library'
+import { cleanup, render, screen } from '@solidjs/testing-library'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { __resetRetentionForTests, applyServerRetention } from '@/features/chat/lib/chat-retention'
 import { I18nProvider, localeStorageKey } from '@/shared/i18n'
 import { clearSpaceRoomFeatures, publishSpaceRoomFeatures } from '../../lib/space-room-features'
 
@@ -37,6 +38,7 @@ function renderTurns(turns: readonly unknown[], extra: Record<string, unknown> =
 
 afterEach(() => {
   clearSpaceRoomFeatures()
+  __resetRetentionForTests()
   cleanup()
 })
 
@@ -302,5 +304,48 @@ describe('SpaceTurnList: turn times follow the reader’s locale (WS16-S1)', () 
     const marker = document.querySelector('[data-revision-state="edited"]') as HTMLElement
     expect(marker.textContent).toBe('(edited)')
     expect(marker.getAttribute('title')).toMatch(/October 31, 2026.*3:04\s?PM/)
+  })
+})
+
+describe('SpaceTurnList: Remind me on each message (WS11-S11)', () => {
+  // The message toolbar is drawn for a message only with a lifecycle, and nothing here is editable, so
+  // Remind me is the only control on it.
+  const lifecycle = {
+    canEdit: () => false,
+    canDelete: () => false,
+    canReact: () => false,
+    edit: async () => undefined,
+    remove: async () => undefined,
+    react: async () => [],
+  }
+  const turns = [
+    { role: 'user', content: 'Husk levering', authorSubjectId: 'u-ola', messageId: 'm-1' },
+    { role: 'user', content: 'Og lageret', authorSubjectId: 'u-ola', messageId: 'm-2' },
+  ]
+  const inThread = { spaceRef: 'room-1', threadId: 'thread-1', lifecycle }
+
+  it('draws Remind me on each message only while reminders are offered for the room', () => {
+    renderTurns(turns, inThread)
+    expect(screen.queryAllByRole('button', { name: 'Påminn meg' })).toHaveLength(0)
+    cleanup()
+
+    publishSpaceRoomFeatures({ reminders: true })
+    renderTurns(turns, inThread)
+    expect(screen.getAllByRole('button', { name: 'Påminn meg' })).toHaveLength(2)
+  })
+
+  it('draws none under zero data retention, even with the flag on', () => {
+    applyServerRetention(true)
+    publishSpaceRoomFeatures({ reminders: true })
+    renderTurns(turns, inThread)
+    expect(screen.getByText('Og lageret')).toBeTruthy()
+    expect(screen.queryAllByRole('button', { name: 'Påminn meg' })).toHaveLength(0)
+  })
+
+  it('draws none for a message without an id, or in a list that names no thread', () => {
+    publishSpaceRoomFeatures({ reminders: true })
+    renderTurns([{ role: 'user', content: 'Uten id', authorSubjectId: 'u-ola' }], inThread)
+    renderTurns(turns, { spaceRef: 'room-1', lifecycle })
+    expect(screen.queryAllByRole('button', { name: 'Påminn meg' })).toHaveLength(0)
   })
 })

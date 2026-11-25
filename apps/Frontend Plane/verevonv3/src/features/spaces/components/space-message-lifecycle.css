@@ -99,6 +99,29 @@
   white-space: nowrap;
 }
 
+/* WS11-S11: "Remind me" on the toolbar reads as one of its buttons. Its panel opens back over the message, because the
+   toolbar sits at the message's right edge. */
+.verevon-message-toolbar .verevon-space-remind-menu__trigger {
+  min-height: 28px;
+  border: 0;
+  border-radius: 6px;
+  padding: 0 8px;
+  background: transparent;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.verevon-message-toolbar .verevon-space-remind-menu__trigger:hover {
+  background: var(--verevon-surface-soft);
+  color: var(--verevon-text);
+}
+
+.verevon-message-toolbar .verevon-space-remind-menu__panel {
+  inset-inline-start: auto;
+  inset-inline-end: 0;
+}
+
 .verevon-room-turn__edited {
   margin-left: 6px;
   color: var(--verevon-text-muted);

@@ -431,4 +431,30 @@ describe('SpaceThreadPanel: the thread reminder control (WS11-S11)', () => {
     // The menu is drawn; nothing is read for it until it is opened.
     expect(spacesClient.getSpaceThreadTranscript).toHaveBeenCalledTimes(1)
   })
+
+  it('draws no Remind me under zero data retention, even with the flag on', async () => {
+    applyServerRetention(true)
+    spacesClient.getSpaceThreadTranscript.mockResolvedValue({
+      turns: [{ role: 'user', content: 'Husk levering', authorSubjectId: 'user-1' }],
+    })
+    publishSpaceRoomFeatures({ reminders: true })
+    renderPanel()
+    expect(await screen.findByText('Husk levering')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Påminn meg' })).toBeNull()
+  })
+
+  it('takes Remind me away when the workspace turns zero retention on while the thread is open', async () => {
+    spacesClient.getSpaceThreadTranscript.mockResolvedValue({
+      turns: [{ role: 'user', content: 'Husk levering', authorSubjectId: 'user-1' }],
+    })
+    publishSpaceRoomFeatures({ reminders: true })
+    renderPanel()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Påminn meg' })).toBeTruthy())
+
+    applyServerRetention(true)
+    flush()
+    // The pane reads again under the new posture; the control stays away once the turns are back.
+    expect(await screen.findByText('Husk levering')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Påminn meg' })).toBeNull()
+  })
 })

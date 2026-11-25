@@ -1,4 +1,4 @@
-import { createSignal, For, Show } from 'solid-js'
+import { createSignal, For, onCleanup, Show } from 'solid-js'
 
 import { hasErrorCode } from '@/shared/api/http'
 import {
@@ -9,7 +9,9 @@ import {
 } from '@/shared/api/spaces-client'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import { useFormat } from '@/shared/preferences/use-format'
+import { isLocalRetentionAllowed, subscribeLocalRetention } from '@/features/chat/lib/chat-retention'
 import { formatWhenWithTime } from '../lib/space-thread-presentation'
+import { spaceRoomFeature } from '../lib/space-room-features'
 import './space-remind-menu.css'
 
 const MINUTE_MS = 60 * 1000
@@ -35,12 +37,26 @@ const PRESETS: readonly Preset[] = [
 ]
 
 /**
+ * Whether "Remind me" is offered in the room the page shows: the room's `features.reminders` is on, and the
+ * organization keeps data. The second half is the posture the composer hides its durable controls on
+ * (`isLocalRetentionAllowed`), so under Zero Data Retention the control is not drawn rather than drawn and
+ * refused with a typed 412 at the first press. Call it inside a component: the posture is followed while that
+ * component is mounted, so a switch to zero data retention takes the control away at once.
+ */
+export function createRemindersOffered(): () => boolean {
+  const [retention, setRetention] = createSignal(isLocalRetentionAllowed())
+  onCleanup(subscribeLocalRetention((allowed) => setRetention(allowed)))
+  return () => retention() && spaceRoomFeature('reminders')
+}
+
+/**
  * "Remind me" on one post or message of a room (WS11-S11). A reminder is a time and the ids of the
  * post: when it comes due it appears in your own attention inbox, with no note and no text of the
  * message stored. It is yours alone; nobody else sees it. Setting one needs the organization to
  * keep data, so under Zero Data Retention the server refuses with a typed 412 and the menu says so;
- * a pending reminder can always be cancelled. With the gateway flag off (404
- * `space_reminders_disabled`) the control is not rendered at all.
+ * a pending reminder can always be cancelled. The mounts draw it only where `createRemindersOffered`
+ * allows (the room's flag on, and an organization that keeps data), so no dead button shows. The 404
+ * `space_reminders_disabled` still hides it when the gateway flag is off.
  */
 export function SpaceRemindMenu(props: {
   readonly spaceRef: string

@@ -5,6 +5,7 @@ import { useI18n } from '@/shared/i18n'
 import { SPACE_MODERATION_REASONS, SPACE_QUICK_REACTIONS } from '@/shared/api/spaces-client'
 import type { SpaceModerationReason } from '@/shared/api/spaces-client'
 import { SpaceConfirmButton } from './SpaceConfirmButton'
+import { SpaceRemindMenu } from './SpaceRemindMenu'
 import './space-message-lifecycle.css'
 
 /** How many quick reactions the toolbar offers; the full picker stays on the reaction bar. */
@@ -37,6 +38,11 @@ export function SpaceMessageToolbar(props: {
   /** Emoji the viewer already used on this message: pressing one again removes it. */
   readonly reacted?: readonly string[]
   readonly onReact?: (emoji: string, present: boolean) => void
+  /**
+   * "Remind me" on this message (WS11-S11). Given only where reminders are offered (the room's
+   * `features.reminders` on, and an organization that keeps data): absent, no reminder control is drawn.
+   */
+  readonly remind?: { readonly spaceRef: string; readonly threadId: string; readonly messageId: string }
 }) {
   const i18n = useI18n()
   const [copied, setCopied] = createSignal<'ok' | 'failed' | undefined>(undefined)
@@ -49,7 +55,8 @@ export function SpaceMessageToolbar(props: {
 
   const quick = () => SPACE_QUICK_REACTIONS.slice(0, SPACE_TOOLBAR_QUICK_REACTIONS)
   const isReacted = (emoji: string) => props.reacted?.includes(emoji) === true
-  const offered = () => props.canEdit || props.canDelete || Boolean(props.linkHref) || props.canReact === true
+  const offered = () =>
+    props.canEdit || props.canDelete || Boolean(props.linkHref) || props.canReact === true || props.remind !== undefined
 
   const reasonLabel = (value: SpaceModerationReason): string => {
     switch (value) {
@@ -82,6 +89,8 @@ export function SpaceMessageToolbar(props: {
     const target = event.target as HTMLElement
     // A select keeps its own arrow keys.
     if (target.tagName === 'SELECT' && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) return
+    // A text field keeps its own keys: the reminder's date and time is one.
+    if (target.tagName === 'INPUT') return
     const at = Math.max(all.indexOf(target), 0)
     let next: number | undefined
     if (event.key === 'ArrowRight' || event.key === 'ArrowDown') next = (at + 1) % all.length
@@ -152,6 +161,16 @@ export function SpaceMessageToolbar(props: {
             <Link size={14} aria-hidden="true" />
             <span>{i18n.tr('Kopier lenke', 'Copy link')}</span>
           </button>
+        </Show>
+        <Show when={props.remind}>
+          {(remind) => (
+            <SpaceRemindMenu
+              spaceRef={remind().spaceRef}
+              threadId={remind().threadId}
+              messageId={remind().messageId}
+              class="verevon-message-toolbar__remind"
+            />
+          )}
         </Show>
         <Show when={props.canEdit}>
           <button

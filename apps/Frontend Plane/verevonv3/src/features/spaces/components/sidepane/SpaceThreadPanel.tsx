@@ -21,11 +21,10 @@ import { ThreadFollowControl } from '@/features/attention/components/ThreadFollo
 import { ownWindowSignature } from '../../lib/space-history-window'
 import { SpaceHistoryWindowNote } from '../SpaceHistoryWindowNote'
 import { SpaceRestrictedNotice } from '../SpaceRestrictedNotice'
-import { SpaceRemindMenu } from '../SpaceRemindMenu'
+import { createRemindersOffered, SpaceRemindMenu } from '../SpaceRemindMenu'
 import { SpaceTurnList, normalizeTranscriptTurns, resolveAuthorName } from './SpaceTurnList'
 import { createSpaceTurnLifecycle } from '../../lib/space-message-lifecycle'
 import { threadTranscriptEpoch } from '../../lib/space-transcript-epoch'
-import { spaceRoomFeature } from '../../lib/space-room-features'
 import type { TranscriptTurn } from './SpaceTurnList'
 
 /**
@@ -102,6 +101,7 @@ const HIGHLIGHT_MS = 3000
 export function SpaceThreadPanel(props: SpaceThreadPanelProps) {
   const i18n = useI18n()
   const fmt = useFormat()
+  const remindersOffered = createRemindersOffered()
   // Shared reads off: the same answer the timeline gives, so no transcript is asked for and none is drawn.
   const sharedRead = () => props.sharedReadAvailable?.() !== false
   const [read, { refetch, mutate }] = createResource(
@@ -257,8 +257,8 @@ export function SpaceThreadPanel(props: SpaceThreadPanelProps) {
       </Show>
       <Show when={current()?.state === 'ok'}>
         <ThreadFollowControl spaceRef={props.spaceRef} threadId={props.threadId} />
-        {/* WS11-S11: "Remind me" on this thread, drawn only while the room's reminders flag is on. */}
-        <Show when={spaceRoomFeature('reminders')}>
+        {/* WS11-S11: "Remind me" on this thread, drawn only where reminders are offered (the room's flag, and an organization that keeps data). */}
+        <Show when={remindersOffered()}>
           <SpaceRemindMenu spaceRef={props.spaceRef} threadId={props.threadId} />
         </Show>
         <SpaceHistoryWindowNote window={() => props.historyWindow?.()} />

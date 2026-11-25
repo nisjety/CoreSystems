@@ -4,6 +4,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SpaceMessagePolicyHints } from '@/shared/api/spaces-client'
 import { createSpaceTurnLifecycle, type LifecycleTurn } from '../lib/space-message-lifecycle'
 
+// The reminder control's list read is the only network call the toolbar can make; it runs when the control opens.
+const spacesClient = vi.hoisted(() => ({
+  listPendingSpaceReminders: vi.fn(async () => []),
+}))
+vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/shared/api/spaces-client')>()),
+  ...spacesClient,
+}))
+
 const { SpaceMessageToolbar } = await import('./SpaceMessageToolbar')
 
 // No I18nProvider wraps these renders, so the copy is the default Norwegian.
@@ -285,5 +294,33 @@ describe('createSpaceTurnLifecycle remove carries the moderation reason (DEPTH-W
     } finally {
       vi.unstubAllGlobals()
     }
+  })
+})
+
+describe('SpaceMessageToolbar reminder control (WS11-S11)', () => {
+  const REMIND = 'Påminn meg'
+  const remind = { spaceRef: 'room-1', threadId: 'thread-1', messageId: 'm-7' }
+
+  it('offers Remind me on the toolbar of a message when reminders are offered for it', () => {
+    render(() => (
+      <SpaceMessageToolbar canEdit={false} canDelete={false} onEdit={vi.fn()} onDelete={vi.fn()} remind={remind} />
+    ))
+    const toolbar = screen.getByRole('toolbar', { name: 'Meldingshandlinger' })
+    expect(within(toolbar).getByRole('button', { name: REMIND })).toBeTruthy()
+  })
+
+  it('draws no reminder control when none is offered', () => {
+    render(() => <SpaceMessageToolbar canEdit canDelete={false} onEdit={vi.fn()} onDelete={vi.fn()} />)
+    expect(screen.queryByRole('button', { name: REMIND })).toBeNull()
+  })
+
+  it('keeps the arrow keys in the reminder time field, and does not move the toolbar focus', async () => {
+    render(() => (
+      <SpaceMessageToolbar canEdit={false} canDelete={false} onEdit={vi.fn()} onDelete={vi.fn()} remind={remind} />
+    ))
+    fireEvent.click(screen.getByRole('button', { name: REMIND }))
+    const field = await screen.findByLabelText('Velg tidspunkt')
+    // A handled arrow key would be cancelled by the toolbar; a text field's own key is left alone.
+    expect(fireEvent.keyDown(field, { key: 'ArrowRight' })).toBe(true)
   })
 })
