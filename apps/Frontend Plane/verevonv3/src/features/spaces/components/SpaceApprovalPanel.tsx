@@ -13,6 +13,7 @@ import {
   type ApprovalScope,
   type SpaceGrantResult,
 } from '@/shared/api/space-approvals-client'
+import { ApiError } from '@/shared/api/http'
 import { announce } from '@/shared/a11y/announcer'
 import { useI18n } from '@/shared/i18n'
 import { createResource } from '@/shared/lib/create-resource-compat'
@@ -322,6 +323,14 @@ export function SpaceApprovalPanel(props: SpaceApprovalPanelProps) {
           )}
         </p>
       </Show>
+      <Show when={policy.error instanceof ApiError && policy.error.status === 429}>
+        <p class="verevon-room-approval__note" role="status">
+          {i18n.tr(
+            'Bredere godkjenninger er skjult en kort stund fordi det kom for mange forespørsler. Du kan fortsatt godkjenne denne ene gangen.',
+            'Wider approvals are hidden for a moment because there were too many requests. You can still approve this once.',
+          )}
+        </p>
+      </Show>
       <Show when={grant()?.status === 'not_recorded'}>
         <p class="verevon-space-projection-error" role="alert">
           {i18n.tr(
@@ -426,6 +435,12 @@ function outcomeMessage(
       return tr(
         'Du kan ikke avgjøre denne. Den venter på medlemmet som startet kjøringen.',
         'You cannot decide this one. It is waiting for the member who started the run.',
+      )
+    case 'rate_limited':
+      // Refused before anything was sent on, so waiting and trying again cannot double-decide.
+      return tr(
+        'For mange godkjenninger på kort tid. Ingenting ble avgjort; vent et minutt og prøv igjen.',
+        'Too many approvals in a short time. Nothing was decided; wait a minute and try again.',
       )
     case 'unconfirmed':
     default:

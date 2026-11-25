@@ -261,6 +261,11 @@ describe('readSpaceApprovalPolicy', () => {
     vi.stubGlobal('fetch', vi.fn(async () => Promise.reject(new TypeError('network down'))))
     expect(await readSpaceApprovalPolicy('space-1')).toBeUndefined()
   })
+
+  it('throws the typed 429 so the panel can say why always is hidden', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => failure(429, 'rate_limited')))
+    await expect(readSpaceApprovalPolicy('space-1')).rejects.toMatchObject({ status: 429 })
+  })
 })
 
 describe('standing approvals', () => {

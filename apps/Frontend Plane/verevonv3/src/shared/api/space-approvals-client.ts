@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { requestJson } from './http'
+import { ApiError, requestJson } from './http'
 import { normalizeApproval, type Approval } from './orchestration-client'
 
 // WS10-S4: the Space side of an approval decision. The gateway answers (apps/gateway/src/domains/
@@ -193,7 +193,10 @@ export async function readSpaceApprovalPolicy(
       // Only a stated boolean is kept; absent stays absent so the picker does not guess.
       ...(typeof entitled === 'boolean' ? { approvalGrantEntitled: entitled } : {}),
     }
-  } catch {
+  } catch (error) {
+    // The approval rate ceiling is the one failure the panel says out loud, so a hidden `always`
+    // is explained instead of silently missing; it still offers `once` only meanwhile.
+    if (error instanceof ApiError && error.status === 429) throw error
     // Flag off or not readable: the picker offers `once` only, which is always true.
     return undefined
   }

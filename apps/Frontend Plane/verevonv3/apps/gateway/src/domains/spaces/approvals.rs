@@ -66,6 +66,8 @@ const APPROVAL_OPS_PER_MINUTE: f64 = if cfg!(test) { 100_000.0 } else { 30.0 };
 /// fallback when the cache is off). Not an `AppState` field, like the member-ops limiter, so no test
 /// state literal changes.
 static APPROVAL_OPS_LIMITER: OnceLock<RateLimiter> = OnceLock::new();
+#[cfg(test)]
+const TEST_CAPPED_USER_PREFIX: &str = "rate-capped-";
 
 pub(super) fn routes() -> Router<AppState> {
     Router::new()
@@ -154,6 +156,14 @@ async fn approval_ops_allowed(
     org_id: &str,
     user: &AuthenticatedUser,
 ) -> Result<(), Reply> {
+    // Tests lift the shared ceiling, so a user named with this prefix gets a one-call bucket of its
+    // own: that is how the route tests prove every route really asks this function.
+    #[cfg(test)]
+    if user.user_id.starts_with(TEST_CAPPED_USER_PREFIX) {
+        static CAPPED: OnceLock<RateLimiter> = OnceLock::new();
+        let limiter = CAPPED.get_or_init(|| RateLimiter::from_cache_with_rpm(&state.cache, 1.0));
+        return check_approval_ops(limiter, org_id, &user.user_id).await;
+    }
     let limiter = APPROVAL_OPS_LIMITER
         .get_or_init(|| RateLimiter::from_cache_with_rpm(&state.cache, APPROVAL_OPS_PER_MINUTE));
     check_approval_ops(limiter, org_id, &user.user_id).await
@@ -691,7 +701,8 @@ async fn get_approval_policy_route(
     let mut out = Map::new();
     out.insert("policy".to_owned(), policy);
     // Control's entitlement is relayed only as the boolean it states; anything else, or nothing, is
-    // left out, so the picker never offers `always` on a guess.
+    // left out. The picker hides `always` only on a stated `false`; when the field is absent it
+    // keeps offering `always`, and Control's refusal on the rule call stays the backstop.
     if let Some(entitled) = data.get("approval_grant_entitled").and_then(Value::as_bool) {
         out.insert("approval_grant_entitled".to_owned(), json!(entitled));
     }
@@ -1621,6 +1632,73 @@ mod tests {
             assert!(body["data"].get("approval_grant_entitled").is_none());
             assert_eq!(body["data"]["policy"]["max_grant_scope"], "always");
         }
+    }
+
+    /// A member whose own one-call test bucket is already spent (see `approval_ops_allowed`).
+    async fn capped_member(state: &AppState, route: &str) -> AuthenticatedUser {
+        let mut user = member();
+        user.user_id = format!("{}{route}", super::TEST_CAPPED_USER_PREFIX);
+        let org_id = crate::upstream::authorized_org_id(state, &user).await;
+        super::approval_ops_allowed(state, &org_id, &user)
+            .await
+            .expect("the one call in the bucket");
+        user
+    }
+
+    fn assert_rate_limited(status: StatusCode, body: &Value) {
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["error"]["code"], "rate_limited");
+        assert!(body["error"]["details"]["retry_after_seconds"]
+            .as_u64()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn every_approval_route_asks_the_ceiling_before_any_decision_or_control_call() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let server = MockServer::start().await;
+        mount_tokens(&server).await;
+        mount_membership(&server, "manager").await;
+        mount_decide(
+            &server,
+            ResponseTemplate::new(200).set_body_json(json!({ "id": "apr-1", "status": "GRANTED" })),
+        )
+        .await;
+        let state = state_with(&server, true);
+
+        let user = capped_member(&state, "decide").await;
+        let (status, Json(body)) = decide_space_approval(
+            &state,
+            &user,
+            &HeaderMap::new(),
+            SPACE,
+            "apr-1",
+            json!({ "decision": "approve" }),
+        )
+        .await;
+        assert_rate_limited(status, &body);
+
+        let user = capped_member(&state, "list").await;
+        let (status, Json(body)) = list_approval_grants(&state, &user, SPACE).await;
+        assert_rate_limited(status, &body);
+
+        let user = capped_member(&state, "revoke").await;
+        let (status, Json(body)) = revoke_approval_grant(&state, &user, SPACE, "grant-1").await;
+        assert_rate_limited(status, &body);
+
+        let user = capped_member(&state, "policy").await;
+        let (status, Json(body)) = get_approval_policy_route(
+            State(state.clone()),
+            Extension(user),
+            Path(SPACE.to_owned()),
+        )
+        .await;
+        assert_rate_limited(status, &body);
+
+        // Refused before the decision, the membership read and every Control call.
+        assert_eq!(requests_to(&server, "/decide").await, 0);
+        assert_eq!(requests_to(&server, "/membership").await, 0);
+        assert_eq!(requests_to(&server, "approval-").await, 0);
     }
 }
 

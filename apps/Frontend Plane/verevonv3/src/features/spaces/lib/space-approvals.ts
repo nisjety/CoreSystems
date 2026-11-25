@@ -49,6 +49,9 @@ export type ApprovalOutcome =
   | 'already_decided'
   /** The caller may not decide this one. Expected in a shared room. */
   | 'refused'
+  /** The gateway's approval rate ceiling answered 429 before any upstream call, so nothing was
+   *  decided and the same decision can simply be sent again after a short wait. */
+  | 'rate_limited'
   /** We could not confirm either way. Deliberately distinct from a failure:
    *  the decision may well have landed, so the UI must not invite a blind retry
    *  that could double-decide. */
@@ -79,6 +82,10 @@ export function describeApproval(
 
 function isRefusal(error: unknown): boolean {
   return error instanceof ApiError && (error.status === 403 || error.status === 404)
+}
+
+function isRateLimited(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 429
 }
 
 function isAlreadyDecided(error: unknown): boolean {
@@ -151,6 +158,8 @@ export async function settleApproval(input: {
   } catch (error) {
     if (isRefusal(error)) return 'refused'
     if (isAlreadyDecided(error)) return 'already_decided'
+    // The ceiling refuses before the decision call, so there is nothing to re-read.
+    if (isRateLimited(error)) return 'rate_limited'
     const fresh = await listApprovals(input.runId, input.signal).catch(() => null)
     if (fresh === null) return 'unconfirmed'
     const match = fresh.find((approval) => approval.id === input.approvalId)

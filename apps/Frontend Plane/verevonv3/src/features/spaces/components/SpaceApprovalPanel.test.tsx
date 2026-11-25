@@ -150,6 +150,11 @@ describe('SpaceApprovalPanel: what approving does (WS10-S1)', () => {
     ['already_decided', 'Denne var allerede avgjort — sannsynligvis av noen andre.', 'status'],
     ['refused', 'Du kan ikke avgjøre denne. Den venter på medlemmet som startet kjøringen.', 'status'],
     [
+      'rate_limited',
+      'For mange godkjenninger på kort tid. Ingenting ble avgjort; vent et minutt og prøv igjen.',
+      'status',
+    ],
+    [
       'unconfirmed',
       'Vi fikk ikke bekreftet om avgjørelsen ble registrert. Sjekk statusen før du prøver igjen.',
       'alert',
@@ -263,5 +268,50 @@ describe('SpaceApprovalPanel: held tool output (WS10-S8)', () => {
     render(() => <SpaceApprovalPanel runId="run-1" />)
     fireEvent.click(await screen.findByRole('button', { name: 'Vis en ren tekstforhåndsvisning' }))
     expect(await screen.findByText('Ingen forhåndsvisning er tilgjengelig for deg.')).toBeTruthy()
+  })
+})
+
+// WS10-S4: the scope picker reads Control's policy through the gateway. A stated `false`
+// entitlement hides `always` without a refusal, and a 429 on the policy read is said out loud.
+describe('SpaceApprovalPanel: approval policy (WS10-S4)', () => {
+  const mcpApproval = { id: 'ap-1', detail: 'Open the issue', toolKey: 'mcp__github__create_issue' }
+
+  function policyAnswer(status: number, body: unknown) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(JSON.stringify(body), { headers: { 'Content-Type': 'application/json' }, status }),
+      ),
+    )
+  }
+
+  afterEach(() => vi.unstubAllGlobals())
+
+  it.each([
+    [true, 1],
+    [false, 0],
+  ] as const)('with the entitlement stated %s it draws %i always option', async (entitled, count) => {
+    approvals.readPendingApprovals.mockResolvedValue({ approvals: [mcpApproval], refused: false })
+    policyAnswer(200, { data: { policy: { max_grant_scope: 'always' }, approval_grant_entitled: entitled } })
+    render(() => <SpaceApprovalPanel runId="run-1" spaceRef="space-1" viewerRole="manager" />)
+
+    await screen.findByText('Open the issue')
+    await waitFor(() => expect(fetch).toHaveBeenCalled())
+    if (count === 1) {
+      expect(await screen.findByRole('radio', { name: /Alltid/ })).toBeTruthy()
+    } else {
+      await new Promise((resolve) => setTimeout(resolve, 30))
+      expect(screen.queryByRole('radio', { name: /Alltid/ })).toBeNull()
+    }
+  })
+
+  it('says why wider approvals are hidden when the policy read is rate limited', async () => {
+    approvals.readPendingApprovals.mockResolvedValue({ approvals: [mcpApproval], refused: false })
+    policyAnswer(429, { error: { code: 'rate_limited', message: 'slow down', details: { retry_after_seconds: 20 } } })
+    render(() => <SpaceApprovalPanel runId="run-1" spaceRef="space-1" viewerRole="manager" />)
+
+    expect(await screen.findByText(/Bredere godkjenninger er skjult en kort stund/)).toBeTruthy()
+    expect(screen.queryByRole('radio', { name: /Alltid/ })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Godkjenn' })).toBeTruthy()
   })
 })

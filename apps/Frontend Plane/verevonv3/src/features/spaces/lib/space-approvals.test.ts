@@ -270,6 +270,19 @@ describe('settleApproval inside a Space', () => {
     expect(onGrant).not.toHaveBeenCalled()
   })
 
+  it('maps the 429 ceiling to rate_limited without re-reading or touching the run', async () => {
+    spaceClient.decideSpaceApproval.mockRejectedValue(new ApiError('slow down', 429, 'rate_limited'))
+    const outcome = await settleApproval({
+      approvalId: 'ap-1',
+      runId: 'run-1',
+      decision: 'reject',
+      spaceRef: 'space-1',
+    })
+    expect(outcome).toBe('rate_limited')
+    expect(orchestration.listApprovals).not.toHaveBeenCalled()
+    expect(orchestration.cancelRun).not.toHaveBeenCalled()
+  })
+
   it.each([403, 404])('maps %i to refused without re-reading', async (status) => {
     spaceClient.decideSpaceApproval.mockRejectedValue(new ApiError('nope', status, 'approval_not_addressed_to_you'))
     const outcome = await settleApproval({
