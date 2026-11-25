@@ -1,8 +1,10 @@
-//! WS04-S6: action dispatchers for the room member writer (`spaces.change_member_role`,
-//! `spaces.leave_room`). Both ride the same gateway functions as the member routes in
-//! `domains/spaces/room_admin.rs`, so the flag, the Control delegation and the typed error
-//! pass-through exist once. Neither id is model-executable. The caller-supplied idempotency key
-//! is forwarded unchanged so a retried action replays instead of re-applying.
+//! WS04 room-admin action dispatchers: the member writer (WS04-S6 `spaces.change_member_role`,
+//! `spaces.leave_room`), room details and settings (`spaces.update_room_details`,
+//! `spaces.join_room`, `spaces.update_room_settings`) and archive (WS04-S7
+//! `spaces.archive_room`, `spaces.unarchive_room`). Each rides the same gateway function as its
+//! route in `domains/spaces/room_admin.rs`, so the flag, the Control delegation and the typed
+//! error pass-through exist once. No id here is model-executable. The caller-supplied idempotency
+//! key is forwarded unchanged so a retried action replays instead of re-applying.
 
 use axum::response::Response;
 use serde_json::{json, Map, Value};

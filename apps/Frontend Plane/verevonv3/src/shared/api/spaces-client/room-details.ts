@@ -35,12 +35,11 @@ export async function updateSpaceRoomDetails(
   }
 }
 
-// Archive and unarchive a room. `POST /api/v1/spaces/{space_ref}/archive` and `/unarchive`
-// answer 404 `feature_disabled` with the gateway flag off, 403 `room_role_forbidden`, 404
-// `room_not_found`, 409 `room_archived` / `room_not_archivable` (the organization room) /
-// `room_state_conflict` / `room_personal_space`, 429 `rate_limited` (with
-// `details.retry_after_seconds`) and 503 `room_admin_unavailable` (nothing was changed). They
-// arrive as an ApiError carrying the code.
+// WS04-S7: archive and unarchive run through the `spaces.archive_room` / `spaces.unarchive_room` action contract
+// (shared/actions/domains/spaces/ws04.ts, features/spaces/lib/space-room-archive.ts), not a direct route call. The
+// gateway's `data` is `{state, changed, archived_at}`; refusals (`room_role_forbidden`, `room_archived`,
+// `room_not_archivable`, `room_state_conflict`, `room_personal_space`, `rate_limited`, `room_admin_unavailable`)
+// arrive as the action's typed error.
 export type SpaceRoomArchiveResult = {
   /** The room's state after the call. */
   state: 'archived' | 'active'
@@ -48,39 +47,6 @@ export type SpaceRoomArchiveResult = {
   changed: boolean
   /** When the room was archived, as the server's string; `null` once unarchived. */
   archivedAt: string | null
-}
-
-async function postRoomArchive(
-  spaceRef: string,
-  action: 'archive' | 'unarchive',
-  idempotencyKey?: string,
-): Promise<SpaceRoomArchiveResult> {
-  // An empty body is fine; a key is the only field the route reads.
-  const response = await requestJson<{ state?: string; changed?: boolean; archived_at?: string | null }>(
-    `/api/v1/spaces/${encodeURIComponent(spaceRef)}/${action}`,
-    {
-      method: 'POST',
-      ...(idempotencyKey ? { body: JSON.stringify({ idempotency_key: idempotencyKey }) } : {}),
-    },
-  )
-  const state = response.state === 'archived' || response.state === 'active'
-    ? response.state
-    : action === 'archive' ? 'archived' : 'active'
-  return {
-    state,
-    changed: response.changed === true,
-    archivedAt: typeof response.archived_at === 'string' && response.archived_at !== '' ? response.archived_at : null,
-  }
-}
-
-/** Archive a room (owner or manager). The room stays readable; writes are refused until it is unarchived. */
-export function archiveSpaceRoom(spaceRef: string, options: { readonly idempotencyKey?: string } = {}) {
-  return postRoomArchive(spaceRef, 'archive', options.idempotencyKey)
-}
-
-/** Bring an archived room back (owner or manager). */
-export function unarchiveSpaceRoom(spaceRef: string, options: { readonly idempotencyKey?: string } = {}) {
-  return postRoomArchive(spaceRef, 'unarchive', options.idempotencyKey)
 }
 
 const INVALID_ROOM_ARCHIVE_REPLY = 'invalid_room_archive_response'

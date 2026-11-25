@@ -94,7 +94,9 @@ const spaceUpdateRoomSettingsOutput = z.object({
 })
 
 // WS04-S7: archive and restore. Control (user-core `internal/spaces`) owns the archive state and the role rule, and
-// refuses the organization room and personal Spaces; the gateway proxies Control's decision
+// refuses personal Spaces and (once its row is org_derived) the organization room; the gateway refuses the
+// organization room first on Application's `isOrganizationRoom` marker (room_admin.rs `refuse_organization_room`,
+// it can only refuse, never grant) and otherwise proxies Control's decision
 // (domains/spaces/room_admin.rs `set_room_archived`, dispatchers_spaces/ws04.rs). An archived room stays readable and
 // takes no new writes. Neither id is model-executable (model-access.ts closes both): closing a room is a person's call.
 const spaceRoomArchiveInput = z.object({
