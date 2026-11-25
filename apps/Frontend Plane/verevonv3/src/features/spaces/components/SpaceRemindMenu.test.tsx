@@ -1,8 +1,9 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@solidjs/testing-library'
-import { flush } from 'solid-js'
+import { flush, Show } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ApiError } from '@/shared/api/http'
+import { clearSpaceRoomFeatures, publishSpaceRoomFeatures } from '../lib/space-room-features'
 
 const spacesClient = vi.hoisted(() => ({
   createSpaceReminder: vi.fn(),
@@ -14,7 +15,9 @@ vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
   ...spacesClient,
 }))
 
-const { SpaceRemindMenu } = await import('./SpaceRemindMenu')
+const { createRemindersOffered, remindersZdrRefused, resetRemindersZdrRefusals, SpaceRemindMenu } = await import(
+  './SpaceRemindMenu'
+)
 
 const MINUTE = 60 * 1000
 const HOUR = 60 * MINUTE
@@ -57,6 +60,8 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  resetRemindersZdrRefusals()
+  clearSpaceRoomFeatures()
   vi.useRealTimers()
 })
 
@@ -91,6 +96,76 @@ describe('SpaceRemindMenu (WS11-S11)', () => {
     // No re-read after the refusal: the list is still the one the menu opened with.
     expect(spacesClient.listPendingSpaceReminders).toHaveBeenCalledTimes(1)
     expect(window.localStorage.length).toBe(0)
+  })
+
+  it('after a ZDR refusal setting is disabled, and closing the panel takes the control away in that room only', async () => {
+    spacesClient.createSpaceReminder.mockRejectedValue(new ApiError('Refused.', 412, 'zdr_durable_mutation_forbidden'))
+    // Two gated mounts in the refused room and one in another room, as the timeline and the thread pane draw them.
+    function Gated(props: { readonly spaceRef: string; readonly messageId: string }) {
+      const offered = createRemindersOffered()
+      return (
+        <Show when={offered(props.spaceRef)}>
+          <div data-testid={`${props.spaceRef}-${props.messageId}`}>
+            <SpaceRemindMenu spaceRef={props.spaceRef} threadId={POST.threadId} messageId={props.messageId} />
+          </div>
+        </Show>
+      )
+    }
+    publishSpaceRoomFeatures({ reminders: true })
+    render(() => (
+      <>
+        <Gated spaceRef="space-a" messageId="m-1" />
+        <Gated spaceRef="space-a" messageId="m-2" />
+        <Gated spaceRef="space-b" messageId="m-3" />
+      </>
+    ))
+    const first = screen.getByTestId('space-a-m-1')
+    fireEvent.click(within(first).getByRole('button', { name: 'Påminn meg' }))
+    flush()
+    await settle()
+    fireEvent.click(within(first).getByRole('button', { name: 'Om 1 time' }))
+    flush()
+    await within(first).findByRole('alert')
+    // The reason stays readable, and no second press reaches the server.
+    expect((within(first).getByRole('button', { name: 'Om 20 minutter' }) as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.click(within(first).getByRole('button', { name: 'Om 20 minutter' }))
+    expect(spacesClient.createSpaceReminder).toHaveBeenCalledTimes(1)
+    expect(screen.getByTestId('space-a-m-2')).toBeTruthy()
+    expect(remindersZdrRefused('space-a')).toBe(false)
+
+    fireEvent.click(within(first).getByRole('button', { name: 'Påminn meg' }))
+    flush()
+    expect(remindersZdrRefused('space-a')).toBe(true)
+    expect(screen.queryByTestId('space-a-m-1')).toBeNull()
+    expect(screen.queryByTestId('space-a-m-2')).toBeNull()
+    expect(within(screen.getByTestId('space-b-m-3')).getByRole('button', { name: 'Påminn meg' })).toBeTruthy()
+  })
+
+  it('a refusal learned while the panel is open still applies when the control unmounts', async () => {
+    spacesClient.createSpaceReminder.mockRejectedValue(new ApiError('Refused.', 412, 'zdr_durable_mutation_forbidden'))
+    const view = renderMenu()
+    await openMenu()
+    fireEvent.click(screen.getByRole('button', { name: 'Om 1 time' }))
+    flush()
+    await screen.findByRole('alert')
+    view.unmount()
+    flush()
+    expect(remindersZdrRefused(POST.spaceRef)).toBe(true)
+  })
+
+  it('gives each mount its own time field id, so two open panels for one thread do not share a label', async () => {
+    render(() => (
+      <>
+        <SpaceRemindMenu spaceRef={POST.spaceRef} threadId={POST.threadId} />
+        <SpaceRemindMenu spaceRef={POST.spaceRef} threadId={POST.threadId} />
+      </>
+    ))
+    for (const trigger of screen.getAllByRole('button', { name: 'Påminn meg' })) fireEvent.click(trigger)
+    flush()
+    await settle()
+    const fields = screen.getAllByLabelText('Velg tidspunkt')
+    expect(fields).toHaveLength(2)
+    expect(fields[0]?.id).not.toBe(fields[1]?.id)
   })
 
   it('shows the too-many and the invalid-time messages for 429 and 400', async () => {

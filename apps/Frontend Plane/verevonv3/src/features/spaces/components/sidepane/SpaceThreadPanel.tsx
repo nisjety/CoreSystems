@@ -258,7 +258,7 @@ export function SpaceThreadPanel(props: SpaceThreadPanelProps) {
       <Show when={current()?.state === 'ok'}>
         <ThreadFollowControl spaceRef={props.spaceRef} threadId={props.threadId} />
         {/* WS11-S11: "Remind me" on this thread, drawn only where reminders are offered (the room's flag, and an organization that keeps data). */}
-        <Show when={remindersOffered()}>
+        <Show when={remindersOffered(props.spaceRef)}>
           <SpaceRemindMenu spaceRef={props.spaceRef} threadId={props.threadId} />
         </Show>
         <SpaceHistoryWindowNote window={() => props.historyWindow?.()} />

@@ -1303,7 +1303,7 @@ function SpaceRoomPost(props: {
         </Show>
         {/* WS11-S11: "Remind me" on this post, drawn only where reminders are offered (the room's flag, and an
             organization that keeps data). The menu itself reads nothing until it is opened. Personal: the post is not changed. */}
-        <Show when={remindersOffered()}>
+        <Show when={remindersOffered(props.spaceRef)}>
           <SpaceRemindMenu spaceRef={props.spaceRef} threadId={props.thread.thread_id} />
         </Show>
         <Show when={isAuthor()}>

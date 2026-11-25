@@ -1,4 +1,4 @@
-import { createSignal, For, onCleanup, Show } from 'solid-js'
+import { createSignal, createUniqueId, For, onCleanup, Show } from 'solid-js'
 
 import { hasErrorCode } from '@/shared/api/http'
 import {
@@ -37,16 +37,44 @@ const PRESETS: readonly Preset[] = [
 ]
 
 /**
- * Whether "Remind me" is offered in the room the page shows: the room's `features.reminders` is on, and the
- * organization keeps data. The second half is the posture the composer hides its durable controls on
- * (`isLocalRetentionAllowed`), so under Zero Data Retention the control is not drawn rather than drawn and
- * refused with a typed 412 at the first press. Call it inside a component: the posture is followed while that
- * component is mounted, so a switch to zero data retention takes the control away at once.
+ * Rooms where the server refused a reminder with the typed `zdr_durable_mutation_forbidden` during this page
+ * session. The SPA's posture (`isLocalRetentionAllowed`) defaults to allowed until a chat listing states it, and
+ * stays allowed when that listing fails, so a Zero Data Retention organization can still be shown the control.
+ * The first refusal is the server's own verdict: from then on the room draws no reminder control, the same way
+ * the composer hides its durable controls after a learned refusal. It lives for the page session only and is
+ * never an authorization input; the gateway refuses every set under ZDR regardless.
  */
-export function createRemindersOffered(): () => boolean {
+const [refusedRooms, setRefusedRooms] = createSignal<ReadonlySet<string>>(new Set())
+
+/** Record the server's ZDR refusal for one room: every reminder control in that room is taken away. */
+export function markRemindersZdrRefused(spaceRef: string): void {
+  // Functional update: a write is applied at the next flush, so two marks before it must not lose one.
+  setRefusedRooms((rooms) => (rooms.has(spaceRef) ? rooms : new Set([...rooms, spaceRef])))
+}
+
+/** Whether the server refused a reminder in this room for zero data retention (this page session). */
+export function remindersZdrRefused(spaceRef: string): boolean {
+  return refusedRooms().has(spaceRef)
+}
+
+/** Tests only: forget every learned refusal. */
+export function resetRemindersZdrRefusals(): void {
+  setRefusedRooms(new Set<string>())
+}
+
+/**
+ * Whether "Remind me" is offered in a room: the room's `features.reminders` is on, the organization keeps data,
+ * and the server has not refused a reminder in that room for zero data retention. The second half is the posture
+ * the composer hides its durable controls on (`isLocalRetentionAllowed`), so under Zero Data Retention the control
+ * is not drawn rather than drawn and refused with a typed 412. The third half covers the time before that posture
+ * is known (or when its listing fails): after one refusal the room stops drawing the control. Call it inside a
+ * component: the posture is followed while that component is mounted, so a switch to zero data retention takes
+ * the control away at once.
+ */
+export function createRemindersOffered(): (spaceRef: string) => boolean {
   const [retention, setRetention] = createSignal(isLocalRetentionAllowed())
   onCleanup(subscribeLocalRetention((allowed) => setRetention(allowed)))
-  return () => retention() && spaceRoomFeature('reminders')
+  return (spaceRef) => retention() && !remindersZdrRefused(spaceRef) && spaceRoomFeature('reminders')
 }
 
 /**
@@ -55,8 +83,10 @@ export function createRemindersOffered(): () => boolean {
  * message stored. It is yours alone; nobody else sees it. Setting one needs the organization to
  * keep data, so under Zero Data Retention the server refuses with a typed 412 and the menu says so;
  * a pending reminder can always be cancelled. The mounts draw it only where `createRemindersOffered`
- * allows (the room's flag on, and an organization that keeps data), so no dead button shows. The 404
- * `space_reminders_disabled` still hides it when the gateway flag is off.
+ * allows (the room's flag on, and an organization that keeps data). While that posture is not yet known the
+ * control can show; the first typed ZDR refusal disables setting here, says why, and when the panel closes the
+ * room stops drawing the control (`markRemindersZdrRefused`). The 404 `space_reminders_disabled` still hides it
+ * when the gateway flag is off.
  */
 export function SpaceRemindMenu(props: {
   readonly spaceRef: string
@@ -73,8 +103,16 @@ export function SpaceRemindMenu(props: {
   const [busy, setBusy] = createSignal(false)
   const [message, setMessage] = createSignal('')
   const [error, setError] = createSignal('')
+  // The server refused for zero data retention: setting is off here, and the room learns it when the panel closes.
+  const [zdrRefused, setZdrRefused] = createSignal(false)
+  // Take the control away room-wide once the person has read why (closing the panel), or when this mount goes.
+  const learnRefusal = () => {
+    if (zdrRefused()) markRemindersZdrRefused(props.spaceRef)
+  }
+  onCleanup(learnRefusal)
 
-  const inputId = () => `space-remind-at-${props.threadId}-${props.messageId ?? 'thread'}`
+  // Unique per mount: the thread pane and the timeline post for the same thread can be open together.
+  const inputId = `space-remind-at-${createUniqueId()}`
 
   /** The caller's pending reminders for exactly this post. */
   const mine = () =>
@@ -102,10 +140,11 @@ export function SpaceRemindMenu(props: {
     setError('')
     setMessage('')
     if (next) void refresh()
+    else learnRefusal()
   }
 
   const remindAt = async (at: number) => {
-    if (busy()) return
+    if (busy() || zdrRefused()) return
     setBusy(true)
     setError('')
     setMessage('')
@@ -122,6 +161,7 @@ export function SpaceRemindMenu(props: {
       if (hasErrorCode(err, 'space_reminders_disabled')) {
         setAvailable(false)
       } else if (hasErrorCode(err, 'zdr_durable_mutation_forbidden')) {
+        setZdrRefused(true)
         setError(
           i18n.tr(
             'Organisasjonen lagrer ikke innhold, så påminnelser er ikke tilgjengelige.',
@@ -219,7 +259,7 @@ export function SpaceRemindMenu(props: {
                     <button
                       type="button"
                       class="verevon-space-remind-menu__preset"
-                      disabled={busy()}
+                      disabled={busy() || zdrRefused()}
                       onClick={() => void remindAt(preset.at(Date.now()))}
                     >
                       {i18n.tr(preset.no, preset.en)}
@@ -229,14 +269,14 @@ export function SpaceRemindMenu(props: {
               </For>
             </ul>
             <form class="verevon-space-remind-menu__custom" onSubmit={submitCustom}>
-              <label for={inputId()}>{i18n.tr('Velg tidspunkt', 'Pick a time')}</label>
+              <label for={inputId}>{i18n.tr('Velg tidspunkt', 'Pick a time')}</label>
               <input
-                id={inputId()}
+                id={inputId}
                 type="datetime-local"
                 value={custom()}
                 onInput={(event) => setCustom(event.currentTarget.value)}
               />
-              <button type="submit" class="verevon-space-remind-menu__preset" disabled={busy() || custom() === ''}>
+              <button type="submit" class="verevon-space-remind-menu__preset" disabled={busy() || zdrRefused() || custom() === ''}>
                 {i18n.tr('Sett', 'Set')}
               </button>
             </form>

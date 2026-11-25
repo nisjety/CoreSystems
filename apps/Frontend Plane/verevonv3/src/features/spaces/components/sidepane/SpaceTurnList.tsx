@@ -262,7 +262,7 @@ export function SpaceTurnList(props: SpaceTurnListProps) {
   // WS11-S11: "Remind me" on one message. Offered only where reminders are (the room's flag, and an organization that
   // keeps data), and only in a list that names its room, thread and message.
   const remindFor = (turn: TranscriptTurn) =>
-    remindersOffered() && props.spaceRef && props.threadId && turn.messageId
+    props.spaceRef && remindersOffered(props.spaceRef) && props.threadId && turn.messageId
       ? { spaceRef: props.spaceRef, threadId: props.threadId, messageId: turn.messageId }
       : undefined
   // Every name that can be mentioned in this room (people and agents), and the reader's own.

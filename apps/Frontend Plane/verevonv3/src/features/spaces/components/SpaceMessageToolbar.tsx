@@ -73,20 +73,39 @@ export function SpaceMessageToolbar(props: {
     }
   }
 
+  // The open reminder panel sits inside the toolbar but is not part of its roving ring: its presets, time
+  // field and Set/Cancel keep their own Tab order, and the ring's stop while focus is there is the Remind me trigger.
+  const REMIND_PANEL = '.verevon-space-remind-menu__panel'
+  const inRemindPanel = (element: Element | null | undefined) => Boolean(element?.closest(REMIND_PANEL))
   // Roving tabindex: exactly one control is in the Tab order.
   const items = (): HTMLElement[] =>
     container
-      ? Array.from(container.querySelectorAll<HTMLElement>('button:not([disabled]), select:not([disabled])'))
+      ? Array.from(
+          container.querySelectorAll<HTMLElement>('button:not([disabled]), select:not([disabled])'),
+        ).filter((item) => !inRemindPanel(item))
       : []
   const rove = (active: HTMLElement | undefined) => {
     const all = items()
     const current = active && all.includes(active) ? active : all[0]
     for (const item of all) item.tabIndex = item === current ? 0 : -1
   }
+  const onFocusIn = (event: FocusEvent) => {
+    const target = event.target as HTMLElement
+    if (inRemindPanel(target)) {
+      const trigger = target
+        .closest('.verevon-space-remind-menu')
+        ?.querySelector<HTMLElement>('.verevon-space-remind-menu__trigger')
+      rove(trigger ?? undefined)
+      return
+    }
+    rove(target)
+  }
   const onKeyDown = (event: KeyboardEvent) => {
     const all = items()
     if (all.length === 0) return
     const target = event.target as HTMLElement
+    // The reminder panel keeps its own keys.
+    if (inRemindPanel(target)) return
     // A select keeps its own arrow keys.
     if (target.tagName === 'SELECT' && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) return
     // A text field keeps its own keys: the reminder's date and time is one.
@@ -130,7 +149,7 @@ export function SpaceMessageToolbar(props: {
         role="toolbar"
         aria-label={i18n.tr('Meldingshandlinger', 'Message actions')}
         onKeyDown={onKeyDown}
-        onFocusIn={(event) => rove(event.target as HTMLElement)}
+        onFocusIn={onFocusIn}
       >
         <Show when={props.canReact && props.onReact}>
           <For each={quick()}>

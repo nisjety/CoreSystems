@@ -314,7 +314,7 @@ describe('SpaceMessageToolbar reminder control (WS11-S11)', () => {
     expect(screen.queryByRole('button', { name: REMIND })).toBeNull()
   })
 
-  it('keeps the arrow keys in the reminder time field, and does not move the toolbar focus', async () => {
+  it('leaves the arrow keys to the reminder time field (the toolbar does not cancel them)', async () => {
     render(() => (
       <SpaceMessageToolbar canEdit={false} canDelete={false} onEdit={vi.fn()} onDelete={vi.fn()} remind={remind} />
     ))
@@ -322,5 +322,40 @@ describe('SpaceMessageToolbar reminder control (WS11-S11)', () => {
     const field = await screen.findByLabelText('Velg tidspunkt')
     // A handled arrow key would be cancelled by the toolbar; a text field's own key is left alone.
     expect(fireEvent.keyDown(field, { key: 'ArrowRight' })).toBe(true)
+  })
+
+  it('keeps the open reminder panel out of the roving ring: arrows skip it and its buttons keep their Tab stops', async () => {
+    render(() => (
+      <SpaceMessageToolbar
+        canEdit
+        canDelete={false}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        linkHref="/spaces/room-1?thread=thread-1&message=m-7"
+        remind={remind}
+      />
+    ))
+    const trigger = screen.getByRole('button', { name: REMIND })
+    fireEvent.click(trigger)
+    const preset = await screen.findByRole('button', { name: 'Om 20 minutter' })
+    const copy = screen.getByRole('button', { name: 'Kopier lenke' })
+    const edit = screen.getByRole('button', { name: 'Rediger' })
+
+    // The ring is Copy link, Remind me, Edit: the panel's presets, Set and Cancel are not in it.
+    copy.focus()
+    fireEvent.keyDown(copy, { key: 'ArrowRight' })
+    expect(document.activeElement).toBe(trigger)
+    fireEvent.keyDown(trigger, { key: 'ArrowRight' })
+    expect(document.activeElement).toBe(edit)
+
+    // Focus inside the panel makes Remind me the ring's stop and leaves the panel's own buttons tabbable.
+    preset.focus()
+    expect(preset.tabIndex).toBe(0)
+    expect(trigger.tabIndex).toBe(0)
+    expect(copy.tabIndex).toBe(-1)
+    expect(edit.tabIndex).toBe(-1)
+    // An arrow key inside the panel is not taken by the toolbar.
+    expect(fireEvent.keyDown(preset, { key: 'ArrowRight' })).toBe(true)
+    expect(document.activeElement).toBe(preset)
   })
 })
