@@ -186,6 +186,12 @@ func TestShareControlErrorPassesThroughControlsShareLimitRefusal(t *testing.T) {
 		t.Fatalf("share limit: %d %v", rec.Code, body)
 	}
 	rec = httptest.NewRecorder()
+	writeShareControlError(rec, &userauthz.StatusError{Status: http.StatusPreconditionFailed, Code: "zdr_durable_mutation_forbidden"}, "grant")
+	zdrBody, _ := decodeError(t, rec)["error"].(map[string]any)
+	if rec.Code != http.StatusPreconditionFailed || zdrBody["code"] != "zdr_durable_mutation_forbidden" {
+		t.Fatalf("control ZDR refusal: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
 	writeShareControlError(rec, &userauthz.StatusError{Status: http.StatusConflict, Code: "something_else"}, "grant")
 	if rec.Code != http.StatusServiceUnavailable || decodeError(t, rec)["code"] != "sharing_unavailable" {
 		t.Fatalf("other conflict: %d %s", rec.Code, rec.Body.String())

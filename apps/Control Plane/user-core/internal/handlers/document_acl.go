@@ -49,6 +49,9 @@ func (h *DocumentAclHandler) GrantDocumentAccess(
 	}
 
 	if err := h.aclRepo.Create(ctx, &acl); err != nil {
+		if errors.Is(err, users.ErrShareLimitReached) {
+			return nil, status.Error(codes.ResourceExhausted, "share_limit_reached")
+		}
 		// ❌ fatal
 		return nil, status.Errorf(codes.Internal, "failed to create acl: %v", err)
 	}

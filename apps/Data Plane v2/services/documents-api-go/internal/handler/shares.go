@@ -34,6 +34,8 @@ import (
 // are never removable here (the room-file delete path owns them).
 
 const (
+	// maxSharesPerDocument mirrors Control's users.DocumentUserGrantCap, which
+	// is what enforces it; change the two together.
 	maxSharesPerDocument = 200
 	maxShareBodyBytes    = 4 << 10
 	maxSubjectIDLen      = 200
@@ -133,7 +135,8 @@ func (h *DocumentHandler) shareOwner(w http.ResponseWriter, r *http.Request, wri
 
 // writeShareControlError maps a Control failure. Control's 409
 // share_limit_reached (the cap, enforced with the insert) is passed through with
-// the limit in details. A 400 is the actor's mistake
+// the limit in details, and Control's 412 ZDR refusal is passed through as the
+// typed ZDR refusal. A 400 is the actor's mistake
 // and keeps Control's code; a 403 or 404 means the owner-asserted mode is not
 // open (rollout order) and is reported as unavailable, never as permission.
 func writeShareControlError(w http.ResponseWriter, err error, operation string) {
@@ -141,6 +144,11 @@ func writeShareControlError(w http.ResponseWriter, err error, operation string) 
 	if errors.As(err, &statusErr) && statusErr.Status == http.StatusConflict && statusErr.Code == "share_limit_reached" {
 		writeCodedError(w, http.StatusConflict, "share_limit_reached", "this document has reached its share limit",
 			map[string]any{"max_shares": maxSharesPerDocument})
+		return
+	}
+	if errors.As(err, &statusErr) && statusErr.Status == http.StatusPreconditionFailed && statusErr.Code == zdrDurableMutationCode {
+		// Control's own org ZDR attestation refused the grant.
+		writeZDRDurableMutationRefusal(w, "control_org_zero_data_retention")
 		return
 	}
 	if errors.As(err, &statusErr) && statusErr.Status == http.StatusBadRequest {

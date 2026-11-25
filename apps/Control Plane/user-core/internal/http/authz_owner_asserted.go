@@ -167,6 +167,18 @@ func (s *Server) applyOwnerAssertedGrantRules(c *gin.Context, resourceType, subj
 		writeGrantRefusal(c, http.StatusBadRequest, "role_not_supported", "role is not supported for this resource type")
 		return "", "", true
 	}
+	// A grant is durable state: an org under Control's ZDR attestation is refused
+	// here too, not only at the owning service (WS14-S2 "ZDR orgs are refused at
+	// Control"). An unreadable posture fails closed.
+	zdr, err := s.aclRepo.OrgZeroDataRetention(c.Request.Context(), c.GetString("org_id"))
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "org retention posture could not be verified"})
+		return "", "", true
+	}
+	if zdr {
+		writeGrantRefusal(c, http.StatusPreconditionFailed, zdrGrantRefusalCode, "zero data retention forbids a durable grant")
+		return "", "", true
+	}
 	// Org-only for every owner-asserted type, conversation_snapshot included (ADR
 	// decision 2): the grantee must be an active member of the granter's org.
 	member, err := s.aclRepo.IsActiveOrgMember(c.Request.Context(), c.GetString("org_id"), strings.TrimSpace(subjectID))
@@ -178,15 +190,24 @@ func (s *Server) applyOwnerAssertedGrantRules(c *gin.Context, resourceType, subj
 		writeGrantRefusal(c, http.StatusBadRequest, spaces.CodeMemberNotInOrganization, "grant subject is not a member of the organization")
 		return "", "", true
 	}
+	return normalized, c.GetString("user_id"), false
+}
+
+// zdrGrantRefusalCode is the typed ZDR refusal (the zdr_refusal catalogue's
+// durable-mutation code), so documents-api can pass it through unchanged.
+const zdrGrantRefusalCode = "zdr_durable_mutation_forbidden"
+
+// logOwnerAssertedGrant records an owner-asserted grant once it is written,
+// never before the cap decision.
+func logOwnerAssertedGrant(c *gin.Context, resourceType string) {
 	log.Info().Str("service", c.GetString("service_id")).Str("org_id", c.GetString("org_id")).
 		Str("resource_type", resourceType).Str("granted_by", c.GetString("user_id")).
 		Msg("owner-asserted resource grant")
-	return normalized, c.GetString("user_id"), false
 }
 
 // ownerAssertedDocumentShareCap is the most user grants one document may hold
 // (F-t1-057). documents-api reports the same number to the sharer.
-const ownerAssertedDocumentShareCap = 200
+const ownerAssertedDocumentShareCap = users.DocumentUserGrantCap
 
 // ownerAssertedUserGrantCap is the user-grant cap Control enforces, in the same
 // step as the insert, for an owner-asserted grant on resourceType. 0 = no cap.

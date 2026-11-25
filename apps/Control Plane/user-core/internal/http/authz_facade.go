@@ -242,16 +242,12 @@ func (s *Server) authzGrant(c *gin.Context) {
 		Role:         req.Role,
 		GrantedBy:    strings.TrimSpace(req.GrantedBy),
 	}, userGrantCap)
-	if errors.Is(err, users.ErrShareLimitReached) {
-		// F-t1-057: counted and refused in the same step as the insert.
-		writeGrantRefusal(c, http.StatusConflict, "share_limit_reached", "the resource has reached its share limit")
+	if err != nil {
+		writeGrantWriteError(c, err)
 		return
 	}
-	if err != nil {
-		// Grant fails closed on non-grantable types / unsupported subjects /
-		// bad role — surface as 400 so the UI shows a clear message.
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
+	if c.GetBool(ownerAssertedContextKey) {
+		logOwnerAssertedGrant(c, req.ResourceType)
 	}
 	// Evict the Data Plane retrieval visibility cache for (subject_id, org_id) so
 	// the recipient sees the newly-shared resource within one query (TTL backstop).
@@ -261,6 +257,18 @@ func (s *Server) authzGrant(c *gin.Context) {
 			out.SubjectType, out.SubjectID, out.Role, "grant")
 	}
 	c.JSON(http.StatusOK, grantView(out))
+}
+
+// writeGrantWriteError maps a failed grant write. The share cap (F-t1-057,
+// counted and refused in the same step as the insert) is a typed 409; anything
+// else is a fail-closed refusal of a non-grantable type, an unsupported subject
+// or a bad role, surfaced as 400 so the UI shows a clear message.
+func writeGrantWriteError(c *gin.Context, err error) {
+	if errors.Is(err, users.ErrShareLimitReached) {
+		writeGrantRefusal(c, http.StatusConflict, "share_limit_reached", "the resource has reached its share limit")
+		return
+	}
+	c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 }
 
 // authzRevoke: DELETE /api/v1/internal/authz/grant?org_id=&resource_type=&resource_id=&subject_id=[&subject_type=user]

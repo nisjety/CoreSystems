@@ -45,7 +45,7 @@ func d12Pool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
-		t.Skip("TEST_DATABASE_URL not set; skipping live thread-read decision test")
+		t.Skip("TEST_DATABASE_URL not set; skipping live test")
 	}
 	pool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {

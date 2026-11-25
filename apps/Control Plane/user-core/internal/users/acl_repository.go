@@ -66,6 +66,12 @@ func NewAclRepository(db *database.DB) *AclRepository {
 // user grants and the subject is not one of them (F-t1-057).
 var ErrShareLimitReached = errors.New("resource has reached its user share limit")
 
+// DocumentUserGrantCap is the most user grants one document may hold
+// (F-t1-057). Every Control writer of a document user row enforces it through
+// GrantCapped; documents-api reports the same number (maxSharesPerDocument) to
+// the sharer, so the two must change together.
+const DocumentUserGrantCap = 200
+
 // Grant upserts an explicit grant. It fails closed for resource types that are
 // not user-grantable (team-shared or unknown) and normalizes the role.
 func (r *AclRepository) Grant(ctx context.Context, g *ResourceGrant) (*ResourceGrant, error) {
@@ -73,7 +79,9 @@ func (r *AclRepository) Grant(ctx context.Context, g *ResourceGrant) (*ResourceG
 }
 
 // grantCapLockKey is the advisory-lock key text that serializes capped grant
-// writes on one resource. It is shared by every writer that counts user rows.
+// writes on one resource. Only capped writers (GrantCapped with a cap > 0) take
+// it; an uncapped Grant does not, so it can push a resource past a cap. Every
+// Control writer of a document user row is capped (the authz facade and Create).
 func grantCapLockKey(orgID, resourceType, resourceID string) string {
 	return "resource_grants:user_cap:" + orgID + ":" + resourceType + ":" + resourceID
 }
@@ -370,6 +378,20 @@ func (r *AclRepository) IsActiveOrgMember(ctx context.Context, orgID, userID str
 	return active, nil
 }
 
+// OrgZeroDataRetention reports the org's Control-held ZDR attestation (the
+// space_effect_policies row). No row means no Control attestation; the owning
+// service's own retention gate still applies. An error must fail closed.
+func (r *AclRepository) OrgZeroDataRetention(ctx context.Context, orgID string) (bool, error) {
+	var zdr bool
+	if err := r.db.Pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM space_effect_policies WHERE org_id=$1 AND zero_data_retention)`,
+		orgID,
+	).Scan(&zdr); err != nil {
+		return false, fmt.Errorf("failed to read org retention posture: %w", err)
+	}
+	return zdr, nil
+}
+
 // ErrSpaceNotGrantable means the Space is not an active, shared Space of the
 // grant's org, or the resource type cannot be granted to a Space.
 var ErrSpaceNotGrantable = errors.New("space is not grantable for this resource")
@@ -517,9 +539,10 @@ func grantToDocumentAcl(g *ResourceGrant) *DocumentAcl {
 // Create inserts a document grant (back-compat). GrantedBy is left empty: the
 // dormant DocumentAccessService gRPC request carries no granting-actor identity.
 // The live share path (HTTP authz facade, PR-6) populates granted_by from the
-// authenticated caller.
+// authenticated caller. It takes the same capped step as the facade, so a
+// principal later admitted to the gRPC surface cannot bypass the document cap.
 func (r *AclRepository) Create(ctx context.Context, acl *DocumentAcl) error {
-	_, err := r.Grant(ctx, &ResourceGrant{
+	_, err := r.GrantCapped(ctx, &ResourceGrant{
 		GrantID:      acl.AclID,
 		OrgID:        acl.OrgID,
 		ResourceType: resourceTypeDocument,
@@ -527,7 +550,7 @@ func (r *AclRepository) Create(ctx context.Context, acl *DocumentAcl) error {
 		SubjectType:  subjectTypeUser,
 		SubjectID:    acl.UserID,
 		Role:         acl.PermissionLevel,
-	})
+	}, DocumentUserGrantCap)
 	return err
 }
 
