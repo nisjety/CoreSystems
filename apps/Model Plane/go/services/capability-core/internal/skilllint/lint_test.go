@@ -52,7 +52,8 @@ func TestLintGoldenDigestIsThePinnedOne(t *testing.T) {
 func TestLintRulesAreTheContractRulesInOrder(t *testing.T) {
 	var contract struct {
 		Mode struct {
-			Env string `json:"env"`
+			Env     string `json:"env"`
+			Unknown string `json:"unknown"`
 		} `json:"mode"`
 		Refusal struct {
 			HTTPCode       string `json:"http_code"`
@@ -89,6 +90,11 @@ func TestLintRulesAreTheContractRulesInOrder(t *testing.T) {
 	}
 	if contract.Mode.Env != ModeEnv || contract.Refusal.HTTPCode != ErrorCode || contract.Refusal.HTTPDetailsKey != "findings" {
 		t.Errorf("switch or refusal drifted: %+v %+v", contract.Mode, contract.Refusal)
+	}
+	// A set value the reader does not take reads as the contract's unknown mode, which is report.
+	unknown := func(string) string { return "not-a-mode" }
+	if contract.Mode.Unknown != string(ModeReport) || ModeFromLookup(unknown) != ModeReport {
+		t.Errorf("mode.unknown = %q, but a set value the reader does not take reads as %q", contract.Mode.Unknown, ModeFromLookup(unknown))
 	}
 	if !reflect.DeepEqual(contract.TranscriptPrefixes, TranscriptPrefixes) || contract.TranscriptMinLines != TranscriptMinLines {
 		t.Errorf("transcript rule drifted: %v %d", contract.TranscriptPrefixes, contract.TranscriptMinLines)
@@ -164,13 +170,39 @@ func TestLintGoldenParity(t *testing.T) {
 	}
 }
 
+// The reader mirrors mp-contracts skill_lint Mode::from_env_value. The exact words report and enforce are read exactly,
+// so a padded, cased or CRLF enforce reads as report and never refuses. Blank and off, padded or not, read off. Every
+// other set value, junk included, reads as report, so it never switches the lint off and never starts refusing.
 func TestLintModeIsOnlyTheExactWords(t *testing.T) {
-	for raw, want := range map[string]Mode{
+	cases := map[string]Mode{
+		// Unset and blank read off.
+		"": ModeOff, " \r\n": ModeOff, "\t": ModeOff,
+		// off reads off, padded or not.
+		"off": ModeOff, " off\r\n": ModeOff, "\toff ": ModeOff,
+		// The exact words.
 		"report": ModeReport, "enforce": ModeEnforce,
-		"": ModeOff, "off": ModeOff, "true": ModeOff, "Enforce": ModeOff, " report": ModeOff,
-	} {
+		// Padded, CRLF, cased and junk values read report, never enforce.
+		" report": ModeReport, "report\r\n": ModeReport, "enforce\r\n": ModeReport, "\tenforce": ModeReport,
+		"Enforce": ModeReport, "ENFORCE": ModeReport, "OFF": ModeReport, "true": ModeReport, "maybe": ModeReport,
+	}
+	for raw, want := range cases {
 		if got := ModeFromLookup(func(string) string { return raw }); got != want {
 			t.Errorf("SKILL_LINT_MODE=%q = %q, want %q", raw, got, want)
+		}
+	}
+}
+
+// A set value that is neither blank nor one of the exact words is named at startup. A blank value and the exact words
+// are not. Padded off is named too: it reads as off, but it is not the word.
+func TestUnreadableModeNamesOnlyASetValueTheReaderDoesNotTake(t *testing.T) {
+	for _, quiet := range []string{"", " \r\n", "off", "report", "enforce"} {
+		if UnreadableMode(quiet) {
+			t.Errorf("%q is blank or one of the words, but was named", quiet)
+		}
+	}
+	for _, named := range []string{" off ", " report", "enforce\r\n", "ENFORCE", "OFF", "true", "maybe"} {
+		if !UnreadableMode(named) {
+			t.Errorf("%q is a set value the reader does not take, but was not named", named)
 		}
 	}
 }

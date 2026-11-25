@@ -6,8 +6,8 @@
     "env": "SKILL_LINT_MODE",
     "values": ["off", "report", "enforce"],
     "default": "off",
-    "unknown": "off",
-    "note": "off runs nothing; report counts findings (skill_lint_findings_total{code}) and writes; enforce refuses a write with any error-severity finding. Warnings never refuse."
+    "unknown": "report",
+    "note": "off runs nothing; report counts findings (skill_lint_findings_total{code}) and writes; enforce refuses a write with any error-severity finding. Warnings never refuse. Unset or blank reads as default (off); off, padded or not, reads as off; report and enforce are read exactly; any other set value reads as unknown (report), and only the exact word enforce refuses."
   },
   "refusal": {
     "http_status": 422,

@@ -1,10 +1,13 @@
 package runwatch
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -65,10 +68,50 @@ func scheduledOutcomeEnvelope(t *testing.T, payload map[string]any, zdr *bool) [
 	return data
 }
 
+// fakeScheduleOwners is the schedule table the owner check reads, keyed by org and schedule id, each entry the
+// schedule's creator. A schedule that is not in it, or sits in another org, answers false, as a deleted one does.
+// calls records each ask as "org/schedule/subject", in order.
+type fakeScheduleOwners struct {
+	creators map[string]string
+	err      error
+	calls    []string
+}
+
+func (f *fakeScheduleOwners) ScheduleCreatedBy(_ context.Context, orgID, scheduleID, subjectID string) (bool, error) {
+	f.calls = append(f.calls, orgID+"/"+scheduleID+"/"+subjectID)
+	if f.err != nil {
+		return false, f.err
+	}
+	creator, ok := f.creators[orgID+"/"+scheduleID]
+	return ok && creator == subjectID, nil
+}
+
+// wellFormedScheduleOwners is the schedule table for wellFormedScheduledOutcome: sched-1 is live in org-1 and
+// created by subject-7, the subject the payload names.
+func wellFormedScheduleOwners() *fakeScheduleOwners {
+	return &fakeScheduleOwners{creators: map[string]string{"org-1/sched-1": "subject-7"}}
+}
+
 func newScheduledOutcomeNotifier(store SubscriptionStore, notify NotifyClient) *Notifier {
+	return newScheduledOutcomeNotifierWithOwners(store, notify, wellFormedScheduleOwners())
+}
+
+func newScheduledOutcomeNotifierWithOwners(store SubscriptionStore, notify NotifyClient, owners ScheduleOwnerChecker) *Notifier {
 	n := &Notifier{store: store, notify: notify, now: time.Now}
 	WithScheduledOutcomeNotify()(n)
+	WithScheduleOwnerCheck(owners)(n)
 	return n
+}
+
+// scheduledOutcomeLog is what the consumer logs while fn runs.
+func scheduledOutcomeLog(t *testing.T, fn func()) string {
+	t.Helper()
+	var buf bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	fn()
+	return buf.String()
 }
 
 func assertScheduledOutcomeContentFree(t *testing.T, payload map[string]any) {
@@ -222,8 +265,8 @@ func TestScheduledOutcomeRetriesWhenNotifyCoreRefuses(t *testing.T) {
 	n := newScheduledOutcomeNotifier(store, notify)
 
 	data := scheduledOutcomeEnvelope(t, wellFormedScheduledOutcome("needs_review"), envelope.ZDRFlag(false))
-	if got := n.process(context.Background(), data); got != outcomeRetry {
-		t.Fatalf("outcome = %v, want outcomeRetry so JetStream redelivers the notice", got)
+	if got := n.process(context.Background(), data); got != outcomeRetryLater {
+		t.Fatalf("outcome = %v, want outcomeRetryLater so JetStream redelivers the notice after a backoff", got)
 	}
 	if len(notify.accepted) != 0 {
 		t.Fatal("a refused delegation must not count as an accepted notice")
@@ -283,5 +326,136 @@ func TestRunCompletedStillNotifiesWatchersWithTheScheduledOutcomeSwitchOn(t *tes
 	}
 	if len(store.notified) != 1 || store.notified[0] != "watch-a" {
 		t.Fatalf("notified = %v, want the watcher row marked", store.notified)
+	}
+}
+
+// F-f05-06: the envelope's producer is not authenticated, so the recipient is trusted only once capability-core's
+// own schedule table confirms the payload's subject created the schedule the payload names.
+
+// With the scheduled path on and no owner check wired, a scheduled outcome is acknowledged and announces nothing.
+func TestScheduledOutcomeWithoutAnOwnerCheckSendsNothing(t *testing.T) {
+	store := &fakeStore{}
+	notify := &fakeNotifyClient{}
+	n := &Notifier{store: store, notify: notify, now: time.Now}
+	WithScheduledOutcomeNotify()(n)
+
+	data := scheduledOutcomeEnvelope(t, wellFormedScheduledOutcome("needs_review"), envelope.ZDRFlag(false))
+	if got := n.process(context.Background(), data); got != outcomeAck {
+		t.Fatalf("outcome = %v, want outcomeAck", got)
+	}
+	if len(notify.accepted) != 0 {
+		t.Fatalf("with no owner check wired a scheduled outcome notified %d times, want none", len(notify.accepted))
+	}
+	if store.lookups != 0 {
+		t.Fatal("a scheduled outcome must not read run watchers")
+	}
+}
+
+// A payload that names no schedule cannot be confirmed, so the owner check is not asked and nothing is sent.
+func TestScheduledOutcomeWithoutAScheduleIDSendsNothing(t *testing.T) {
+	for name, edit := range map[string]func(map[string]any){
+		"no schedule id":    func(p map[string]any) { delete(p, "schedule_id") },
+		"blank schedule id": func(p map[string]any) { p["schedule_id"] = "  " },
+	} {
+		t.Run(name, func(t *testing.T) {
+			owners := wellFormedScheduleOwners()
+			notify := &fakeNotifyClient{}
+			n := newScheduledOutcomeNotifierWithOwners(&fakeStore{}, notify, owners)
+
+			payload := wellFormedScheduledOutcome("needs_review")
+			edit(payload)
+			data := scheduledOutcomeEnvelope(t, payload, envelope.ZDRFlag(false))
+			if got := n.process(context.Background(), data); got != outcomeAck {
+				t.Fatalf("outcome = %v, want outcomeAck", got)
+			}
+			if len(owners.calls) != 0 {
+				t.Fatalf("the owner check was asked %d times for a payload that names no schedule, want none", len(owners.calls))
+			}
+			if len(notify.accepted) != 0 {
+				t.Fatalf("notified %d times, want none", len(notify.accepted))
+			}
+		})
+	}
+}
+
+// A subject who did not create the schedule, a live schedule of another org and a schedule that is deleted or was
+// never written all fail the owner check: the outcome is acknowledged, no notice is sent, and the warning names no
+// subject id.
+func TestScheduledOutcomeToAnotherSubjectOrScheduleSendsNothing(t *testing.T) {
+	for name, tc := range map[string]struct {
+		scheduleID string
+		creators   map[string]string
+	}{
+		"a schedule another subject created": {
+			scheduleID: "sched-1",
+			creators:   map[string]string{"org-1/sched-1": "subject-9"},
+		},
+		"a live schedule of another org": {
+			scheduleID: "sched-1",
+			creators:   map[string]string{"org-2/sched-1": "subject-7"},
+		},
+		"a deleted or unknown schedule": {
+			scheduleID: "sched-1",
+			creators:   map[string]string{"org-1/sched-2": "subject-7"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			owners := &fakeScheduleOwners{creators: tc.creators}
+			notify := &fakeNotifyClient{}
+			n := newScheduledOutcomeNotifierWithOwners(&fakeStore{}, notify, owners)
+
+			data := scheduledOutcomeEnvelope(t, wellFormedScheduledOutcome("needs_review"), envelope.ZDRFlag(false))
+			var got outcome
+			logged := scheduledOutcomeLog(t, func() { got = n.process(context.Background(), data) })
+			if got != outcomeAck {
+				t.Fatalf("outcome = %v, want outcomeAck", got)
+			}
+			if len(notify.accepted) != 0 {
+				t.Fatalf("notified %d times, want none", len(notify.accepted))
+			}
+			if len(owners.calls) != 1 || owners.calls[0] != "org-1/sched-1/subject-7" {
+				t.Fatalf("owner checks = %v, want one for org-1, sched-1 and subject-7", owners.calls)
+			}
+			if !strings.Contains(logged, "does not match the schedule creator") {
+				t.Fatalf("log = %q, want the mismatch warning", logged)
+			}
+			if strings.Contains(logged, "subject-7") || strings.Contains(logged, "subject-9") {
+				t.Fatalf("log = %q names a subject id, want ids of the run and schedule only", logged)
+			}
+		})
+	}
+}
+
+// A failed owner check is retried with backoff, never announced unconfirmed.
+func TestScheduledOutcomeRetriesWhenTheOwnerCheckFails(t *testing.T) {
+	owners := wellFormedScheduleOwners()
+	owners.err = errors.New("database unavailable")
+	notify := &fakeNotifyClient{}
+	n := newScheduledOutcomeNotifierWithOwners(&fakeStore{}, notify, owners)
+
+	data := scheduledOutcomeEnvelope(t, wellFormedScheduledOutcome("needs_review"), envelope.ZDRFlag(false))
+	if got := n.process(context.Background(), data); got != outcomeRetryLater {
+		t.Fatalf("outcome = %v, want outcomeRetryLater: an unconfirmed owner is retried, never announced", got)
+	}
+	if len(notify.accepted) != 0 {
+		t.Fatal("an owner check that failed must not notify")
+	}
+}
+
+// The check is asked once, with the payload's own ids and subject, and a match sends one notice to that subject.
+func TestScheduledOutcomeGoesToTheVerifiedCreatorOnlyOnAMatch(t *testing.T) {
+	owners := wellFormedScheduleOwners()
+	notify := &fakeNotifyClient{}
+	n := newScheduledOutcomeNotifierWithOwners(&fakeStore{}, notify, owners)
+
+	data := scheduledOutcomeEnvelope(t, wellFormedScheduledOutcome("completed"), envelope.ZDRFlag(false))
+	if got := n.process(context.Background(), data); got != outcomeAck {
+		t.Fatalf("outcome = %v, want outcomeAck", got)
+	}
+	if want := []string{"org-1/sched-1/subject-7"}; !slices.Equal(owners.calls, want) {
+		t.Fatalf("owner checks = %v, want %v", owners.calls, want)
+	}
+	if len(notify.accepted) != 1 || notify.accepted[0].Recipient.ID != "subject-7" {
+		t.Fatalf("accepted = %+v, want one notice to the verified creator", notify.accepted)
 	}
 }

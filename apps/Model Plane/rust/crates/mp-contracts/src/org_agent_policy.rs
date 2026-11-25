@@ -84,6 +84,10 @@ pub fn fan_out_items_of(value: &Value) -> Option<u32> {
 /// model-gateway), so only the default `none` is accepted and every app keeps the no-network frame it has.
 pub const MCP_APPS_NETWORK_ORIGINS: &str = "mcp_apps.network_origins";
 
+/// Whether the org's browser tools follow `web.mode` (O-19, F-f09-13). `true`, the default, covers them; `false` is the
+/// opt-out that loosens the platform default, so it never makes a document restrictive.
+pub const WEB_COVERS_BROWSER: &str = "web.covers_browser";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
     Enforced,
@@ -246,6 +250,19 @@ pub const SETTINGS: &[SettingDef] = &[
         strictness_order: &["off", "on"],
         default: "on",
         fail_closed_value: "off",
+        status: Status::Enforced,
+        reserved_values: &[],
+    },
+    // O-19 (owner decision D-f09-3): whether the org's browser tools follow web.mode too. `true`, the default, withholds
+    // them while web.mode is not live, as the public web tools are; `false` keeps them open. capability-core serves and
+    // enforces the key only while CAPABILITY_ORG_WEB_MODE_COVERS_BROWSER is on. This build holds the key in the same table,
+    // so a document that carries it is bounded by the same rule as every other key; `true` is the fail-closed value.
+    SettingDef {
+        key: "web.covers_browser",
+        kind: Kind::Bool,
+        strictness_order: &["true", "false"],
+        default: "true",
+        fail_closed_value: "true",
         status: Status::Enforced,
         reserved_values: &[],
     },
@@ -733,6 +750,43 @@ mod tests {
             ),
             Err(Refusal::InvalidValue)
         );
+    }
+
+    #[test]
+    fn org_agent_policy_web_covers_browser_is_a_bool_that_defaults_to_covering() {
+        let settings =
+            validate(&Map::new(), &loosest_ceiling()).expect("the defaults are accepted");
+        assert_eq!(settings[WEB_COVERS_BROWSER], json!(true));
+        for value in [json!(false), json!(true)] {
+            assert!(validate(
+                &doc(&json!({WEB_COVERS_BROWSER: value})),
+                &loosest_ceiling()
+            )
+            .is_ok());
+        }
+        for value in [
+            json!("off"),
+            json!("false"),
+            json!("on"),
+            json!(null),
+            json!(0),
+        ] {
+            assert_eq!(
+                validate(
+                    &doc(&json!({WEB_COVERS_BROWSER: value})),
+                    &loosest_ceiling()
+                ),
+                Err(Refusal::InvalidValue),
+                "web.covers_browser = {value}"
+            );
+        }
+        let mut ceiling = loosest_ceiling();
+        ceiling.insert(WEB_COVERS_BROWSER, "true");
+        assert_eq!(
+            validate(&doc(&json!({WEB_COVERS_BROWSER: false})), &ceiling),
+            Err(Refusal::ExceedsPlatformCeiling)
+        );
+        assert!(validate(&doc(&json!({WEB_COVERS_BROWSER: true})), &ceiling).is_ok());
     }
 
     #[test]

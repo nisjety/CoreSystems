@@ -51,9 +51,31 @@ func attentionEnvelope(t *testing.T, state, sourceID, threadID string, zdr *bool
 	return data
 }
 
+// fakeConfirmer is an AttentionConfirmer double. It answers the same way for every
+// item and records each question, so a test can see what was asked.
+type fakeConfirmer struct {
+	enabled bool
+	waiting bool
+	err     error
+	asked   []confirmQuestion
+}
+
+// confirmQuestion is one StillWaiting call, as the notifier made it.
+type confirmQuestion struct {
+	orgID, userID, threadID, runID, sourceID, state string
+}
+
+func (f *fakeConfirmer) StillWaiting(_ context.Context, orgID, userID, threadID, runID, sourceID, state string) (bool, bool, error) {
+	f.asked = append(f.asked, confirmQuestion{orgID: orgID, userID: userID, threadID: threadID, runID: runID, sourceID: sourceID, state: state})
+	return f.enabled, f.waiting, f.err
+}
+
+// newAttentionNotifier builds a notifier with the RUN_ATTENTION path on and a confirmer
+// that answers the item still waits, so a test that is not about confirmation reads as before.
 func newAttentionNotifier(store SubscriptionStore, notify NotifyClient, coalesce time.Duration, now func() time.Time) *Notifier {
 	n := &Notifier{store: store, notify: notify, now: now}
 	WithAttentionNotify(coalesce)(n)
+	WithAttentionConfirm(&fakeConfirmer{enabled: true, waiting: true})(n)
 	return n
 }
 
@@ -263,8 +285,8 @@ func TestRunAttentionFailedDelegationIsRetriedAndNotCoalesced(t *testing.T) {
 	n := newAttentionNotifier(&fakeStore{}, notify, time.Minute, fixedNow)
 	data := attentionEnvelope(t, "ATTENTION_STATE_NEEDS_APPROVAL", "apr-1", "thread-9", envelope.ZDRFlag(false))
 
-	if got := n.process(context.Background(), data); got != outcomeRetry {
-		t.Fatalf("outcome = %v, want outcomeRetry when delegation fails", got)
+	if got := n.process(context.Background(), data); got != outcomeRetryLater {
+		t.Fatalf("outcome = %v, want outcomeRetryLater when delegation fails", got)
 	}
 
 	notify.failFor = nil

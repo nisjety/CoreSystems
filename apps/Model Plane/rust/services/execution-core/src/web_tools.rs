@@ -234,11 +234,13 @@ impl WebToolsClient {
 
     /// `web_search` → POST `/v1/search`. Returns a compact ranked list (title,
     /// url, snippet). Empty result set is a successful, informative response.
+    /// `space_id` is the run's Space, empty outside one: the org's rules for that Space drop the hits (F-f03-03).
     pub async fn search(
         &self,
         query: &str,
         limit: u32,
         org_id: &str,
+        space_id: &str,
         zdr: bool,
     ) -> Result<String, String> {
         let body = search_body(query, limit, zdr);
@@ -256,14 +258,27 @@ impl WebToolsClient {
             .cloned()
             .unwrap_or_default();
         // The org's domain rules drop a hit on a host the org does not allow, before any hit is shown (EP-9 W3).
-        self.site.drop_denied_results(org_id, &mut results).await;
+        self.site
+            .drop_denied_results_in_space(org_id, space_id, &mut results)
+            .await;
         Ok(format_search_results(query, &value, &results))
     }
 
-    /// `web_fetch` → POST `/v1/extract` (no schema ⇒ cleaned markdown per URL).
-    pub async fn fetch(&self, url: &str, org_id: &str, zdr: bool) -> Result<String, String> {
+    /// `web_fetch` → POST `/v1/extract` (no schema ⇒ cleaned markdown per URL). `space_id` is the run's Space, empty
+    /// outside one; the org's rules are read for it (F-f03-03).
+    pub async fn fetch(
+        &self,
+        url: &str,
+        org_id: &str,
+        space_id: &str,
+        zdr: bool,
+    ) -> Result<String, String> {
         // The org's domain rules come before the call: a host the org does not allow is refused by name, and nothing is read.
-        if let Some(refusal) = self.site.fetch_refusal(org_id, &[url], WEB_FETCH_TOOL).await {
+        if let Some(refusal) = self
+            .site
+            .fetch_refusal_in_space(org_id, space_id, &[url], WEB_FETCH_TOOL)
+            .await
+        {
             return Err(refusal);
         }
         let body = extract_body(url, zdr);
@@ -274,7 +289,13 @@ impl WebToolsClient {
         // where it ended too, so they are checked before any of its text is handed on (EP-9 W3).
         if let Some(refusal) = self
             .site
-            .final_url_refusal(org_id, url, extract_final_url(&value), WEB_FETCH_TOOL)
+            .final_url_refusal_in_space(
+                org_id,
+                space_id,
+                url,
+                extract_final_url(&value),
+                WEB_FETCH_TOOL,
+            )
             .await
         {
             return Err(refusal);
@@ -294,8 +315,13 @@ impl WebToolsClient {
         limit: u32,
         include_subdomains: bool,
         org_id: &str,
+        space_id: &str,
     ) -> Result<String, String> {
-        if let Some(refusal) = self.site.fetch_refusal(org_id, &[url], MAP_TOOL).await {
+        if let Some(refusal) = self
+            .site
+            .fetch_refusal_in_space(org_id, space_id, &[url], MAP_TOOL)
+            .await
+        {
             return Err(refusal);
         }
         let body = map_body(url, search, limit, include_subdomains);
@@ -313,6 +339,7 @@ impl WebToolsClient {
         goal: &str,
         scope: &DraftScope,
         org_id: &str,
+        space_id: &str,
     ) -> Result<String, String> {
         let url = url.trim();
         check_plan_url(url)?;
@@ -320,7 +347,11 @@ impl WebToolsClient {
         if goal.is_empty() {
             return Err("knowledge.crawl_plan needs a goal".to_owned());
         }
-        if let Some(refusal) = self.site.fetch_refusal(org_id, &[url], CRAWL_PLAN_TOOL).await {
+        if let Some(refusal) = self
+            .site
+            .fetch_refusal_in_space(org_id, space_id, &[url], CRAWL_PLAN_TOOL)
+            .await
+        {
             return Err(refusal);
         }
         let body = map_body(url, Some(&goal), CRAWL_PLAN_MAX_PAGES, scope.allow_subdomains);
@@ -337,8 +368,13 @@ impl WebToolsClient {
         max_depth: Option<u32>,
         ingest: bool,
         org_id: &str,
+        space_id: &str,
     ) -> Result<String, String> {
-        if let Some(refusal) = self.site.fetch_refusal(org_id, &[url], CRAWL_SITE_TOOL).await {
+        if let Some(refusal) = self
+            .site
+            .fetch_refusal_in_space(org_id, space_id, &[url], CRAWL_SITE_TOOL)
+            .await
+        {
             return Err(refusal);
         }
         let body = crawl_body(url, max_pages, max_depth, ingest);
@@ -352,9 +388,14 @@ impl WebToolsClient {
         urls: &[String],
         ingest: bool,
         org_id: &str,
+        space_id: &str,
     ) -> Result<String, String> {
         let every_url: Vec<&str> = urls.iter().map(String::as_str).collect();
-        if let Some(refusal) = self.site.fetch_refusal(org_id, &every_url, BATCH_TOOL).await {
+        if let Some(refusal) = self
+            .site
+            .fetch_refusal_in_space(org_id, space_id, &every_url, BATCH_TOOL)
+            .await
+        {
             return Err(refusal);
         }
         let body = batch_body(urls, ingest);
@@ -993,8 +1034,9 @@ fn extract_markdown(url: &str, value: &Value) -> Result<String, String> {
 }
 
 /// The address an extract reply says the page ended on, or `""` when it names none (pure). The reply carries it on the first
-/// result as `final_url`. The edge does not send that field yet, so an absent one is read as the requested URL, and the
-/// check passes until it does. An empty answer is read as the requested URL by [`SitePolicy::final_url_refusal`].
+/// result as `final_url`. The edge does not send that field yet, so an absent one is `""`, which
+/// [`SitePolicy::final_url_refusal`] judges as the requested URL: the requested host is asked of org-core under enforce,
+/// and a denied one refuses the page. A redirect onto another host is seen only once the edge sends the field.
 fn extract_final_url(value: &Value) -> &str {
     value
         .get("results")
@@ -1229,14 +1271,14 @@ pub(crate) mod tests {
         let under_zdr = Attribution::for_step("run_abc123", "run_abc123:step:0", true);
         let client = quarry_client(&edge.uri(), &auth.uri()).with_attribution(under_zdr);
         client
-            .search("q", 3, "org-a", true)
+            .search("q", 3, "org-a", "", true)
             .await
             .expect("the search answers");
         // The same step off ZDR carries both headers, so the absence checked below is a real one.
         let off_zdr = Attribution::for_step("run_abc123", "run_abc123:step:0", false);
         let client = quarry_client(&edge.uri(), &auth.uri()).with_attribution(off_zdr);
         client
-            .search("q", 3, "org-a", false)
+            .search("q", 3, "org-a", "", false)
             .await
             .expect("the search answers");
 
@@ -1804,7 +1846,7 @@ mod site_policy_tests {
         client.site = enforcing(&org);
 
         let refusal = client
-            .fetch("https://example.org/page", ORG, false)
+            .fetch("https://example.org/page", ORG, "", false)
             .await
             .expect_err("a blocked host is refused");
         assert!(refusal.starts_with("org_site_blocked: "), "{refusal}");
@@ -1837,7 +1879,7 @@ mod site_policy_tests {
         client.site = enforcing(&org);
 
         let shown = client
-            .search("norge", 5, ORG, false)
+            .search("norge", 5, ORG, "", false)
             .await
             .expect("the search answers");
         assert!(shown.contains("https://example.com/b"), "{shown}");
@@ -1860,11 +1902,11 @@ mod site_policy_tests {
         client.site = enforcing(&org);
 
         assert!(client
-            .map_site("https://example.org/", None, 10, false, ORG)
+            .map_site("https://example.org/", None, 10, false, ORG, "")
             .await
             .is_err_and(|refusal| refusal.starts_with("org_site_blocked: ")));
         assert!(client
-            .start_crawl("https://example.org/", 10, None, false, ORG)
+            .start_crawl("https://example.org/", 10, None, false, ORG, "")
             .await
             .is_err_and(|refusal| refusal.starts_with("org_site_blocked: ")));
         assert!(client
@@ -1872,6 +1914,7 @@ mod site_policy_tests {
                 &["https://example.com/a".to_owned(), "https://example.org/b".to_owned()],
                 false,
                 ORG,
+                "",
             )
             .await
             .is_err_and(|refusal| refusal.contains("'example.org'")));
@@ -1908,7 +1951,7 @@ mod site_policy_tests {
             .await;
         let mut client = quarry_client(&edge.uri(), &auth.uri());
         client.site = under(mode, org);
-        client.fetch(REQUESTED, ORG, false).await
+        client.fetch(REQUESTED, ORG, "", false).await
     }
 
     async fn asked(org: &MockServer) -> usize {
@@ -1967,7 +2010,15 @@ mod site_policy_tests {
                 .await
                 .expect("the requested page is read");
             assert!(text.contains(LANDED), "{text}");
-            assert_eq!(asked(&org).await, 1, "only the requested host is asked");
+            // A blank or same-host final URL adds no request: the first check has read the requested host, and the
+            // post-check that judges a blank final URL as that host is served from the cache.
+            let asks = org.received_requests().await.unwrap_or_default();
+            assert_eq!(asks.len(), 1, "only the requested host is asked");
+            assert_eq!(
+                asks[0].url.query(),
+                Some("host=example.com"),
+                "the one request names the requested host"
+            );
         }
     }
 
@@ -2011,5 +2062,222 @@ mod site_policy_tests {
             .await
             .expect_err("the landed host is refused before the empty reply is read");
         assert!(refusal.starts_with("org_site_blocked: "), "{refusal}");
+    }
+
+    // ---- F-f03-03: the Space a web call is made in reaches org-core, and only while the switch is on ----
+
+    /// The Space the run in these tests belongs to.
+    const RUN_SPACE: &str = "space-run-7";
+
+    /// The `space_id` a resolve call named, `None` for a call that named none.
+    fn space_named(request: &wiremock::Request) -> Option<String> {
+        request
+            .url
+            .query_pairs()
+            .find(|(key, _)| key == "space_id")
+            .map(|(_, value)| value.into_owned())
+    }
+
+    /// The `space_id` each resolve call org-core received named, in the order the calls were made.
+    async fn spaces_asked(org: &MockServer) -> Vec<Option<String>> {
+        org.received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .map(space_named)
+            .collect()
+    }
+
+    /// org-core's answer as the Space floor gives it: a call in [`RUN_SPACE`] allows every host it names, and the
+    /// organisation's own answer (no Space, or another one) denies every host.
+    struct AllowInRunSpace;
+
+    impl wiremock::Respond for AllowInRunSpace {
+        fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+            let effective = if space_named(request).as_deref() == Some(RUN_SPACE) {
+                "ask"
+            } else {
+                "deny"
+            };
+            let decisions: Vec<Value> = request
+                .url
+                .query_pairs()
+                .filter(|(key, _)| key == "host")
+                .map(|(_, host)| {
+                    json!({"host": host, "effective": effective, "cap": "act", "source": "default"})
+                })
+                .collect();
+            ResponseTemplate::new(200).set_body_json(json!({
+                "organization_id": ORG,
+                "revision": 3,
+                "decisions": decisions,
+            }))
+        }
+    }
+
+    /// org-core's resolve route for `ORG`, answering as [`AllowInRunSpace`] does.
+    async fn org_core_by_space() -> MockServer {
+        let org = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/internal/orgs/org-a/browser-sites/resolve"))
+            .and(header("x-service-id", "execution-core"))
+            .and(header("x-service-token", "org-core-test-token"))
+            .respond_with(AllowInRunSpace)
+            .mount(&org)
+            .await;
+        org
+    }
+
+    /// The policy in `mode` against `org`, with the Space floor set to `floor` and a fresh cache.
+    fn under_space_floor(mode: WebDomainPolicyMode, org: &MockServer, floor: bool) -> SitePolicy {
+        SitePolicy::new(
+            mode,
+            SiteOwner::new(&org.uri(), "execution-core", "org-core-test-token"),
+            Arc::new(SiteChecker::default().with_space_floor(floor)),
+        )
+    }
+
+    /// `web_fetch` of `REQUESTED` in `space_id`, through a quarry-edge that answers `reply`, with the Space floor set to `floor`.
+    async fn fetch_in_space(
+        floor: bool,
+        org: &MockServer,
+        space_id: &str,
+        reply: Value,
+    ) -> Result<String, String> {
+        let edge = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/extract"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(reply))
+            .mount(&edge)
+            .await;
+        let auth = MockServer::start().await;
+        mint_mock(ORG, "extract:read", minted("extract-token"))
+            .mount(&auth)
+            .await;
+        let mut client = quarry_client(&edge.uri(), &auth.uri());
+        client.site = under_space_floor(WebDomainPolicyMode::Enforce, org, floor);
+        client.fetch(REQUESTED, ORG, space_id, false).await
+    }
+
+    /// A web call in a Space names that Space to org-core while the switch is on, and the org's rules for that Space
+    /// decide the call.
+    #[tokio::test]
+    async fn a_web_fetch_in_a_space_names_the_space_to_org_core_under_the_switch() {
+        let org = org_core_by_space().await;
+        let text = fetch_in_space(true, &org, RUN_SPACE, extract_reply(None))
+            .await
+            .expect("the Space allows the host");
+        assert!(text.contains(LANDED), "{text}");
+        assert_eq!(spaces_asked(&org).await, vec![Some(RUN_SPACE.to_owned())]);
+    }
+
+    /// With the switch on, a call that names no Space names none, and the organisation's own answer decides it.
+    #[tokio::test]
+    async fn a_web_fetch_with_no_space_names_none_even_with_the_switch_on() {
+        let org = org_core_by_space().await;
+        let refusal = fetch_in_space(true, &org, "", extract_reply(None))
+            .await
+            .expect_err("the organisation's own answer denies the host");
+        assert!(refusal.starts_with("org_site_blocked: "), "{refusal}");
+        assert_eq!(spaces_asked(&org).await, vec![None]);
+    }
+
+    /// With the switch off, a Space is never named to org-core: the call is the organisation's own, as before the floor.
+    #[tokio::test]
+    async fn a_web_fetch_in_a_space_names_no_space_with_the_switch_off() {
+        let org = org_core_by_space().await;
+        let refusal = fetch_in_space(false, &org, RUN_SPACE, extract_reply(None))
+            .await
+            .expect_err("switched off, the organisation's own answer denies the host");
+        assert!(refusal.starts_with("org_site_blocked: "), "{refusal}");
+        assert_eq!(spaces_asked(&org).await, vec![None]);
+    }
+
+    /// The landing check of a fetch in a Space names the Space too: the requested host and the landed host are both asked
+    /// in it.
+    #[tokio::test]
+    async fn the_landing_check_of_a_space_fetch_names_the_space_too() {
+        let org = org_core_by_space().await;
+        let text = fetch_in_space(
+            true,
+            &org,
+            RUN_SPACE,
+            extract_reply(Some("https://example.net/landing")),
+        )
+        .await
+        .expect("the Space allows the landed host too");
+        assert!(text.contains(LANDED), "{text}");
+        let queries: Vec<String> = org
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|request| request.url.query().map(str::to_owned))
+            .collect();
+        assert_eq!(
+            queries,
+            [
+                format!("host=example.com&space_id={RUN_SPACE}"),
+                format!("host=example.net&space_id={RUN_SPACE}"),
+            ]
+        );
+    }
+
+    /// The search's hit filter names the Space too.
+    #[tokio::test]
+    async fn a_web_search_in_a_space_names_the_space_to_org_core_under_the_switch() {
+        let org = org_core_by_space().await;
+        let edge = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "query": "norge",
+                "provider": "brave",
+                "results": [{"url": "https://example.com/b", "title": "Open hit", "snippet": "t", "rank": 1}],
+                "count": 1
+            })))
+            .mount(&edge)
+            .await;
+        let auth = MockServer::start().await;
+        mint_mock(ORG, "search:read", minted("search-token"))
+            .mount(&auth)
+            .await;
+        let mut client = quarry_client(&edge.uri(), &auth.uri());
+        client.site = under_space_floor(WebDomainPolicyMode::Enforce, &org, true);
+        let shown = client
+            .search("norge", 5, ORG, RUN_SPACE, false)
+            .await
+            .expect("the search answers");
+        assert!(shown.contains("https://example.com/b"), "{shown}");
+        assert_eq!(spaces_asked(&org).await, vec![Some(RUN_SPACE.to_owned())]);
+    }
+
+    /// The map, crawl and batch calls ask the same rules, so each names the Space it is run in. The static answer here
+    /// denies `example.org` in every Space, so each call is refused before Quarry is reached.
+    #[tokio::test]
+    async fn the_map_crawl_and_batch_calls_name_the_run_space_to_org_core() {
+        let org = org_core(blocked_and_open()).await;
+        let mut client = quarry_client("http://edge.invalid", "http://auth.invalid");
+        client.site = under_space_floor(WebDomainPolicyMode::Enforce, &org, true);
+        assert!(client
+            .map_site("https://example.org/", None, 10, false, ORG, RUN_SPACE)
+            .await
+            .is_err_and(|refusal| refusal.starts_with("org_site_blocked: ")));
+        assert!(client
+            .start_crawl("https://example.org/", 10, None, false, ORG, RUN_SPACE)
+            .await
+            .is_err_and(|refusal| refusal.starts_with("org_site_blocked: ")));
+        assert!(client
+            .start_batch(&["https://example.org/b".to_owned()], false, ORG, RUN_SPACE)
+            .await
+            .is_err_and(|refusal| refusal.starts_with("org_site_blocked: ")));
+        let asked = spaces_asked(&org).await;
+        assert!(!asked.is_empty(), "org-core was asked");
+        assert!(
+            asked
+                .iter()
+                .all(|space| space.as_deref() == Some(RUN_SPACE)),
+            "every ask names the run's Space: {asked:?}"
+        );
     }
 }

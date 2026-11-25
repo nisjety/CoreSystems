@@ -54,6 +54,9 @@ const (
 	// PolicySourceOrgPermissionRule: an org permission rule (W5-074) tightened the decision. Its reason names the rule
 	// as org_rule:<rule id> and nothing else.
 	PolicySourceOrgPermissionRule = "org_permission_rule"
+	// PolicySourceOrgWebMode: the org's web.mode withheld a web capability (F-f09-13). Its reason is org_web_off, or
+	// org_web_unavailable when the org's keys could not be read.
+	PolicySourceOrgWebMode = "org_web_mode"
 )
 
 // Review states of an MCP tool row (capability_tools.review_state). A built-in

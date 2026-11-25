@@ -21,6 +21,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -75,6 +76,15 @@ type SkillsHandler struct {
 	// skill needs an org admin, as a user-scoped skill needs its owner or an admin; off, an org
 	// skill stays open to every member of the org as it was.
 	orgOwnerCheck bool
+	// bundleScopeRules is SKILL_BUNDLE_SCOPE_RULES (F-f03-08): on, a skill delete removes the skill's bundles
+	// whenever bundlesEnabled (SKILL_BUNDLES_ENABLED) is on, not only with retention (register D2-382).
+	bundleScopeRules bool
+	bundlesEnabled   bool
+	// spaceWriteVerify is SKILL_SPACE_WRITE_VERIFY (F-f10-19) and spaceSkillVerifier the Control decision
+	// verifier: with SKILL_SPACE_SCOPE on too, a Space skill write is made under a verified decision.
+	// Otherwise every Space skill write is refused as before (spaceSkillWritesVerified).
+	spaceWriteVerify   bool
+	spaceSkillVerifier *SpaceSkillDecisionVerifier
 }
 
 // NewSkillsHandler constructs the handler.
@@ -82,7 +92,7 @@ func NewSkillsHandler(pool registryDatabase) *SkillsHandler {
 	return &SkillsHandler{pool: pool, lintMode: skilllint.ModeFromLookup(os.Getenv), versionsAPI: SkillVersionsAPIFromLookup(os.Getenv),
 		authoredKinds: AuthoredKindsFromLookup(os.Getenv), draftPublish: DraftPublishFromLookup(os.Getenv),
 		bundleRetention: skillbundle.RetentionFromLookup(os.Getenv), importEnabled: SkillImportFromLookup(os.Getenv),
-		orgOwnerCheck: SkillOrgOwnerCheckFromLookup(os.Getenv)}
+		orgOwnerCheck: SkillOrgOwnerCheckFromLookup(os.Getenv), spaceWriteVerify: SkillSpaceWriteVerifyFromLookup(os.Getenv)}
 }
 
 const skillOrgOwnerCheckEnv = "SKILL_ORG_OWNER_CHECK"
@@ -110,10 +120,62 @@ func AuthoredKindsFromLookup(lookup func(string) string) bool {
 	return lookup(authoredKindsEnv) == "true"
 }
 
+// skillsKindColumnOnce and skillsKindColumnPresent cache skillsHaveKindColumn's answer for the process.
+var (
+	skillsKindColumnOnce    sync.Once
+	skillsKindColumnPresent bool
+)
+
+// skillsKindColumnProbeTimeout bounds the one probe a process makes.
+const skillsKindColumnProbeTimeout = 5 * time.Second
+
+// skillsKindColumnProbeSQL reports whether the agent_skills that an unqualified name resolves to has the
+// kind column that session-core migration 0109 adds.
+const skillsKindColumnProbeSQL = `
+	SELECT EXISTS (
+		SELECT 1 FROM information_schema.columns
+		WHERE table_schema = current_schema()
+		  AND table_name = 'agent_skills' AND column_name = 'kind'
+	)`
+
+// skillsHaveKindColumn reports whether agent_skills has the kind column. Only a read with
+// AUTHORED_KINDS_ENABLED off asks, and the answer is cached for the process by sync.Once. A probe error
+// counts as absent, so a database that predates migration 0109 keeps its statements exactly as they were.
+// The probe runs on context.WithoutCancel(ctx): the request that makes the first read may be cancelled,
+// and its answer is kept for the process, so the probe must not die with that request.
+func skillsHaveKindColumn(ctx context.Context, pool registryDatabase) bool {
+	skillsKindColumnOnce.Do(func() {
+		probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), skillsKindColumnProbeTimeout)
+		defer cancel()
+		var present bool
+		if err := pool.QueryRow(probeCtx, skillsKindColumnProbeSQL).Scan(&present); err != nil {
+			slog.Warn("agent_skills kind probe failed; skills are read as before", "error", err)
+			return
+		}
+		skillsKindColumnPresent = present
+	})
+	return skillsKindColumnPresent
+}
+
 // WithPublisher wires reconcile-event emission (matrix §4.3). Optional, nil-safe.
 func (h *SkillsHandler) WithPublisher(pub publisher.EventPublisher) *SkillsHandler {
 	h.pub = pub
 	return h
+}
+
+// WithBundleScopeRules turns on SKILL_BUNDLE_SCOPE_RULES for the skill delete (F-f03-08): with bundlesEnabled
+// (SKILL_BUNDLES_ENABLED) too, a delete removes the skill's bundles without waiting for retention. Off, the
+// delete is as it was.
+func (h *SkillsHandler) WithBundleScopeRules(scopeRules, bundlesEnabled bool) *SkillsHandler {
+	h.bundleScopeRules = scopeRules
+	h.bundlesEnabled = bundlesEnabled
+	return h
+}
+
+// deletesBundles reports whether a skill delete removes the skill's bundles: with retention on (EP-11 S5), or
+// under SKILL_BUNDLE_SCOPE_RULES whenever the bundle surface is on (register D2-382).
+func (h *SkillsHandler) deletesBundles() bool {
+	return h.bundleRetention || (h.bundleScopeRules && h.bundlesEnabled)
 }
 
 // Register mounts routes.
@@ -476,7 +538,8 @@ func ensureSkillCallerMayChange(ctx context.Context, tx registryDatabase, id, or
 		return err
 	}
 	// A Space skill (EP-11 S9) is changed by a Space decision, never by an org role or by owning
-	// it; none can be verified yet, so it is refused whatever the caller holds.
+	// it, so it is refused here whatever the caller holds. With SKILL_SPACE_WRITE_VERIFY on, the
+	// patch and delete handlers then verify the Space decision (authorizeStoredSpaceSkillChange).
 	if scope == spaceSkillScope {
 		return errSpaceSkillDecisionRequired
 	}
@@ -519,6 +582,12 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			kindFilter = `
 			  AND kind = $4`
 			args = append(args, kind)
+		} else if skillsHaveKindColumn(r.Context(), h.pool) {
+			// Off on a database with the kind column, the read names skills only: a template or preset
+			// left by an earlier on period never reads as a skill. The literal adds no bind, so the
+			// numbering above is unchanged; a database without the column keeps the statement as it was.
+			kindFilter = `
+			  AND kind = 'skill'`
 		}
 		// Visibility (SKILL-1): org-scoped skills, the caller's own, ones
 		// explicitly shared with the caller, and — for governance — any
@@ -532,9 +601,7 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			       origin, review_state, source_run_id, proposal_reason, created_at, updated_at`+h.skillVersionColumns()+`
 			FROM agent_skills
 			WHERE org_id = $1
-			  AND (scope = 'org' OR owner_user_id = $2
-			       OR (review_state = 'accepted' AND (shared_with ? $2
-			           OR ($3 AND jsonb_array_length(shared_with) > 0))))`+kindFilter+`
+			  AND `+skillbundle.SkillVisibilitySQL("$2", "$3")+kindFilter+`
 			ORDER BY name
 		`, args...)
 		if err != nil {
@@ -567,6 +634,19 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, body)
 	case http.MethodPost:
 		var s skillRow
+		// F-f10-19: with Space skill writes verified, the body is kept so its digest can be checked
+		// against the decision; it is decoded from those same bytes. Off, the body is read as before.
+		verifySpace := h.spaceSkillWritesVerified()
+		var rawBody []byte
+		if verifySpace {
+			raw, err := io.ReadAll(r.Body)
+			if err != nil {
+				jsonErr(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			rawBody = raw
+			r.Body = io.NopCloser(bytes.NewReader(raw))
+		}
 		if err := json.NewDecoder(r.Body).Decode(&s); err != nil {
 			jsonErr(w, err.Error(), http.StatusBadRequest)
 			return
@@ -587,12 +667,26 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 		if s.Scope == "" {
 			s.Scope = "org"
 		}
-		// EP-11 S9 (D7): off, "space" stays an invalid scope; on, it needs a Space decision.
+		// EP-11 S9 (D7): off, "space" stays an invalid scope; on, it needs a Space decision. Without
+		// SKILL_SPACE_WRITE_VERIFY and a verifier it is refused as before; with them, the decision must
+		// bind this create, the Space the body names and the body itself (F-f10-19). It is verified
+		// after the body's own checks, just before the write, so a refused body does not use it up.
+		spaceRef := ""
 		if s.Scope == spaceSkillScope && skillSpaceScopeEnabled() {
-			writeSpaceSkillDecisionRequired(w)
-			return
+			if !verifySpace {
+				writeSpaceSkillDecisionRequired(w)
+				return
+			}
+			var target struct {
+				ScopeID string `json:"scope_id"`
+			}
+			if err := json.NewDecoder(bytes.NewReader(rawBody)).Decode(&target); err != nil || target.ScopeID == "" {
+				jsonErr(w, "a Space skill must name its Space in scope_id", http.StatusUnprocessableEntity)
+				return
+			}
+			spaceRef = target.ScopeID
 		}
-		if !validSkillScope(s.Scope) {
+		if spaceRef == "" && !validSkillScope(s.Scope) {
 			jsonErr(w, "invalid skill scope", http.StatusUnprocessableEntity)
 			return
 		}
@@ -660,6 +754,12 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			}
 			action, reason = "promoted", "promoted_from:"+promotedFrom
 		}
+		if spaceRef != "" {
+			if err := h.verifySpaceSkillWrite(r, spaceSkillOperationCreate, spaceRef, "", rawBody); err != nil {
+				writeSpaceSkillDecisionError(w, err)
+				return
+			}
+		}
 		var sourceMissing bool
 		err := h.mutateSkill(r, action, reason, func(tx registryDatabase) error {
 			if promotedFrom != "" {
@@ -675,6 +775,18 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 					sourceMissing = true
 					return nil
 				}
+			}
+			if spaceRef != "" {
+				// A verified Space skill (F-f10-19) names its Space in scope_id and has no owner
+				// (session-core 0111's CHECK pair); only this path writes the column.
+				if h.authoredKinds {
+					_, err := tx.Exec(r.Context(), spaceSkillInsertWithKindSQL, s.ID, s.OrgID, s.Name, s.Description, s.Content,
+						kw, fp, tr, s.Enabled, s.Scope, s.OwnerUserID, sw, now, now, s.Kind, settings, spaceRef)
+					return err
+				}
+				_, err := tx.Exec(r.Context(), spaceSkillInsertSQL, s.ID, s.OrgID, s.Name, s.Description, s.Content,
+					kw, fp, tr, s.Enabled, s.Scope, s.OwnerUserID, sw, now, now, spaceRef)
+				return err
 			}
 			if h.authoredKinds {
 				// The unique key (session-core 0109) carries the kind, so a template may
@@ -734,6 +846,10 @@ func (h *SkillsHandler) get(w http.ResponseWriter, r *http.Request, id string) {
 		kindFilter = `
 		  AND kind = $5`
 		args = append(args, kind)
+	} else if skillsHaveKindColumn(r.Context(), h.pool) {
+		// Off on a database with the kind column, a read by id names skills only, as the list does.
+		kindFilter = `
+		  AND kind = 'skill'`
 	}
 	err := h.pool.QueryRow(r.Context(), `
 		SELECT id, org_id, name, description, content,
@@ -742,9 +858,7 @@ func (h *SkillsHandler) get(w http.ResponseWriter, r *http.Request, id string) {
 		       origin, review_state, source_run_id, proposal_reason, created_at, updated_at`+h.skillVersionColumns()+`
 		FROM agent_skills
 		WHERE id = $1 AND org_id = $2
-		  AND (scope = 'org' OR owner_user_id = $3
-		       OR (review_state = 'accepted' AND (shared_with ? $3
-		           OR ($4 AND jsonb_array_length(shared_with) > 0))))`+kindFilter+`
+		  AND `+skillbundle.SkillVisibilitySQL("$3", "$4")+kindFilter+`
 	`, args...).Scan(h.skillScanTargets(&s)...)
 	if err != nil {
 		jsonErr(w, "not found", http.StatusNotFound)
@@ -762,6 +876,19 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
 		// Settings (EP-11 S6) replaces a preset's settings; read only while authored kinds
 		// are on, so with them off a PATCH is as it was.
 		Settings json.RawMessage `json:"settings"`
+	}
+	// F-f10-19: with Space skill writes verified, the body is kept for the decision's digest check
+	// (made only if the skill turns out to be a Space skill) and decoded from those same bytes.
+	verifySpace := h.spaceSkillWritesVerified()
+	var rawBody []byte
+	if verifySpace {
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			jsonErr(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		rawBody = raw
+		r.Body = io.NopCloser(bytes.NewReader(raw))
 	}
 	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
 		jsonErr(w, err.Error(), http.StatusBadRequest)
@@ -834,7 +961,14 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
 		// A user-owned skill changes only for its owner or an admin. The check takes the row
 		// lock before the statement below, so the check and the write see the same skill.
 		if err := ensureSkillCallerMayChange(r.Context(), tx, id, orgID, callerID, isAdmin, h.orgOwnerCheck); err != nil {
-			return err
+			// F-f10-19: a Space skill changes under a verified Space decision for this skill, its
+			// stored Space and this body; off, it stays refused.
+			if !verifySpace || !errors.Is(err, errSpaceSkillDecisionRequired) {
+				return err
+			}
+			if err := h.authorizeStoredSpaceSkillChange(r, tx, id, orgID, spaceSkillOperationUpdate, rawBody); err != nil {
+				return err
+			}
 		}
 		if lintPatch {
 			findings, refused, err := lintStoredSkill(r.Context(), tx, h.lintMode, id, orgID, update.Description, update.Content)
@@ -914,8 +1048,7 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
 		jsonErr(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	if errors.Is(err, errSpaceSkillDecisionRequired) {
-		writeSpaceSkillDecisionRequired(w)
+	if writeSpaceSkillDecisionError(w, err) {
 		return
 	}
 	if errors.Is(err, errSkillLintRefused) {
@@ -943,15 +1076,24 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
 func (h *SkillsHandler) delete(w http.ResponseWriter, r *http.Request, id string) {
 	orgID := verifiedOrganizationID(r)
 	var result pgconn.CommandTag
+	verifySpace := h.spaceSkillWritesVerified()
 	err := h.mutateSkill(r, "", "", func(tx registryDatabase) error {
 		if err := ensureSkillCallerMayChange(r.Context(), tx, id, orgID, verifiedActorID(r), verifiedIsAdmin(r), h.orgOwnerCheck); err != nil {
-			return err
+			// F-f10-19: a Space skill is deleted under a verified Space decision for this skill and
+			// its stored Space (a delete's body digest is that of the empty body); off, it stays refused.
+			if !verifySpace || !errors.Is(err, errSpaceSkillDecisionRequired) {
+				return err
+			}
+			if err := h.authorizeStoredSpaceSkillChange(r, tx, id, orgID, spaceSkillOperationDelete, nil); err != nil {
+				return err
+			}
 		}
 		var err error
 		result, err = tx.Exec(r.Context(), `DELETE FROM agent_skills WHERE id=$1 AND org_id=$2`, id, orgID)
 		// EP-11 S5: with retention on the skill's bundles go with it (live, draft and kept ones),
-		// so a deleted skill leaves no files behind (register D2-382).
-		if err == nil && h.bundleRetention && result.RowsAffected() == 1 {
+		// so a deleted skill leaves no files behind (register D2-382). Under SKILL_BUNDLE_SCOPE_RULES
+		// they go whenever the bundle surface is on (deletesBundles).
+		if err == nil && h.deletesBundles() && result.RowsAffected() == 1 {
 			err = skillbundle.DeleteSkillBundles(r.Context(), tx, orgID, id)
 		}
 		return err
@@ -960,8 +1102,7 @@ func (h *SkillsHandler) delete(w http.ResponseWriter, r *http.Request, id string
 		jsonErr(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	if errors.Is(err, errSpaceSkillDecisionRequired) {
-		writeSpaceSkillDecisionRequired(w)
+	if writeSpaceSkillDecisionError(w, err) {
 		return
 	}
 	if !writeSingleScopedMutation(w, "agent skill", result, err) {
@@ -1302,15 +1443,26 @@ const (
 )
 
 // skillVisibleSQL is get's visibility rule as a yes/no: org skills, the caller's own, accepted
-// skills shared with the caller, and for an admin any shared accepted skill. Pinned to get's
+// skills shared with the caller, and for an admin any shared accepted skill. The rule is the one
+// skillbundle.SkillVisibilitySQL names, which the listing and get also take. Pinned to get's
 // statement by TestSkillVersionsRouteUsesTheGetVisibility.
-const skillVisibleSQL = `
+var skillVisibleSQL = skillVisibleSQLWithKindFilter("")
+
+// skillVisibleSkillSQL is skillVisibleSQL with the kind filter that get and the listing name while
+// AUTHORED_KINDS_ENABLED is off on a database with the kind column (P2-go-14): a template or preset is
+// not a skill, so the history route refuses it as get does and reads none of its name, text or versions
+// (P2-go-14-rel1). Pinned to get's statement by TestSkillVersionsRouteKindFilterWhileKindsAreOff.
+var skillVisibleSkillSQL = skillVisibleSQLWithKindFilter(`
+		  AND kind = 'skill'`)
+
+// skillVisibleSQLWithKindFilter is the yes/no visibility statement, with kindFilter appended to its rule.
+func skillVisibleSQLWithKindFilter(kindFilter string) string {
+	return `
 	SELECT EXISTS (SELECT 1 FROM agent_skills
 		WHERE id = $1 AND org_id = $2
-		  AND (scope = 'org' OR owner_user_id = $3
-		       OR (review_state = 'accepted' AND (shared_with ? $3
-		           OR ($4 AND jsonb_array_length(shared_with) > 0)))))
+		  AND ` + skillbundle.SkillVisibilitySQL("$3", "$4") + kindFilter + `)
 `
+}
 
 // skillVersionBody is the body a version row holds (session-core migration 0108,
 // agent_skill_version_body). kind and settings are not shown until EP-11 S6 gives them meaning.
@@ -1381,7 +1533,14 @@ func (h *SkillsHandler) versions(w http.ResponseWriter, r *http.Request) {
 	}
 	orgID := verifiedOrganizationID(r)
 	var visible bool
-	if err := h.pool.QueryRow(r.Context(), skillVisibleSQL, id, orgID, verifiedActorID(r), verifiedIsAdmin(r)).Scan(&visible); err != nil {
+	// P2-go-14-rel1: off on a database with the kind column, the rule names skills only, as get and the listing
+	// do, so a template or preset is refused here and its history is not read. On, or without the column, the
+	// statement is as it was.
+	visibleSQL := skillVisibleSQL
+	if !h.authoredKinds && skillsHaveKindColumn(r.Context(), h.pool) {
+		visibleSQL = skillVisibleSkillSQL
+	}
+	if err := h.pool.QueryRow(r.Context(), visibleSQL, id, orgID, verifiedActorID(r), verifiedIsAdmin(r)).Scan(&visible); err != nil {
 		slog.Error("read skill visibility failed", "error", err)
 		writeSkillVersionsError(w, http.StatusInternalServerError, "database_unavailable", "Skill versions could not be read.")
 		return
@@ -1466,6 +1625,22 @@ type SkillBundlesHandler struct {
 	// lint is off the skill is not read.
 	db       skillbundle.DB
 	lintMode skilllint.Mode
+	// scopeRules is SKILL_BUNDLE_SCOPE_RULES (F-f03-08): on, a person's manifest read follows the skill
+	// visibility rule, and an upload needs its skill to exist. Off, every route is as it was.
+	scopeRules bool
+	// spaceScope and spaceWriteVerify are SKILL_SPACE_SCOPE and SKILL_SPACE_WRITE_VERIFY (P2-go-15-rel1), read when
+	// the handler is built. Both on, a bundle upload or delete of a Space skill is made only under a decision that
+	// spaceSkillVerifier verifies, as the skill's own write is (skill_bundle_space_scope.go); either off, it is as it was.
+	spaceScope         bool
+	spaceWriteVerify   bool
+	spaceSkillVerifier *SpaceSkillDecisionVerifier
+}
+
+// WithScopeRules turns on SKILL_BUNDLE_SCOPE_RULES for the bundle routes (F-f03-08). The switch arrives
+// already parsed by skillbundle.ScopeRulesFromLookup.
+func (h *SkillBundlesHandler) WithScopeRules(on bool) *SkillBundlesHandler {
+	h.scopeRules = on
+	return h
 }
 
 // NewSkillBundlesHandler constructs the handler; enabled comes from SkillBundlesAPIFromLookup.
@@ -1476,7 +1651,8 @@ func NewSkillBundlesHandler(db skillbundle.DB, enabled bool) *SkillBundlesHandle
 	// drafts on too an upload to an accepted skill is its draft's bundle.
 	store := skillbundle.NewStore(db).WithSkillVersions(SkillVersionsAPIFromLookup(os.Getenv)).
 		WithRetention(skillbundle.RetentionFromLookup(os.Getenv)).WithDrafts(DraftPublishFromLookup(os.Getenv))
-	return &SkillBundlesHandler{store: store, enabled: enabled, db: db, lintMode: skilllint.ModeFromLookup(os.Getenv)}
+	return &SkillBundlesHandler{store: store, enabled: enabled, db: db, lintMode: skilllint.ModeFromLookup(os.Getenv),
+		spaceScope: SkillSpaceScopeFromLookup(os.Getenv), spaceWriteVerify: SkillSpaceWriteVerifyFromLookup(os.Getenv)}
 }
 
 // Register mounts the bundle route. Its more specific pattern takes precedence over the
@@ -1536,7 +1712,7 @@ func (h *SkillBundlesHandler) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		h.get(w, r, principal.OrganizationID, skillID)
+		h.get(w, r, principal, skillID)
 	case http.MethodPut:
 		if !skillBundleWriter(w, principal) {
 			return
@@ -1568,8 +1744,16 @@ func skillBundleWriter(w http.ResponseWriter, principal authctx.Principal) bool 
 
 // get is GET /api/v1/skills/{id}/bundle: the manifest of the org's bundle for the skill. The
 // bytes are read by digest through the RPC, so the manifest carries no file body.
-func (h *SkillBundlesHandler) get(w http.ResponseWriter, r *http.Request, orgID, skillID string) {
-	manifest, err := h.store.Manifest(r.Context(), orgID, skillID)
+func (h *SkillBundlesHandler) get(w http.ResponseWriter, r *http.Request, principal authctx.Principal, skillID string) {
+	var manifest skillbundle.Manifest
+	var err error
+	if h.scopeRules && principal.PrincipalType != "service" {
+		// SKILL_BUNDLE_SCOPE_RULES: a person reads the manifest of a skill they may see, and a skill they may
+		// not see answers the same not found as a missing bundle. Only a service keeps the unfiltered read.
+		manifest, err = h.store.ManifestVisible(r.Context(), principal.OrganizationID, principal.ActorID, PrincipalIsAdmin(principal), skillID, "")
+	} else {
+		manifest, err = h.store.Manifest(r.Context(), principal.OrganizationID, skillID)
+	}
 	if errors.Is(err, skillbundle.ErrNotFound) {
 		jsonErr(w, "skill bundle not found", http.StatusNotFound)
 		return
@@ -1586,10 +1770,34 @@ func (h *SkillBundlesHandler) get(w http.ResponseWriter, r *http.Request, orgID,
 	writeJSON(w, skillBundleManifestView{SkillID: skillID, ManifestSHA256: manifest.ManifestSHA256, Files: files})
 }
 
+// skillExists says whether the org holds an agent_skills row for the skill, whoever may see it.
+func (h *SkillBundlesHandler) skillExists(ctx context.Context, orgID, skillID string) (bool, error) {
+	var exists bool
+	if err := h.db.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM agent_skills WHERE id = $1 AND org_id = $2)`, skillID, orgID).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
 // put is PUT /api/v1/skills/{id}/bundle: the body is the bundle zip. A bundle that fails any
 // check is refused with its closed code and nothing is stored. A new upload replaces the
 // skill's bundle, and answers 201 for a first upload and 200 for a replacement.
 func (h *SkillBundlesHandler) put(w http.ResponseWriter, r *http.Request, principal authctx.Principal, skillID string) {
+	if h.scopeRules {
+		// SKILL_BUNDLE_SCOPE_RULES (F-f03-08): an upload needs its skill. Checked before the body is read, so a
+		// bundle for a skill the org does not hold is never parsed, linted or stored.
+		exists, err := h.skillExists(r.Context(), principal.OrganizationID, skillID)
+		if err != nil {
+			slog.Error("read skill for bundle upload failed", "org_id", principal.OrganizationID, "skill_id", skillID, "error", err)
+			jsonErr(w, "database unavailable", http.StatusInternalServerError)
+			return
+		}
+		if !exists {
+			// The closed code is the error, as the route's other refusals answer it (not_a_zip and the rest).
+			jsonErr(w, "skill_not_found", http.StatusNotFound)
+			return
+		}
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxSkillBundleBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -1602,9 +1810,11 @@ func (h *SkillBundlesHandler) put(w http.ResponseWriter, r *http.Request, princi
 		return
 	}
 	bundle, err := skillbundle.Parse(body)
+	deckChecked := false
 	if err == nil && skillbundle.DeckTemplatesFromLookup(os.Getenv) {
 		// EP-5 S6: a deck template's theme, master and logo are checked before anything is stored.
 		err = skillbundle.ValidateDeckTemplate(bundle)
+		deckChecked = err == nil
 	}
 	if err != nil {
 		var refusal *skillbundle.RefusalError
@@ -1625,11 +1835,30 @@ func (h *SkillBundlesHandler) put(w http.ResponseWriter, r *http.Request, princi
 		writeSkillLintRefusal(w, lintFindings)
 		return
 	}
+	// P2-go-15-rel1: a bundle of a Space skill is replaced only under a verified Space decision for this body, checked
+	// after the body's own checks and just before the write.
+	if err := h.verifySpaceSkillBundleWrite(r, principal, skillID, spaceSkillBundleOperation, body); err != nil {
+		if writeSpaceSkillDecisionError(w, err) {
+			return
+		}
+		slog.Error("read skill for bundle upload failed", "org_id", principal.OrganizationID, "skill_id", skillID, "error", err)
+		jsonErr(w, "database unavailable", http.StatusInternalServerError)
+		return
+	}
 	result, err := h.store.Put(r.Context(), principal.OrganizationID, skillID, principal.ActorID, bundle)
 	if err != nil {
 		slog.Error("write skill bundle failed", "error", err)
 		jsonErr(w, "database unavailable", http.StatusInternalServerError)
 		return
+	}
+	if deckChecked {
+		// F-f09-08: the bundle passed the deck check with the switch on, so it is stamped and may be listed as a template.
+		// Put has stored it already; if the stamp fails the bundle stays unlisted until a start re-checks it.
+		if err := h.store.MarkDeckValidated(r.Context(), principal.OrganizationID, skillID, bundle.ManifestSHA256); err != nil {
+			slog.Error("mark skill deck template validated failed", "error", err)
+			jsonErr(w, "database unavailable", http.StatusInternalServerError)
+			return
+		}
 	}
 	status := http.StatusCreated
 	if result.Replaced {
@@ -1675,6 +1904,15 @@ func (h *SkillBundlesHandler) lintFrontMatter(ctx context.Context, orgID, skillI
 // delete is DELETE /api/v1/skills/{id}/bundle: removes the org's bundle; its files cascade and
 // blobs no other bundle names are dropped.
 func (h *SkillBundlesHandler) delete(w http.ResponseWriter, r *http.Request, principal authctx.Principal, skillID string) {
+	// P2-go-15-rel1: a bundle of a Space skill is deleted only under a verified Space decision (a delete's body is empty).
+	if err := h.verifySpaceSkillBundleWrite(r, principal, skillID, spaceSkillBundleOperation, nil); err != nil {
+		if writeSpaceSkillDecisionError(w, err) {
+			return
+		}
+		slog.Error("read skill for bundle delete failed", "org_id", principal.OrganizationID, "skill_id", skillID, "error", err)
+		jsonErr(w, "database unavailable", http.StatusInternalServerError)
+		return
+	}
 	err := h.store.Delete(r.Context(), principal.OrganizationID, skillID, principal.ActorID)
 	if errors.Is(err, skillbundle.ErrNotFound) {
 		jsonErr(w, "skill bundle not found", http.StatusNotFound)

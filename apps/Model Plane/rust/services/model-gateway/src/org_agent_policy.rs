@@ -27,7 +27,7 @@ use mp_contracts::model_plane::v1::{
     AutonomyRung, OrgPolicyContext, ToolDefinition, WebPolicyContext,
 };
 use mp_contracts::org_agent_policy::{
-    is_https_origin, Kind, SettingDef, MCP_APPS_NETWORK_ORIGINS, SETTINGS,
+    is_https_origin, Kind, SettingDef, MCP_APPS_NETWORK_ORIGINS, SETTINGS, WEB_COVERS_BROWSER,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -172,9 +172,12 @@ impl OrgPolicy {
             digest: digest.to_owned(),
             mode_cap,
             rung_cap: rung_from_token(&token("rung_cap")),
-            // An origin grant loosens the platform default (`none`), so it never makes a document restrictive.
+            // An origin grant loosens the platform default (`none`), and so does the browser opt-out of web.covers_browser
+            // (O-19, `false` against the default `true`), so neither makes a document restrictive.
             restrictive: SETTINGS.iter().any(|def| {
-                def.key != MCP_APPS_NETWORK_ORIGINS && token_of(def, settings) != def.default
+                def.key != MCP_APPS_NETWORK_ORIGINS
+                    && def.key != WEB_COVERS_BROWSER
+                    && token_of(def, settings) != def.default
             }),
             max_fan_out_items: token(mp_contracts::org_agent_policy::RESEARCH_MAX_FAN_OUT_ITEMS)
                 .parse()
@@ -908,6 +911,23 @@ mod tests {
         assert_eq!(policy.mode_cap, AgentMode::Auto);
         assert_eq!(policy.rung_cap, None);
         assert!(!policy.restrictive);
+    }
+
+    #[test]
+    fn org_agent_policy_the_browser_opt_out_loosens_and_does_not_restrict() {
+        // O-19: web.covers_browser false is the opt-out of the default `true`, a loosening, so it never makes a document
+        // restrictive (which would lengthen how long a stale answer is served). The default and the covering value are not
+        // restrictive either.
+        for settings_doc in [
+            json!({"web.covers_browser": false}),
+            json!({"web.covers_browser": true}),
+        ] {
+            let policy = OrgPolicy::from_settings(1, "sha256:1", &settings(settings_doc));
+            assert!(!policy.restrictive);
+        }
+        let narrowed =
+            OrgPolicy::from_settings(2, "sha256:2", &settings(json!({"web.mode": "off"})));
+        assert!(narrowed.restrictive);
     }
 
     #[test]

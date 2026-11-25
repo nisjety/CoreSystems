@@ -62,6 +62,10 @@ type Server struct {
 	// ignored and the live bundle is read, as before.
 	skillBundleRetention bool
 
+	// skillBundleScopeRules is SKILL_BUNDLE_SCOPE_RULES (F-f03-08): on, a person's bundle reads are narrowed to
+	// the skills the person may see, and a person is never served a bundle body. Off, every read is as it was.
+	skillBundleScopeRules bool
+
 	// permissionRules reads the org permission rules (W5-074). The gate consults it only while
 	// permissionRulesEnabled is true.
 	permissionRules permissionRuleMatcher
@@ -74,6 +78,17 @@ type Server struct {
 
 	// ruleAudit is TOOL_POLICY_RULE_AUDIT_ENABLED, parsed by the caller (policy.ToolPolicyRuleAuditFromLookup).
 	ruleAudit bool
+
+	// orgWebModes reads the org's web.mode and web.covers_browser for the web gate (F-f09-13). It is read only while
+	// orgWebModeGate is true.
+	orgWebModes orgWebModeReader
+
+	// orgWebModeGate is CAPABILITY_ORG_WEB_MODE_GATE_ENABLED: the public-web capabilities follow the org's web.mode.
+	orgWebModeGate bool
+
+	// orgWebModeBrowser is CAPABILITY_ORG_WEB_MODE_COVERS_BROWSER: the browser capabilities follow it too, for an org
+	// that does not opt out. It has effect only while orgWebModeGate is on.
+	orgWebModeBrowser bool
 }
 
 // RuleUseRecorder writes the content-free audit row of a call a stored allow relaxed. *api.ToolPoliciesHandler
@@ -104,6 +119,14 @@ type skillBundleReader interface {
 // *skillbundle.Store satisfies it; a reader without it serves the live bundle only.
 type skillBundleVersionReader interface {
 	ManifestAt(ctx context.Context, orgID, skillID, manifestSHA256 string) (skillbundle.Manifest, error)
+}
+
+// skillBundleScopedReader is the bundle store's read for a person under SKILL_BUNDLE_SCOPE_RULES (F-f03-08): the
+// listing and the manifest, narrowed to the skills the caller may see. *skillbundle.Store satisfies it. A reader
+// without it answers a person nothing.
+type skillBundleScopedReader interface {
+	ListVisible(ctx context.Context, orgID, callerID string, isAdmin bool, skillIDs []string) ([]skillbundle.Summary, error)
+	ManifestVisible(ctx context.Context, orgID, callerID string, isAdmin bool, skillID, manifestSHA256 string) (skillbundle.Manifest, error)
 }
 
 // procedureReader is the read side of the saved-procedure store. *procedures.Store satisfies it; the RPC
@@ -255,6 +278,13 @@ func (s *Server) WithSkillBundleRetention(enabled bool) *Server {
 	return s
 }
 
+// WithSkillBundleScopeRules turns on SKILL_BUNDLE_SCOPE_RULES for the bundle reads (F-f03-08). The switch arrives
+// already parsed by skillbundle.ScopeRulesFromLookup.
+func (s *Server) WithSkillBundleScopeRules(enabled bool) *Server {
+	s.skillBundleScopeRules = enabled
+	return s
+}
+
 // WithDeckTemplates turns on the deck_template flag of ListSkillBundles (EP-5 S6). The switch
 // arrives already parsed by skillbundle.DeckTemplatesFromLookup; off, every summary reports false.
 func (s *Server) WithDeckTemplates(enabled bool) *Server {
@@ -278,6 +308,17 @@ func (s *Server) WithPermissionRules(rules permissionRuleMatcher, enabled bool) 
 func (s *Server) WithRuleAudit(recorder RuleUseRecorder, enabled bool) *Server {
 	s.ruleUses = recorder
 	s.ruleAudit = enabled
+	return s
+}
+
+// WithOrgWebModeGate attaches the reader of the org's web keys and the two switches that enable the gate (F-f09-13).
+// Both switches arrive parsed by the caller, and only the literal "true" enables each. web turns the public-web gate
+// on; browser turns the browser gate on, and it has effect only with web. Off, EvaluatePolicy decides as it did
+// before and no key is read.
+func (s *Server) WithOrgWebModeGate(reader orgWebModeReader, web, browser bool) *Server {
+	s.orgWebModes = reader
+	s.orgWebModeGate = web && reader != nil
+	s.orgWebModeBrowser = browser && s.orgWebModeGate
 	return s
 }
 
@@ -599,7 +640,8 @@ func (s *Server) GetCapability(ctx context.Context, req *mpv1.GetCapabilityReque
 // With TOOL_POLICY_ENFORCED on, the stored tool policies of the org and of the
 // named person apply as well (policy.EvaluateTool).
 // With CAPABILITY_PERMISSION_RULES_ENABLED on, the org's permission rules tighten
-// the decision last (applyPermissionRules).
+// the decision (applyPermissionRules). With CAPABILITY_ORG_WEB_MODE_GATE_ENABLED on,
+// the org's web.mode then withholds a web capability (applyOrgWebMode).
 // The tool, the user, the class and floor, the policy source and the pinned
 // digest are all signed into the decision evidence.
 func (s *Server) EvaluatePolicy(ctx context.Context, req *mpv1.EvaluatePolicyRequest) (*mpv1.EvaluatePolicyResponse, error) {
@@ -676,6 +718,9 @@ func (s *Server) EvaluatePolicy(ctx context.Context, req *mpv1.EvaluatePolicyReq
 	if s.permissionRulesEnabled {
 		result = s.applyPermissionRules(ctx, orgID, req, capability, binding, result)
 	}
+	// F-f09-13: the org's web.mode withholds a web capability for every caller. It runs before the rule-use audit, so a
+	// call it withholds writes no tool_policy_rule_used row for a rule that did not take effect.
+	result = s.applyOrgWebMode(ctx, orgID, req, result)
 	result = s.auditRuleUse(ctx, principal, orgID, req, capability, binding, retentionBound, result)
 	return s.policyResponse(req, orgID, capability, result, binding), nil
 }
@@ -1146,14 +1191,25 @@ func (s *Server) ValidateSkillBundle(ctx context.Context, req *mpv1.ValidateSkil
 // ids when any are given. While SKILL_BUNDLES_ENABLED is off it answers an empty list.
 func (s *Server) ListSkillBundles(ctx context.Context, req *mpv1.ListSkillBundlesRequest) (*mpv1.ListSkillBundlesResponse, error) {
 	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "ListSkillBundles")))
-	orgID, err := verifiedOrganizationID(ctx)
+	principal, err := verifiedPrincipal(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if !s.skillBundlesEnabled {
 		return &mpv1.ListSkillBundlesResponse{}, nil
 	}
-	summaries, err := s.skillBundles.List(ctx, orgID, req.SkillIds)
+	var summaries []skillbundle.Summary
+	if s.boundedToCaller(principal) {
+		// SKILL_BUNDLE_SCOPE_RULES: a person sees the bundles of the skills the skill listing shows them. A reader
+		// without the visible read answers nothing rather than the unfiltered list.
+		scoped, ok := s.skillBundles.(skillBundleScopedReader)
+		if !ok {
+			return &mpv1.ListSkillBundlesResponse{}, nil
+		}
+		summaries, err = scoped.ListVisible(ctx, principal.OrganizationID, principal.ActorID, api.PrincipalIsAdmin(principal), req.SkillIds)
+	} else {
+		summaries, err = s.skillBundles.List(ctx, principal.OrganizationID, req.SkillIds)
+	}
 	if err != nil {
 		return nil, skillBundleErr(err)
 	}
@@ -1176,17 +1232,19 @@ func (s *Server) ListSkillBundles(ctx context.Context, req *mpv1.ListSkillBundle
 
 // GetSkillBundleManifest returns the digest and file metadata of the org's bundle for a skill,
 // never a file body. While SKILL_BUNDLES_ENABLED is off every skill reads as having no bundle.
-// With SKILL_BUNDLE_RETENTION on, a manifest_sha256 in the request names the kept bundle to read.
+// With SKILL_BUNDLE_RETENTION on, a manifest_sha256 in the request names the kept bundle to read. Under
+// SKILL_BUNDLE_SCOPE_RULES a person reads only the bundle of a skill the visibility rule shows them; any other skill
+// answers NotFound, exactly as a missing bundle does.
 func (s *Server) GetSkillBundleManifest(ctx context.Context, req *mpv1.GetSkillBundleManifestRequest) (*mpv1.SkillBundleManifest, error) {
 	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "GetSkillBundleManifest")))
-	orgID, err := verifiedOrganizationID(ctx)
+	principal, err := verifiedPrincipal(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if !s.skillBundlesEnabled {
 		return nil, skillBundleErr(skillbundle.ErrNotFound)
 	}
-	manifest, err := s.readSkillBundleManifest(ctx, orgID, req.SkillId, req.ManifestSha256)
+	manifest, err := s.readSkillBundleManifestFor(ctx, principal, req.SkillId, req.ManifestSha256)
 	if err != nil {
 		return nil, skillBundleErr(err)
 	}
@@ -1217,6 +1275,34 @@ func (s *Server) readSkillBundleManifest(ctx context.Context, orgID, skillID, ma
 	return versions.ManifestAt(ctx, orgID, skillID, manifestSHA256)
 }
 
+// boundedToCaller reports whether a bundle read is narrowed to the skills the verified principal may see
+// (SKILL_BUNDLE_SCOPE_RULES): the rule is on and the principal is not a service. A service keeps the unfiltered read
+// it has under the capability read scope; any other principal type is bounded, so an unknown type fails closed.
+func (s *Server) boundedToCaller(principal authctx.Principal) bool {
+	return s.skillBundleScopeRules && principal.PrincipalType != "service"
+}
+
+// readSkillBundleManifestFor is readSkillBundleManifest for the verified principal. A person under the scope
+// rule reads through ManifestVisible, so a skill the person may not see is ErrNotFound, the same as a missing
+// bundle. A digest is honoured only with retention on, as readSkillBundleManifest honours it.
+func (s *Server) readSkillBundleManifestFor(ctx context.Context, principal authctx.Principal, skillID, manifestSHA256 string) (skillbundle.Manifest, error) {
+	if !s.boundedToCaller(principal) {
+		return s.readSkillBundleManifest(ctx, principal.OrganizationID, skillID, manifestSHA256)
+	}
+	scoped, ok := s.skillBundles.(skillBundleScopedReader)
+	if !ok {
+		return skillbundle.Manifest{}, skillbundle.ErrNotFound
+	}
+	digest := ""
+	if s.skillBundleRetention && manifestSHA256 != "" {
+		if !isSHA256Hex(manifestSHA256) {
+			return skillbundle.Manifest{}, skillbundle.ErrNotFound
+		}
+		digest = manifestSHA256
+	}
+	return scoped.ManifestVisible(ctx, principal.OrganizationID, principal.ActorID, api.PrincipalIsAdmin(principal), skillID, digest)
+}
+
 // isSHA256Hex reports whether value is the lowercase hex spelling every bundle digest uses.
 func isSHA256Hex(value string) bool {
 	if len(value) != 64 {
@@ -1235,14 +1321,18 @@ func isSHA256Hex(value string) bool {
 // same bytes.
 func (s *Server) GetSkillBlob(ctx context.Context, req *mpv1.GetSkillBlobRequest) (*mpv1.GetSkillBlobResponse, error) {
 	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "GetSkillBlob")))
-	orgID, err := verifiedOrganizationID(ctx)
+	principal, err := verifiedPrincipal(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if !s.skillBundlesEnabled {
+	// Under SKILL_BUNDLE_SCOPE_RULES a bundle body is a service's read (F-f03-08, decision D8): the body is what the
+	// sandbox runs, and the visibility rule does not reach a body read by digest. A person, or any other principal
+	// that is not a service, gets the not found a missing body gets, whichever skill it names. Off, the read is as
+	// it was; SKILL_BUNDLE_READ_RULE_ENABLED governs it in AuthorizeGRPCWith.
+	if !s.skillBundlesEnabled || s.boundedToCaller(principal) {
 		return nil, skillBundleErr(skillbundle.ErrNotFound)
 	}
-	content, err := s.skillBundles.Blob(ctx, orgID, req.SkillId, req.Sha256)
+	content, err := s.skillBundles.Blob(ctx, principal.OrganizationID, req.SkillId, req.Sha256)
 	if err != nil {
 		return nil, skillBundleErr(err)
 	}

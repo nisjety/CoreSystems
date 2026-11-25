@@ -58,7 +58,12 @@ func orgAgentMember() authctx.Principal {
 
 func serveOrgAgentPolicy(t *testing.T, enabled bool, db registryDatabase, principal *authctx.Principal, method, target, ifMatch, body string) (*httptest.ResponseRecorder, *OrgAgentPolicyHandler) {
 	t.Helper()
-	handler := NewOrgAgentPolicyHandler(db, enabled)
+	return serveOrgAgentPolicyWith(t, NewOrgAgentPolicyHandler(db, enabled), principal, method, target, ifMatch, body)
+}
+
+// serveOrgAgentPolicyWith serves one request through handler, so a test can choose the switches it is built with.
+func serveOrgAgentPolicyWith(t *testing.T, handler *OrgAgentPolicyHandler, principal *authctx.Principal, method, target, ifMatch, body string) (*httptest.ResponseRecorder, *OrgAgentPolicyHandler) {
+	t.Helper()
 	mux := http.NewServeMux()
 	handler.Register(mux)
 	request := httptest.NewRequest(method, target, strings.NewReader(body))
@@ -71,6 +76,18 @@ func serveOrgAgentPolicy(t *testing.T, enabled bool, db registryDatabase, princi
 	response := httptest.NewRecorder()
 	mux.ServeHTTP(response, request)
 	return response, handler
+}
+
+// orgAgentKeysInForce is the number of schema keys a handler serves: every key, except a browser-switched one while its
+// switch is off.
+func orgAgentKeysInForce(handler *OrgAgentPolicyHandler) int {
+	count := 0
+	for _, def := range orgAgentPolicySettings {
+		if handler.inForce(def) {
+			count++
+		}
+	}
+	return count
 }
 
 func orgAgentErrorCode(t *testing.T, response *httptest.ResponseRecorder) string {
@@ -227,7 +244,7 @@ func TestOrgAgentPolicyStaleRevisionIsAConflict(t *testing.T) {
 func TestOrgAgentPolicyReadsTheDefaultsWhenNoRowExists(t *testing.T) {
 	member := orgAgentMember()
 	db := orgAgentFakeDB{t: t, row: orgAgentErrRow{err: pgx.ErrNoRows}}
-	response, _ := serveOrgAgentPolicy(t, true, db, &member, http.MethodGet, "/api/v1/org-agent-policy", "", "")
+	response, handler := serveOrgAgentPolicy(t, true, db, &member, http.MethodGet, "/api/v1/org-agent-policy", "", "")
 	if response.Code != http.StatusOK {
 		t.Fatalf("GET = %d %s", response.Code, response.Body.String())
 	}
@@ -242,7 +259,7 @@ func TestOrgAgentPolicyReadsTheDefaultsWhenNoRowExists(t *testing.T) {
 	if view.Revision != 0 || view.UpdatedAt != nil {
 		t.Fatalf("revision %d, updated_at %v; want 0 and null", view.Revision, view.UpdatedAt)
 	}
-	if !reflect.DeepEqual(view.Settings["mode_cap"], "auto") || len(view.Settings) != len(orgAgentPolicySettings) {
+	if !reflect.DeepEqual(view.Settings["mode_cap"], "auto") || len(view.Settings) != orgAgentKeysInForce(handler) {
 		t.Fatalf("settings = %v", view.Settings)
 	}
 	if !reflect.DeepEqual(view.Settings["reference_uploads"], "off") {
@@ -253,7 +270,7 @@ func TestOrgAgentPolicyReadsTheDefaultsWhenNoRowExists(t *testing.T) {
 func TestOrgAgentPolicyEffectiveNamesTheLayerAndTheStatus(t *testing.T) {
 	member := orgAgentMember()
 	db := orgAgentFakeDB{t: t, row: orgAgentErrRow{err: pgx.ErrNoRows}}
-	response, _ := serveOrgAgentPolicy(t, true, db, &member, http.MethodGet, "/api/v1/org-agent-policy/effective?user=me", "", "")
+	response, handler := serveOrgAgentPolicy(t, true, db, &member, http.MethodGet, "/api/v1/org-agent-policy/effective?user=me", "", "")
 	if response.Code != http.StatusOK {
 		t.Fatalf("effective = %d %s", response.Code, response.Body.String())
 	}
@@ -267,8 +284,8 @@ func TestOrgAgentPolicyEffectiveNamesTheLayerAndTheStatus(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &view); err != nil {
 		t.Fatal(err)
 	}
-	if len(view.Settings) != len(orgAgentPolicySettings) {
-		t.Fatalf("keys = %d, want %d", len(view.Settings), len(orgAgentPolicySettings))
+	if want := orgAgentKeysInForce(handler); len(view.Settings) != want {
+		t.Fatalf("keys = %d, want %d", len(view.Settings), want)
 	}
 	for _, row := range view.Settings {
 		if row.Source != "platform_default" {
@@ -430,11 +447,14 @@ func TestOrgAgentPolicySchemaMatchesTheGolden(t *testing.T) {
 	if err := json.Unmarshal(raw, &golden); err != nil {
 		t.Fatalf("golden is not JSON: %v", err)
 	}
-	if len(golden.Settings) != len(orgAgentPolicySettings) {
-		t.Fatalf("golden has %d keys, the table %d", len(golden.Settings), len(orgAgentPolicySettings))
+	// The golden is the whole schema, the browser-switched key included (O-19). A switch that is off hides that key from
+	// the document, its digest and every read (inForce), which the tests beside this one pin.
+	closed := orgAgentPolicySettings
+	if len(golden.Settings) != len(closed) {
+		t.Fatalf("golden has %d keys, the table %d", len(golden.Settings), len(closed))
 	}
 	for i, row := range golden.Settings {
-		def := orgAgentPolicySettings[i]
+		def := closed[i]
 		status := "enforced"
 		if def.reserved {
 			status = "reserved"

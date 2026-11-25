@@ -109,6 +109,14 @@
       "status": "enforced"
     },
     {
+      "key": "web.covers_browser",
+      "kind": "bool",
+      "strictness_order": ["true", "false"],
+      "default": "true",
+      "fail_closed_value": "true",
+      "status": "enforced"
+    },
+    {
       "key": "mcp_apps.network_origins",
       "kind": "origin_allow_list",
       "strictness_order": ["none", "approved_only"],

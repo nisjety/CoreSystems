@@ -129,7 +129,12 @@ type outcome int
 
 const (
 	outcomeAck outcome = iota
+	// outcomeRetry is a transient failure that is redelivered at once. The terminal-run
+	// watchers use it, as they always have.
 	outcomeRetry
+	// outcomeRetryLater is a transient failure of an attention or scheduled notice. It is
+	// redelivered after a backoff that grows with each delivery (see attentionBackoff).
+	outcomeRetryLater
 )
 
 // Notifier subscribes to run-lifecycle events and, for each terminal event,
@@ -139,7 +144,9 @@ type Notifier struct {
 	notify           NotifyClient
 	now              func() time.Time
 	attention        *attentionNotify
+	attentionConfirm AttentionConfirmer
 	scheduledOutcome bool
+	scheduleOwner    ScheduleOwnerChecker
 }
 
 // NewNotifier constructs a Notifier. Both dependencies are required: without
@@ -158,6 +165,9 @@ func NewNotifier(store SubscriptionStore, notify NotifyClient, opts ...NotifierO
 	n := &Notifier{store: store, notify: notify, now: time.Now}
 	for _, opt := range opts {
 		opt(n)
+	}
+	if n.attention != nil && n.attentionConfirm == nil {
+		slog.Warn("runwatch: RUN_ATTENTION notices fail closed: no attention confirmer was given, so no waiting item is announced")
 	}
 	return n, nil
 }
@@ -179,17 +189,75 @@ func (n *Notifier) Run(ctx context.Context, js nats.JetStreamContext) error {
 	return nil
 }
 
+// attentionBackoffs is how long a transient failure of an attention or scheduled
+// notice waits before JetStream redelivers it, by the delivery that failed: 5s,
+// then 15s, 45s and 2m. The durable's MaxDeliver is 5, so the fifth delivery is the
+// last one JetStream makes and its delay is never used; the longest step is kept for
+// any later delivery, so a larger MaxDeliver cannot turn redelivery into a hot loop.
+var attentionBackoffs = [...]time.Duration{5 * time.Second, 15 * time.Second, 45 * time.Second, 2 * time.Minute}
+
+// attentionBackoff returns the redelivery delay after delivery number deliveries (1
+// for the first). A delivery past the fourth waits the longest step, 2m. It returns
+// zero, meaning a plain Nak, only for a delivery count that is not known.
+func attentionBackoff(deliveries uint64) time.Duration {
+	if deliveries == 0 {
+		return 0
+	}
+	if deliveries > uint64(len(attentionBackoffs)) {
+		return attentionBackoffs[len(attentionBackoffs)-1]
+	}
+	return attentionBackoffs[deliveries-1]
+}
+
+// settlement is how handle settles one message: an ack, or a Nak that redelivers
+// after delay. A zero delay is a plain Nak, as the terminal-run watchers have always
+// used.
+type settlement struct {
+	ack   bool
+	delay time.Duration
+}
+
+// settle maps one process outcome, and how many times JetStream has delivered the
+// message, to its settlement. outcomeRetry keeps the plain Nak; outcomeRetryLater
+// backs off by delivery count.
+func settle(o outcome, deliveries uint64) settlement {
+	switch o {
+	case outcomeRetry:
+		return settlement{}
+	case outcomeRetryLater:
+		// A zero delay is the plain Nak handle falls back to.
+		return settlement{delay: attentionBackoff(deliveries)}
+	default:
+		return settlement{ack: true}
+	}
+}
+
+// deliveryCount is how many times JetStream has delivered msg, this delivery
+// included. It is zero when the message carries no JetStream metadata.
+func deliveryCount(msg *nats.Msg) uint64 {
+	meta, err := msg.Metadata()
+	if err != nil {
+		return 0
+	}
+	return meta.NumDelivered
+}
+
 // handle translates one message's process outcome into ack/Nak. Per-message
 // errors are logged; they never propagate out of the JetStream callback.
 func (n *Notifier) handle(ctx context.Context, msg *nats.Msg) {
-	switch n.process(ctx, msg.Data) {
-	case outcomeRetry:
-		if err := msg.Nak(); err != nil {
-			slog.Warn("runwatch: nak failed", "subject", msg.Subject, "error", err)
-		}
-	default:
+	s := settle(n.process(ctx, msg.Data), deliveryCount(msg))
+	switch {
+	case s.ack:
 		if err := msg.Ack(); err != nil {
 			slog.Warn("runwatch: ack failed", "subject", msg.Subject, "error", err)
+		}
+	case s.delay > 0:
+		if err := msg.NakWithDelay(s.delay); err != nil {
+			slog.Warn("runwatch: nak with delay failed", "subject", msg.Subject, "error", err)
+		}
+	default:
+		if err := msg.Nak(); err != nil {
+			slog.Warn("runwatch: nak failed", "subject", msg.Subject, "error", err)
 		}
 	}
 }

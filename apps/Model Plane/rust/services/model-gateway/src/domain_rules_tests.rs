@@ -412,6 +412,260 @@ async fn fetch_url(state: &AppState, org_id: &str) -> crate::tool_loop::ToolOutc
     .await
 }
 
+/// org-core for a Space, which reads the `space_id` a call names as org-core does: `partner.example` is allowed for the
+/// organisation and denied for `space-b`, and every other host is allowed.
+struct PartnerDeniedInSpaceB;
+
+impl wiremock::Respond for PartnerDeniedInSpaceB {
+    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+        let space = request
+            .url
+            .query_pairs()
+            .find(|(key, _)| key == "space_id")
+            .map(|(_, value)| value.into_owned());
+        let decisions: Vec<Value> = request
+            .url
+            .query_pairs()
+            .filter(|(key, _)| key == "host")
+            .map(|(_, host)| {
+                if space.as_deref() == Some("space-b") && host == "partner.example" {
+                    json!({"host": host, "effective": "deny", "cap": "none", "source": "org_block"})
+                } else {
+                    json!({"host": host, "effective": "ask", "cap": "act", "source": "default"})
+                }
+            })
+            .collect();
+        ResponseTemplate::new(200).set_body_json(json!({"revision": 1, "decisions": decisions}))
+    }
+}
+
+/// org-core for `org_id`, answering by Space as [`PartnerDeniedInSpaceB`] does.
+pub(crate) async fn org_core_by_space(org_id: &str) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/internal/orgs/{org_id}/browser-sites/resolve"
+        )))
+        .respond_with(PartnerDeniedInSpaceB)
+        .mount(&server)
+        .await;
+    server
+}
+
+/// `fetch_url` for [`REQUESTED`] in `space_id`.
+async fn fetch_url_in_space(
+    state: &AppState,
+    org_id: &str,
+    space_id: &str,
+) -> crate::tool_loop::ToolOutcome {
+    let call = ToolCall {
+        id: "call-1".to_owned(),
+        name: "fetch_url".to_owned(),
+        arguments_json: json!({ "url": REQUESTED }).to_string(),
+    };
+    call_in_space(state, org_id, space_id, "", &call).await
+}
+
+/// One call through the public dispatch, in `space_id`, with `inference_bearer` as the turn's inference credential (empty
+/// for none).
+async fn call_in_space(
+    state: &AppState,
+    org_id: &str,
+    space_id: &str,
+    inference_bearer: &str,
+    call: &ToolCall,
+) -> crate::tool_loop::ToolOutcome {
+    crate::tool_loop::dispatch_tool(
+        state,
+        "run",
+        org_id,
+        "user",
+        "thread",
+        space_id,
+        &[],
+        "",
+        None,
+        None,
+        inference_bearer,
+        "",
+        None,
+        false,
+        false,
+        false,
+        call,
+        None,
+        None,
+        None,
+    )
+    .await
+}
+
+/// F-f03-03 at the tool: a `fetch_url` in a Space whose floor denies the page's final host is refused under enforce,
+/// though the organisation's own answer allows that host. With the switch off the Space is not named, and the page is read.
+#[tokio::test]
+async fn fetch_url_in_a_space_refuses_a_final_host_the_space_floor_denies() {
+    let _mode = test_seam::set(WebDomainPolicyMode::Enforce);
+    let org = org_core_by_space("org-f0303-fetch").await;
+    let (state, _quarry) = fetch_state(&org, "https://partner.example/landing").await;
+    {
+        let _floor = test_seam::set_space_floor(true);
+        let outcome = fetch_url_in_space(&state, "org-f0303-fetch", "space-b").await;
+        let error = outcome
+            .error
+            .clone()
+            .expect("the Space floor refuses the page");
+        assert!(error.starts_with(SITE_BLOCKED_CODE), "{error}");
+        assert!(error.contains("partner.example"), "{error}");
+        assert!(
+            !outcome.output.contains(MARKER),
+            "the page text reached the model: {}",
+            outcome.output
+        );
+    }
+    {
+        let _floor = test_seam::set_space_floor(false);
+        let outcome = fetch_url_in_space(&state, "org-f0303-fetch", "space-b").await;
+        assert_eq!(
+            outcome.error, None,
+            "switched off, the organisation's own answer allows the page"
+        );
+        assert!(outcome.output.contains(MARKER), "{}", outcome.output);
+    }
+}
+
+/// F-f03-03 at `fetch_url`'s pre-check: a URL on a host the Space floor denies for `space-b` is refused by name before any
+/// read, and no Quarry request is made. Switched off, the same URL is read, because the organisation's own answer allows
+/// the host.
+#[tokio::test]
+async fn fetch_url_in_a_space_refuses_a_requested_host_the_space_floor_denies_before_any_read() {
+    const PARTNER: &str = "https://partner.example/start";
+    let _mode = test_seam::set(WebDomainPolicyMode::Enforce);
+    let org = org_core_by_space("org-f0303-prefetch").await;
+    let (state, quarry) =
+        fetch_state_with_url(&org, json!({"requested": PARTNER, "final_url": PARTNER})).await;
+    let call = ToolCall {
+        id: "call-1".to_owned(),
+        name: "fetch_url".to_owned(),
+        arguments_json: json!({ "url": PARTNER }).to_string(),
+    };
+    {
+        let _floor = test_seam::set_space_floor(true);
+        let outcome = call_in_space(&state, "org-f0303-prefetch", "space-b", "", &call).await;
+        let error = outcome.error.unwrap_or_default();
+        assert!(error.starts_with(SITE_BLOCKED_CODE), "{error}");
+        assert!(error.contains("partner.example"), "{error}");
+        assert_eq!(requests(&quarry).await, 0, "a refused URL is never read");
+    }
+    {
+        let _floor = test_seam::set_space_floor(false);
+        let outcome = call_in_space(&state, "org-f0303-prefetch", "space-b", "", &call).await;
+        assert_eq!(
+            outcome.error, None,
+            "switched off, the organisation's own answer allows the host"
+        );
+        assert!(outcome.output.contains(MARKER), "{}", outcome.output);
+        assert_eq!(requests(&quarry).await, 1, "the page is read");
+    }
+}
+
+/// F-f03-03 at `extract_structured`'s pre-check: a URL on a host the Space floor denies for `space-b` is refused by name
+/// before any read. Switched off, the refusal does not come, and the call goes on to read the page; its inference call then
+/// fails on the dead endpoint the test gives it, so nothing real is reached.
+#[tokio::test]
+async fn extract_structured_in_a_space_refuses_a_requested_host_the_space_floor_denies() {
+    const PARTNER: &str = "https://partner.example/start";
+    let _mode = test_seam::set(WebDomainPolicyMode::Enforce);
+    let _tool = crate::web_extraction::test_seam::set_flag(true);
+    let org = org_core_by_space("org-f0303-xpre").await;
+    let (mut state, quarry) =
+        fetch_state_with_url(&org, json!({"requested": PARTNER, "final_url": PARTNER})).await;
+    // Nothing listens on port 1, so a call that got past the pre-check fails there and never reaches an inference core.
+    state.inference_client =
+        mp_contracts::model_plane::v1::inference_core_client::InferenceCoreClient::new(
+            tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy(),
+        );
+    let call = ToolCall {
+        id: "call-1".to_owned(),
+        name: "extract_structured".to_owned(),
+        arguments_json: json!({ "url": PARTNER, "question": "What does it cost?" }).to_string(),
+    };
+    {
+        let _floor = test_seam::set_space_floor(true);
+        let outcome = call_in_space(&state, "org-f0303-xpre", "space-b", "bearer-x", &call).await;
+        let error = outcome.error.unwrap_or_default();
+        assert!(error.starts_with(SITE_BLOCKED_CODE), "{error}");
+        assert!(error.contains("partner.example"), "{error}");
+        assert_eq!(requests(&quarry).await, 0, "a refused URL is never read");
+    }
+    {
+        let _floor = test_seam::set_space_floor(false);
+        let outcome = call_in_space(&state, "org-f0303-xpre", "space-b", "bearer-x", &call).await;
+        let error = outcome.error.clone().unwrap_or_default();
+        assert!(
+            !error.contains(SITE_BLOCKED_CODE),
+            "switched off, the Space floor does not refuse the URL: {error}"
+        );
+        assert_eq!(requests(&quarry).await, 1, "the page is read");
+    }
+}
+
+/// F-f03-03 at the search: a `web_search` in `space-b` drops a hit on a host the Space floor denies, and keeps it with the
+/// switch off, where the organisation's own answer allows the host. The forced search dispatches this same call in its Space.
+#[tokio::test]
+async fn web_search_in_a_space_drops_a_hit_on_a_host_the_space_floor_denies() {
+    let _mode = test_seam::set(WebDomainPolicyMode::Enforce);
+    let org = org_core_by_space("org-f0303-search").await;
+    let quarry = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [
+                {"url": "https://partner.example/offer", "title": "Offer", "snippet": "A partner offer.", "source": "brave"},
+                {"url": "https://example.org/page", "title": "Page", "snippet": "A page.", "source": "brave"}
+            ]
+        })))
+        .mount(&quarry)
+        .await;
+    let mut state = AppState::new();
+    state.quarry = crate::quarry::Client::new(crate::quarry::Config {
+        base_url: quarry.uri(),
+        token: "test-token".to_owned(),
+        timeout: std::time::Duration::from_secs(5),
+    });
+    state.org_core_base_url = org.uri();
+    state.org_core_service_token = "test-token".to_owned();
+    let call = ToolCall {
+        id: "call-1".to_owned(),
+        name: "web_search".to_owned(),
+        arguments_json: json!({ "query": "partner offer" }).to_string(),
+    };
+    {
+        let _floor = test_seam::set_space_floor(true);
+        let outcome = call_in_space(&state, "org-f0303-search", "space-b", "", &call).await;
+        assert_eq!(outcome.error, None, "{:?}", outcome.error);
+        assert!(
+            !outcome.output.contains("partner.example"),
+            "the Space denies the hit's host: {}",
+            outcome.output
+        );
+        assert!(
+            outcome.output.contains("example.org/page"),
+            "{}",
+            outcome.output
+        );
+    }
+    {
+        let _floor = test_seam::set_space_floor(false);
+        let outcome = call_in_space(&state, "org-f0303-search", "space-b", "", &call).await;
+        assert_eq!(outcome.error, None, "{:?}", outcome.error);
+        assert!(
+            outcome.output.contains("partner.example/offer"),
+            "switched off, the organisation's own answer keeps the hit: {}",
+            outcome.output
+        );
+    }
+}
+
 #[tokio::test]
 async fn fetch_url_drops_a_page_that_ended_on_a_denied_host_under_enforce() {
     let _mode = test_seam::set(WebDomainPolicyMode::Enforce);

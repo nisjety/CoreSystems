@@ -239,7 +239,9 @@ func frontMatterRest(body []byte) string {
 }
 
 // DeckTemplatesEnv is the switch for deck brand templates (EP-5 S6). Only the literal "true"
-// turns it on; off, an upload is checked exactly as before and no listing reports a template.
+// turns it on; off, an upload is checked exactly as before and no listing reports a template. On, an
+// upload that passes ValidateDeckTemplate is stamped (F-f09-08) and the startup sweep checks the bundles
+// uploaded earlier; a listing reports a template only for a stamped bundle that holds the theme.
 const DeckTemplatesEnv = "SKILL_DECK_TEMPLATES_ENABLED"
 
 // DeckTemplatesFromLookup reads SKILL_DECK_TEMPLATES_ENABLED strictly.

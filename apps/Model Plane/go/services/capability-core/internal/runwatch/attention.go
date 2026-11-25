@@ -13,6 +13,7 @@ import (
 
 	"github.com/triodelab/model-plane/pkg/envelope"
 	"github.com/triodelab/model-plane/services/capability-core/internal/notifyclient"
+	"google.golang.org/grpc/status"
 )
 
 // runAttentionEventType is the envelope type session-core's sweep writes for a
@@ -157,7 +158,8 @@ type NotifierOption func(*Notifier)
 
 // WithAttentionNotify turns on the RUN_ATTENTION path. Without it a RUN_ATTENTION
 // is acknowledged like any other non-terminal event, so the switch being off
-// changes nothing for existing traffic.
+// changes nothing for existing traffic. With it, WithAttentionConfirm is required:
+// a Notifier built with no confirmer fails closed and announces nothing.
 func WithAttentionNotify(coalesce time.Duration) NotifierOption {
 	return func(n *Notifier) {
 		n.attention = &attentionNotify{
@@ -166,6 +168,32 @@ func WithAttentionNotify(coalesce time.Duration) NotifierOption {
 		}
 	}
 }
+
+// AttentionConfirmer asks session-core whether one waiting item still waits on its
+// owner before the item is announced (F-f05-03), so an item decided since its
+// event was written is not announced again. enabled is false while session-core's
+// attention switch is off, and waiting is false once the item is decided. The
+// answer carries no content.
+type AttentionConfirmer interface {
+	StillWaiting(ctx context.Context, orgID, userID, threadID, runID, sourceID, state string) (enabled bool, waiting bool, err error)
+}
+
+// WithAttentionConfirm sets the confirmer the RUN_ATTENTION path asks before it
+// announces an item. It is mandatory while WithAttentionNotify is on.
+func WithAttentionConfirm(c AttentionConfirmer) NotifierOption {
+	return func(n *Notifier) {
+		n.attentionConfirm = c
+	}
+}
+
+// attentionConfirmTimeout bounds one StillWaiting call. process runs on the JetStream
+// callback of the run-watch subscription, one message at a time, so a call that never
+// answers would hold every later run-watch event, terminal-run notices included, and
+// its message would be redelivered on the durable's 30s AckWait, spending one of its
+// five deliveries. Ten seconds leaves room for a slow peer and stays under that AckWait.
+// A timeout is a transient failure: the item is retried with backoff, never announced.
+// It is a var so a test can shorten it.
+var attentionConfirmTimeout = 10 * time.Second
 
 // ParseAttentionCoalesce reads ATTENTION_NOTIFY_COALESCE_SECONDS. A value that is
 // not a non-negative whole number of seconds reads as the default, so a typo
@@ -225,9 +253,17 @@ func (a *attentionNotify) markSent(key coalesceKey, now time.Time) {
 }
 
 // processAttention notifies the user a RUN_ATTENTION names, at most once per
-// coalescing window. It fails closed: the envelope must declare the run persistent
-// (zdr false), so an omitted flag is refused exactly as a true one is.
+// coalescing window, and only once session-core confirms the item still waits. It
+// fails closed: with no confirmer every event is retried and none is announced, and
+// the envelope must declare the run persistent (zdr false), so an omitted flag is
+// refused exactly as a true one is.
 func (n *Notifier) processAttention(ctx context.Context, env *envelope.Envelope) outcome {
+	if n.attentionConfirm == nil {
+		// Fail closed: with no confirmer no waiting item may be announced. The event is
+		// retried with backoff, and JetStream drops it at MaxDeliver, rather than acked as
+		// if it had been handled.
+		return outcomeRetryLater
+	}
 	if env.Zdr == nil || *env.Zdr {
 		slog.Warn("runwatch: attention event refused: run did not declare a persistent posture")
 		return outcomeAck
@@ -251,6 +287,23 @@ func (n *Notifier) processAttention(ctx context.Context, env *envelope.Envelope)
 		return outcomeAck
 	}
 
+	// Ask before anything is announced (F-f05-03). The state is the attention state the item
+	// was raised in: the row's own state, which for a goal is COMPLETED or NEEDS_INPUT. An item
+	// session-core no longer holds as waiting, or one raised while its switch is off, is acked
+	// without a notice; a failed or timed-out ask is retried, never announced unconfirmed. The
+	// ask is bounded by attentionConfirmTimeout, so a peer that never answers cannot hold the
+	// run-watch callback past the durable's AckWait.
+	cctx, cancel := context.WithTimeout(ctx, attentionConfirmTimeout)
+	enabled, waiting, err := n.attentionConfirm.StillWaiting(cctx, orgID, userID, threadID, runID, sourceID, payload.State)
+	cancel()
+	if err != nil {
+		slog.Warn("runwatch: attention confirm failed", "org_id", orgID, "run_id", runID, "code", status.Code(err).String())
+		return outcomeRetryLater
+	}
+	if !enabled || !waiting {
+		return outcomeAck
+	}
+
 	now := n.now().UTC()
 	key := coalesceKey{orgID: orgID, userID: userID, threadID: threadID, state: stateKey}
 	if n.attention.coalesced(key, now) {
@@ -265,9 +318,15 @@ func (n *Notifier) processAttention(ctx context.Context, env *envelope.Envelope)
 		RetentionMode:  retentionModeStandard,
 	}
 	if err := n.notify.Accept(ctx, req); err != nil {
+		if notifyclient.IsPermanent(err) {
+			// A refusal this request can never win: the notice is dropped, not retried.
+			statusCode, _ := notifyclient.StatusOf(err)
+			slog.Warn("runwatch: attention notice refused by notify-core, dropped", "org_id", orgID, "run_id", runID, "status", statusCode)
+			return outcomeAck
+		}
 		// Not marked as sent, so the redelivery of this event notifies after all.
 		slog.Warn("runwatch: attention notify-core delegation failed", "org_id", orgID, "run_id", runID, "user_id", userID, "error", err)
-		return outcomeRetry
+		return outcomeRetryLater
 	}
 	n.attention.markSent(key, now)
 	return outcomeAck

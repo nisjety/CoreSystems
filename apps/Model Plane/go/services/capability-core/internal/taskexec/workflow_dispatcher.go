@@ -123,6 +123,27 @@ type WorkflowDispatcher struct {
 	scheduledRunSession scheduledRunSession
 	orgExtSkills        OrgExtSkillsReader
 	extSkillsEnforced   bool
+	// contractAudit writes the schedule.contract.refused row of a fire a stored contract refuses (K3-4).
+	// Nil, no such row is written. auditRetry holds the rows whose first write failed.
+	contractAudit cron.ContractAuditor
+	auditRetry    *cron.ContractAuditRetry
+}
+
+// SetContractAuditor writes the schedule.contract.refused row of each fire a stored contract refuses
+// (K3-4). Nil turns the rows off, and the refusal stands either way.
+func (d *WorkflowDispatcher) SetContractAuditor(auditor cron.ContractAuditor) {
+	d.contractAudit = auditor
+	d.auditRetry = nil
+	if auditor != nil {
+		d.auditRetry = &cron.ContractAuditRetry{}
+	}
+}
+
+// FlushContractAudit writes again the refusal rows whose first write failed. The executor offers it a flush
+// on every claim tick, so a refusal row does not wait for another cron dispatch, which a paused schedule may
+// never make (K3-4). Nil while the contract audit is off, and then it does nothing.
+func (d *WorkflowDispatcher) FlushContractAudit(ctx context.Context) {
+	d.auditRetry.Flush(ctx, d.contractAudit, d.pool)
 }
 
 // SetScheduledRunSession enables the scoped cron preparation path. Cron tasks
@@ -367,6 +388,8 @@ func (d *WorkflowDispatcher) reauthorizeScheduleFire(ctx context.Context, task T
 	if envelope.ScheduleFireIntent == nil {
 		return nil, nil
 	}
+	// A refusal row that failed on an earlier cron fire is written again before this one is judged.
+	d.auditRetry.Flush(ctx, d.contractAudit, d.pool)
 	if d.fireAuthorizer == nil {
 		return nil, fmt.Errorf("taskexec: cron task %s cannot start without fresh Control fire authorization", task.ID)
 	}
@@ -387,6 +410,7 @@ func (d *WorkflowDispatcher) reauthorizeScheduleFire(ctx context.Context, task T
 		return nil, fmt.Errorf("taskexec: cron task %s template digest does not match its fire intent", task.ID)
 	}
 	if err := refuseExpiredContract(canonicalTemplate, time.Now().UTC()); err != nil {
+		d.auditFireRefusal(ctx, d.pool, task.ID, intent, canonicalTemplate, err)
 		return nil, fmt.Errorf("taskexec: cron task %s: %w", task.ID, err)
 	}
 	if err := d.fireAuthorizer.AuthorizeFire(ctx, intent); err != nil {
@@ -456,12 +480,41 @@ func refuseExpiredContract(canonicalTemplate []byte, now time.Time) error {
 	}
 	contract, err := cron.ParseScheduleContract(fields.ApprovalContract)
 	if err != nil {
-		return fmt.Errorf("contract_invalid: %w", err)
+		return refusedContract(cron.ContractTokenInvalid, cron.ContractTokenInvalid, err)
 	}
 	if err := cron.CheckContractWindow(contract, now); err != nil {
-		return fmt.Errorf("contract_expired: %w", err)
+		return refusedContract(cron.ContractTokenExpired, cron.ContractWindowToken(contract, now), err)
 	}
 	return nil
+}
+
+// refusedContract is a refused contract's error. Its message starts with prefix, exactly as the refusal
+// always has, so a deployment with the schedule contract switch off reads the same failure. The typed
+// refusal carries token, the closed reason the audit row names. For a window past the maximum that token
+// is window_invalid.
+func refusedContract(prefix, token string, err error) error {
+	return fmt.Errorf("%s: %w", prefix, &cron.ContractRefusal{Token: token, Err: err})
+}
+
+// auditFireRefusal writes the schedule.contract.refused row of a fire the stored contract refused
+// (K3-4). The row is fixed to the task, so a retried dispatch lands once. A row that cannot be written
+// is logged and queued for the next executor tick (FlushContractAudit). The refusal stands either way.
+func (d *WorkflowDispatcher) auditFireRefusal(ctx context.Context, db cron.AuditExecer, taskID string, intent cron.FireIntent, template []byte, refusal error) {
+	if d.contractAudit == nil {
+		return
+	}
+	row := cron.ContractAuditRow{
+		ID:       cron.RefusedFireAuditID(taskID),
+		EntityID: intent.ScheduleID,
+		Action:   cron.ContractAuditRefused,
+		Actor:    dispatchActor,
+		OrgID:    intent.OrgID,
+		Diff:     cron.ContractAuditDiffJSON(cron.ApprovalContractText(template), cron.ContractRefusalToken(refusal)),
+	}
+	if err := d.contractAudit.Append(ctx, db, row); err != nil {
+		slog.Warn("contract audit row not written; retried on the next executor tick", "action", row.Action, "error", err)
+		d.auditRetry.Add(row)
+	}
 }
 
 func canonicalScheduledTemplate(config json.RawMessage) ([]byte, string, error) {

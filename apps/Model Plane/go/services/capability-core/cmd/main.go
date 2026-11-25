@@ -42,6 +42,7 @@ import (
 	capserver "github.com/triodelab/model-plane/services/capability-core/internal/server"
 	"github.com/triodelab/model-plane/services/capability-core/internal/sessionreview"
 	"github.com/triodelab/model-plane/services/capability-core/internal/skillbundle"
+	"github.com/triodelab/model-plane/services/capability-core/internal/skilllint"
 	"github.com/triodelab/model-plane/services/capability-core/internal/taskexec"
 	"github.com/triodelab/model-plane/services/capability-core/internal/watch"
 	"google.golang.org/grpc"
@@ -58,6 +59,11 @@ func main() {
 	slog.SetDefault(logger)
 
 	slog.Info("capability-core starting")
+	// The skill lint (EP-11 S4) reads SKILL_LINT_MODE by its exact words. A set value that is neither off, report nor
+	// enforce reads as report (off once trimmed to blank or off), so the startup log names it. The value is not logged.
+	if skilllint.UnreadableMode(os.Getenv(skilllint.ModeEnv)) {
+		slog.Warn("SKILL_LINT_MODE is set to a value that is not off, report or enforce, so it reads as report, or as off once trimmed to off or blank; set it to one of those words or unset it")
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
@@ -216,7 +222,7 @@ func main() {
 	// ListModels, /compact → session CompactNow) and the G7 learning consumer —
 	// one dial site, no duplication. Nil when addrs are unset → both consumers
 	// degrade gracefully.
-	sessionClient, inferenceClient, runClient, memoryClient := dialBackendsWithMemory()
+	sessionClient, inferenceClient, runClient, memoryClient, attentionClient := dialBackendsWithMemory()
 
 	// LEARNING_PII_SCREEN_ENABLED: every learned skill candidate passes the PII and secret screen before the sink.
 	// Installed here, before the learning consumer and the /learn route are wired; off, nothing is assigned.
@@ -266,8 +272,10 @@ func main() {
 			// every user who registered a watch on that run (see
 			// api.RunWatchersHandler for how a watch gets registered). Needs
 			// notification-core's URL + this service's delegated service token;
-			// guarded independently of the two consumers above.
-			startRunWatchConsumer(ctx, nc, pool)
+			// guarded independently of the two consumers above. The attention client is the
+			// session-core AttentionService on the connection those consumers share; the
+			// RUN_ATTENTION path asks it before it announces an item (F-f05-03).
+			startRunWatchConsumer(ctx, nc, pool, attentionClient)
 		}
 	}
 
@@ -314,14 +322,31 @@ func main() {
 	}
 	// The four reconcile-emitting registries get the publisher (nil-safe: a nil
 	// recPub makes reconcile.Emit a no-op).
-	skillsHandler := api.NewSkillsHandler(pool).WithPublisher(recPub)
+	// F-f03-08: SKILL_BUNDLE_SCOPE_RULES, read once here and handed to the skill routes, the bundle routes and
+	// the gRPC server (WithSkillBundleScopeRules). Off, each of them behaves as before.
+	skillBundleScopeRules := skillbundle.ScopeRulesFromLookup(os.Getenv)
+	// F-f10-15: SKILL_BUNDLE_RETENTION is effective only with SKILL_VERSIONS_API. Say so once, here at construction,
+	// before the skill handlers below read the coupled answer.
+	warnBundleRetentionWithoutVersions(os.Getenv)
+	skillsHandler := api.NewSkillsHandler(pool).WithPublisher(recPub).WithBundleScopeRules(skillBundleScopeRules, api.SkillBundlesAPIFromLookup(os.Getenv))
+	// F-f10-19: SKILL_SPACE_WRITE_VERIFY (strict literal true, with SKILL_SPACE_SCOPE) lets a Space skill be
+	// written under a verified Control decision. Without the Control key every Space skill write stays refused.
+	if api.SkillSpaceWriteVerifyFromLookup(os.Getenv) {
+		if spaceSkillVerifier, spaceSkillVerifierErr := spaceSkillDecisionVerifierFromEnv(os.Getenv); spaceSkillVerifierErr != nil {
+			slog.Warn("Space skill writes stay refused; Control decision verifier is required", "error", spaceSkillVerifierErr)
+		} else {
+			skillsHandler.WithSpaceSkillDecisionVerifier(spaceSkillVerifier)
+		}
+	}
 	skillsHandler.Register(protectedMux)
-	api.NewSkillBundlesHandler(pool, api.SkillBundlesAPIFromLookup(os.Getenv)).Register(protectedMux)
+	api.NewSkillBundlesHandler(pool, api.SkillBundlesAPIFromLookup(os.Getenv)).WithScopeRules(skillBundleScopeRules).Register(protectedMux)
 	// Plan 3.4 E4.2 step 3: saved browser recipes. Behind PROCEDURES_API (off by default): every route answers 404 procedures_disabled.
 	api.NewProceduresHandler(pool, api.ProceduresAPIFromLookup(os.Getenv)).Register(protectedMux)
 	api.NewSkillImportHandler(pool, api.SkillImportFromLookup(os.Getenv)).WithPublisher(recPub).Register(protectedMux)
-	// Behind ORG_AGENT_POLICY_API (off by default): the handler answers 404 while it is off.
-	api.NewOrgAgentPolicyHandler(pool, api.OrgAgentPolicyAPIFromLookup(os.Getenv)).Register(protectedMux)
+	// Behind ORG_AGENT_POLICY_API (off by default): the handler answers 404 while it is off. web.covers_browser is
+	// served and accepted only while CAPABILITY_ORG_WEB_MODE_COVERS_BROWSER is the literal "true" (D-f09-3).
+	api.NewOrgAgentPolicyHandler(pool, api.OrgAgentPolicyAPIFromLookup(os.Getenv)).
+		WithWebCoversBrowser(api.OrgWebCoversBrowserFromLookup(os.Getenv)).Register(protectedMux)
 	api.NewOrgHooksHandler(pool).Register(protectedMux)
 	// W5-074-c: the org permission rules admin routes, behind the switch the EvaluatePolicy gate reads
 	// (CAPABILITY_PERMISSION_RULES_ENABLED, literal true). Off, every route answers 404 and the table is not written.
@@ -396,6 +421,19 @@ func main() {
 	// Built before the handler: Run now and the sweeper below share one Control fire authorizer.
 	cronAuthorizer, cronAuthErr := cronFireAuthorizerFromEnv(os.Getenv)
 	cronHandler := api.NewCronHandler(pool)
+	// F-f02-02: one fire-schema gate for Run now, the fire list and the sweeper. Until session-core's
+	// migration 0056 is applied, a fire waits instead of failing on every insert.
+	fireSchemaGate := cron.NewFireSchemaGate(pool)
+	cronHandler.WithFireSchemaGate(fireSchemaGate)
+	// K3-4: the schedule contract audit sink. With SCHEDULE_CONTRACT_ENABLED the literal true, a server
+	// that cannot write the contract audit rows refuses to start, so no contract is made or fired without
+	// its row. Off, no contract row is written and every route behaves as it did.
+	contractAuditor, contractAuditErr := contractAuditorFromEnv(os.Getenv, pool)
+	if contractAuditErr != nil {
+		slog.Error("refusing to start: the schedule contract audit sink is unavailable while SCHEDULE_CONTRACT_ENABLED is true")
+		os.Exit(1)
+	}
+	cronHandler.WithContractAuditor(contractAuditor)
 	// WS20-S4: stored-consent schedule contracts. Strict literal true; off by default.
 	cronHandler.WithScheduleContract(os.Getenv("SCHEDULE_CONTRACT_ENABLED") == "true")
 	// WS20-S8: approval guards refuse a bare re-enable of a lapsed approval. Strict literal true; off by default.
@@ -420,7 +458,10 @@ func main() {
 		if cronAuthErr != nil {
 			slog.Warn("cron sweeper not started; fresh Control authorization is required", "error", cronAuthErr)
 		} else {
-			cronSweeper := cron.NewSweeper(pool, cronAuthorizer).WithContractGuards(os.Getenv("CRON_CONTRACT_GUARDS_ENABLED") == "true")
+			cronSweeper := cron.NewSweeper(pool, cronAuthorizer).
+				WithContractGuards(os.Getenv("CRON_CONTRACT_GUARDS_ENABLED") == "true").
+				WithFireSchemaGate(fireSchemaGate).
+				WithContractAuditor(contractAuditor)
 			// WS20-S8 pause notices follow the WS20-S7 switch: without it a pause still happens, unnoticed.
 			// The ok guard matters: a nil *notifyclient.Client would be a typed nil inside the interface.
 			if notifier, ok := notifyclient.New(os.Getenv("NOTIFICATION_CORE_URL"), os.Getenv("NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN"), nil); ok && os.Getenv("CAPABILITY_CORE_SCHEDULED_NOTIFY_ENABLED") == "true" {
@@ -522,7 +563,7 @@ func main() {
 	if cronAuthErr == nil {
 		taskFireAuthorizer = cronAuthorizer
 	}
-	dispatcher, workflowBacked := buildTaskDispatcher(pool, recPub, taskFireAuthorizer, sessionClient)
+	dispatcher, workflowBacked := buildTaskDispatcher(pool, recPub, taskFireAuthorizer, sessionClient, contractAuditor)
 	if taskExecutorEnabled(workflowBacked) {
 		go taskexec.NewExecutor(pool, dispatcher).Start(ctx)
 		slog.Info("task executor started", "workflow_backed", workflowBacked)
@@ -567,6 +608,16 @@ func main() {
 	// CAPABILITY_PERMISSION_RULES_ENABLED. Off, no rule is read.
 	permissionRulesOn := api.PermissionRulesEnabledFromLookup(os.Getenv)
 	slog.Info("org permission rules", "enabled", permissionRulesOn)
+	// F-f09-13: the org's web.mode withholds the public-web capabilities for every caller, and the browser capabilities
+	// too while the browser switch is on and the org does not opt out. Both switches are off unless they are the literal "true".
+	orgWebGateOn := os.Getenv("CAPABILITY_ORG_WEB_MODE_GATE_ENABLED") == "true"
+	orgWebBrowserOn := os.Getenv("CAPABILITY_ORG_WEB_MODE_COVERS_BROWSER") == "true"
+	slog.Info("org web mode gate", "enabled", orgWebGateOn, "browser", orgWebGateOn && orgWebBrowserOn)
+	// F-f09-08: while SKILL_DECK_TEMPLATES_ENABLED is on, the bundles uploaded before it was on are checked in the background,
+	// so none is listed as a deck template before it has passed ValidateDeckTemplate. A start runs the sweep again.
+	if skillbundle.DeckTemplatesFromLookup(os.Getenv) {
+		go sweepDeckTemplates(ctx, skillbundle.NewStore(pool))
+	}
 	// Attach the durable store so ListCapabilities returns score-ranked results
 	// (nil-safe: WithStore(nil) keeps the in-memory registry ordering).
 	capSrv := capserver.NewServer(reg, modelsCache, pol).WithStore(capStore).
@@ -574,7 +625,9 @@ func main() {
 		WithProcedures(procedureStore, api.ProceduresAPIFromLookup(os.Getenv)).
 		WithDeckTemplates(skillbundle.DeckTemplatesFromLookup(os.Getenv)).
 		WithSkillBundleRetention(skillbundle.RetentionFromLookup(os.Getenv)).
+		WithSkillBundleScopeRules(skillBundleScopeRules).
 		WithPermissionRules(api.NewPermissionRuleStore(pool), permissionRulesOn).
+		WithOrgWebModeGate(capserver.NewOrgWebModeStore(pool), orgWebGateOn, orgWebBrowserOn).
 		WithRuleAudit(toolPolicies, ruleAuditOn)
 	if lettaToolSearcher != nil {
 		capSrv.WithLettaToolSearcher(lettaToolSearcher)
@@ -611,6 +664,32 @@ func main() {
 	slog.Info("shutting down")
 	grpcServer.GracefulStop()
 	_ = healthServer.Shutdown(context.Background())
+}
+
+// bundleRetentionNeedsVersions is the closed reason on the start-up warning that SKILL_BUNDLE_RETENTION is on while
+// SKILL_VERSIONS_API is not.
+const bundleRetentionNeedsVersions = "bundle_retention_requires_versions"
+
+// warnBundleRetentionWithoutVersions logs one warning when SKILL_BUNDLE_RETENTION reads the literal "true" but
+// skillbundle.RetentionFromLookup reads retention as off, because SKILL_VERSIONS_API is not the literal "true" too. It
+// reports whether it logged. Call it once at construction, never per request.
+func warnBundleRetentionWithoutVersions(lookup func(string) string) bool {
+	if lookup(skillbundle.RetentionEnv) != "true" || skillbundle.RetentionFromLookup(lookup) {
+		return false
+	}
+	slog.Warn("SKILL_BUNDLE_RETENTION is on but SKILL_VERSIONS_API is not, so skill bundle retention stays off; set both to the literal true",
+		"reason", bundleRetentionNeedsVersions)
+	return true
+}
+
+// sweepDeckTemplates runs the deck template sweep once (F-f09-08) and logs its counts. It logs no skill, path or content.
+func sweepDeckTemplates(ctx context.Context, store *skillbundle.Store) {
+	checked, passed, failed, err := store.RevalidateDeckTemplates(ctx)
+	if err != nil {
+		slog.Error("deck template sweep stopped", "checked", checked, "passed", passed, "failed", failed, "error", err)
+		return
+	}
+	slog.Info("deck template sweep finished", "checked", checked, "passed", passed, "failed", failed)
 }
 
 // connectNATSWithRetry dials NATS with the same bounded retry
@@ -697,6 +776,18 @@ func cronDecisionVerifierFromEnv(getenv func(string) string) (*cron.ControlDecis
 	)
 }
 
+// spaceSkillDecisionVerifierFromEnv pins the same Control decision key as the cron verifier for the
+// model.space.skill.write decision (F-f10-19). It has no fallback key.
+func spaceSkillDecisionVerifierFromEnv(getenv func(string) string) (*api.SpaceSkillDecisionVerifier, error) {
+	if getenv == nil {
+		return nil, fmt.Errorf("space skill decision environment reader is required")
+	}
+	return api.NewSpaceSkillDecisionVerifier(
+		getenv("CONTROL_SPACE_DECISION_KEY_ID"),
+		getenv("CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64"),
+	)
+}
+
 // modelActionViewVerifierFromEnv pins the same deployment-distributed Control
 // public key used by other Space decision recipients. It has no fallback: an
 // unsigned view could make an owner-plane effect look model-eligible.
@@ -741,7 +832,7 @@ func startTaskCompletionConsumer(ctx context.Context, nc *nats.Conn, pool *pgxpo
 // consumer binds a pre-provisioned DURABLE consumer with manual ack (see
 // runwatch's package doc for why), which requires nats-provisioner to have
 // already registered RunWatchDurable on RunEventsStream.
-func startRunWatchConsumer(ctx context.Context, nc *nats.Conn, pool *pgxpool.Pool) {
+func startRunWatchConsumer(ctx context.Context, nc *nats.Conn, pool *pgxpool.Pool, attention mpv1.AttentionServiceClient) {
 	notifyClient, enabled := notifyclient.New(
 		os.Getenv("NOTIFICATION_CORE_URL"),
 		os.Getenv("NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN"),
@@ -751,16 +842,23 @@ func startRunWatchConsumer(ctx context.Context, nc *nats.Conn, pool *pgxpool.Poo
 		slog.Info("run-watch notify consumer disabled (NOTIFICATION_CORE_URL/NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN not set)")
 		return
 	}
-	// WS16-S4: the RUN_ATTENTION path is off unless the switch is the literal "true".
+	// WS16-S4: the RUN_ATTENTION path is off unless the switch is the literal "true". It
+	// announces an item only after session-core's AttentionService confirms the item still
+	// waits (F-f05-03), so with no such client it stays off rather than run unconfirmed.
 	var options []runwatch.NotifierOption
 	if os.Getenv("CAPABILITY_CORE_ATTENTION_NOTIFY_ENABLED") == "true" {
-		coalesce := runwatch.ParseAttentionCoalesce(os.Getenv("ATTENTION_NOTIFY_COALESCE_SECONDS"))
-		options = append(options, runwatch.WithAttentionNotify(coalesce))
-		slog.Info("run-watch attention notifications enabled", "coalesce", coalesce)
+		if attention == nil {
+			slog.Warn("run-watch attention notifications stay off: session-core's attention service is not dialed, so no item is announced unconfirmed")
+		} else {
+			coalesce := runwatch.ParseAttentionCoalesce(os.Getenv("ATTENTION_NOTIFY_COALESCE_SECONDS"))
+			options = append(options, runwatch.WithAttentionNotify(coalesce), runwatch.WithAttentionConfirm(attentionConfirmer{client: attention}))
+			slog.Info("run-watch attention notifications enabled", "coalesce", coalesce)
+		}
 	}
-	// WS20-S7: the scheduled-run outcome notice is off unless the switch is the literal "true".
+	// WS20-S7: the scheduled-run outcome notice is off unless the switch is the literal "true". Its recipient is
+	// the schedule's creator, confirmed in capability-core's own cron_schedules table (F-f05-06).
 	if os.Getenv("CAPABILITY_CORE_SCHEDULED_NOTIFY_ENABLED") == "true" {
-		options = append(options, runwatch.WithScheduledOutcomeNotify())
+		options = append(options, runwatch.WithScheduledOutcomeNotify(), runwatch.WithScheduleOwnerCheck(runwatch.NewPostgresSubscriptionStore(pool)))
 		slog.Info("run-watch scheduled-run outcome notices enabled")
 	}
 	notifier, err := runwatch.NewNotifier(runwatch.NewPostgresSubscriptionStore(pool), notifyClient, options...)
@@ -781,6 +879,42 @@ func startRunWatchConsumer(ctx context.Context, nc *nats.Conn, pool *pgxpool.Poo
 	slog.Info("run-watch notify consumer started", "stream", runwatch.RunEventsStream, "durable", runwatch.RunWatchDurable)
 }
 
+// attentionConfirmer asks session-core whether a RUN_ATTENTION item still waits on its owner
+// (F-f05-03), through the AttentionService on the session-core connection the other session-core
+// clients share, so it needs no credential of its own.
+type attentionConfirmer struct {
+	client mpv1.AttentionServiceClient
+}
+
+// StillWaiting implements runwatch.AttentionConfirmer. The state is the attention state name
+// the envelope carries; a name that is not in the closed set reaches session-core as the
+// unspecified state, which it refuses.
+func (c attentionConfirmer) StillWaiting(ctx context.Context, orgID, userID, threadID, runID, sourceID, state string) (bool, bool, error) {
+	resp, err := c.client.ConfirmAttentionWaiting(ctx, &mpv1.ConfirmAttentionWaitingRequest{
+		OrgId:    orgID,
+		UserId:   userID,
+		ThreadId: threadID,
+		RunId:    runID,
+		SourceId: sourceID,
+		State:    mpv1.AttentionState(mpv1.AttentionState_value[state]),
+	})
+	if err != nil {
+		return false, false, err
+	}
+	return resp.GetEnabled(), resp.GetWaiting(), nil
+}
+
+// contractAuditorFromEnv builds the schedule contract audit sink (K3-4). It is built only while
+// SCHEDULE_CONTRACT_ENABLED is the literal true. Off, it is nil, and no contract row is written. On, a
+// sink that cannot be built is an error, and main refuses to start rather than make or fire a contract
+// without its audit row.
+func contractAuditorFromEnv(getenv func(string) string, pool *pgxpool.Pool) (cron.ContractAuditor, error) {
+	if getenv("SCHEDULE_CONTRACT_ENABLED") != "true" {
+		return nil, nil
+	}
+	return cron.NewContractAuditor(pool)
+}
+
 // buildTaskDispatcher returns the task dispatcher plus whether it can actually
 // complete a hand-off.
 //
@@ -796,7 +930,7 @@ func startRunWatchConsumer(ctx context.Context, nc *nats.Conn, pool *pgxpool.Poo
 // of stranding it, unless TASK_EXECUTOR_ACCEPT_PUBLISH_ONLY_DISPATCH=true
 // acknowledges that this deployment runs its own consumer of the published
 // subject (see NatsDispatcher's doc comment).
-func buildTaskDispatcher(pool *pgxpool.Pool, pub publisher.EventPublisher, fireAuthorizer taskexec.ScheduleFireAuthorizer, sessionClient mpv1.SessionCoreClient) (taskexec.Dispatcher, bool) {
+func buildTaskDispatcher(pool *pgxpool.Pool, pub publisher.EventPublisher, fireAuthorizer taskexec.ScheduleFireAuthorizer, sessionClient mpv1.SessionCoreClient, contractAuditor cron.ContractAuditor) (taskexec.Dispatcher, bool) {
 	fallback := taskexec.NewNatsDispatcher(pub, acceptsPublishOnlyDispatch())
 
 	addr := strings.TrimSpace(os.Getenv("ORCHESTRATOR_WORKFLOW_ADDR"))
@@ -854,11 +988,15 @@ func buildTaskDispatcher(pool *pgxpool.Pool, pub publisher.EventPublisher, fireA
 	// the dispatcher exists; an absent Session Core client leaves those fires
 	// fail-closed in the dispatcher instead of falling back to a generic run.
 	dispatcher.SetScheduledRunSession(sessionClient)
+	// The schedule.contract.refused row of a fire a stored contract refuses (K3-4). Nil while
+	// SCHEDULE_CONTRACT_ENABLED is off, so no such row is written.
+	dispatcher.SetContractAuditor(contractAuditor)
 	// The org's ext.skills word a scheduled run is held to (P2-ec-01-rel1). It is read only while
 	// SKILL_EXT_POLICY_ENFORCED is the literal "true", the same switch the gateway reads, so one deploy
 	// setting drives both loops. Off, no word is stated and a scheduled run reads as it did before.
 	dispatcher.SetOrgExtSkills(
-		api.NewOrgAgentPolicyHandler(pool, api.OrgAgentPolicyAPIFromLookup(os.Getenv)),
+		api.NewOrgAgentPolicyHandler(pool, api.OrgAgentPolicyAPIFromLookup(os.Getenv)).
+			WithWebCoversBrowser(api.OrgWebCoversBrowserFromLookup(os.Getenv)),
 		os.Getenv("SKILL_EXT_POLICY_ENFORCED") == "true",
 	)
 	slog.Info("task workflow dispatch enabled",
@@ -1028,19 +1166,21 @@ func startLearningConsumer(ctx context.Context, nc *nats.Conn, pool *pgxpool.Poo
 // multiplexed server (see grpc.rs's single Server::builder()...add_service
 // chain), so it needs no separate dial, env var, or credential.
 func dialBackends() (mpv1.SessionCoreClient, mpv1.InferenceCoreClient, mpv1.RunServiceClient) {
-	session, inference, runs, _ := dialBackendsWithMemory()
+	session, inference, runs, _, _ := dialBackendsWithMemory()
 	return session, inference, runs
 }
 
 // dialBackendsWithMemory is dialBackends plus the MemoryServiceClient the
-// /api/v1/memory proxy asks for Session Core's memory decision, on the same
-// sessConn (MemoryService is served by the same tonic server).
-func dialBackendsWithMemory() (mpv1.SessionCoreClient, mpv1.InferenceCoreClient, mpv1.RunServiceClient, mpv1.MemoryServiceClient) {
+// /api/v1/memory proxy asks for Session Core's memory decision, and the
+// AttentionServiceClient the RUN_ATTENTION notifier asks before it announces an
+// item (F-f05-03), all on the same sessConn (MemoryService and AttentionService
+// are served by the same tonic server).
+func dialBackendsWithMemory() (mpv1.SessionCoreClient, mpv1.InferenceCoreClient, mpv1.RunServiceClient, mpv1.MemoryServiceClient, mpv1.AttentionServiceClient) {
 	sessAddr := os.Getenv("SESSION_CORE_ADDR")
 	infAddr := os.Getenv("INFERENCE_CORE_ADDR")
 	if sessAddr == "" || infAddr == "" {
 		slog.Info("backend clients disabled (SESSION_CORE_ADDR/INFERENCE_CORE_ADDR unset)")
-		return nil, nil, nil, nil
+		return nil, nil, nil, nil, nil
 	}
 	creds := grpc.WithTransportCredentials(insecure.NewCredentials())
 
@@ -1059,7 +1199,7 @@ func dialBackendsWithMemory() (mpv1.SessionCoreClient, mpv1.InferenceCoreClient,
 		).dialOption())
 	if err != nil {
 		slog.Warn("dial session-core failed", "error", err)
-		return nil, nil, nil, nil
+		return nil, nil, nil, nil, nil
 	}
 	infConn, err := grpc.NewClient(infAddr, creds,
 		newBackendCredential(
@@ -1071,9 +1211,9 @@ func dialBackendsWithMemory() (mpv1.SessionCoreClient, mpv1.InferenceCoreClient,
 	if err != nil {
 		slog.Warn("dial inference-core failed", "error", err)
 		_ = sessConn.Close()
-		return nil, nil, nil, nil
+		return nil, nil, nil, nil, nil
 	}
-	return mpv1.NewSessionCoreClient(sessConn), mpv1.NewInferenceCoreClient(infConn), mpv1.NewRunServiceClient(sessConn), mpv1.NewMemoryServiceClient(sessConn)
+	return mpv1.NewSessionCoreClient(sessConn), mpv1.NewInferenceCoreClient(infConn), mpv1.NewRunServiceClient(sessConn), mpv1.NewMemoryServiceClient(sessConn), mpv1.NewAttentionServiceClient(sessConn)
 }
 
 // Auth Core service-principal configuration for capability-core's OWN identity.

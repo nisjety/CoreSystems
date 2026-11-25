@@ -158,8 +158,10 @@ fn a_person_erasure_removes_the_persons_own_skills_in_the_purge_order() {
         .find("DELETE FROM promote_use_counts WHERE org_id = $1 AND user_id = $2")
         .expect("the promote-on-use counter delete");
     let call = body
-        .find("erase_user_skills_in_tx(&mut tx, org_id, user_id)")
-        .expect("the skill erasure");
+        .find(
+            "erase_user_skills_in_tx(&mut tx, org_id, user_id, skill_bundle_scope_rules_enabled())",
+        )
+        .expect("the skill erasure, passed the bundle switch");
     let audit = body
         .find("INSERT INTO memory_control_events")
         .expect("the audit row");
@@ -176,6 +178,282 @@ fn a_person_erasure_removes_the_persons_own_skills_in_the_purge_order() {
             "the audit detail counts the skills: {detail}"
         );
     }
+}
+
+/// The bundle switch takes only the exact literal `true`, as the other per-user switches do (P2-go-09-rel1).
+#[test]
+fn the_skill_bundle_scope_rules_switch_takes_only_the_exact_literal_true() {
+    assert!(skill_bundle_scope_rules_switch(Some("true")));
+    for off in [
+        None,
+        Some(""),
+        Some("1"),
+        Some("yes"),
+        Some("on"),
+        Some("TRUE"),
+        Some("True"),
+        Some(" true "),
+        Some("true\n"),
+        Some("false"),
+    ] {
+        assert!(!skill_bundle_scope_rules_switch(off), "{off:?}");
+    }
+    assert_eq!(SKILL_BUNDLE_SCOPE_RULES_ENV, "SKILL_BUNDLE_SCOPE_RULES");
+}
+
+/// P2-go-09-rel1: a person's erasure removes the bundles of the skills it deletes, in its own transaction, and
+/// only under `SKILL_BUNDLE_SCOPE_RULES`. The skills go first and return their ids. The bundle step follows
+/// them and comes before the revisions, and it runs only inside the switch. Inside the step the table guard
+/// comes first, then the organization's bundle lock (the lock capability-core takes for a bundle write), the
+/// bundle delete and the blob collection. The erasure passes the switch it reads. Checked on the source text,
+/// so no database is needed.
+#[test]
+fn a_person_erasure_removes_the_bundles_of_the_skills_it_deletes_under_the_switch() {
+    let source = include_str!("gdpr.rs");
+    let helper = squash(body_of(source, "async fn erase_user_skills_in_tx("));
+    let at = |needle: &str| {
+        helper
+            .find(needle)
+            .unwrap_or_else(|| panic!("the skill erasure states {needle}"))
+    };
+    let skills = at(
+        "DELETE FROM agent_skills WHERE org_id = $1 AND scope = 'user' AND owner_user_id = $2 RETURNING id",
+    );
+    let bundles = at(
+        "let skill_bundles = if remove_bundles { erase_skill_bundles_in_tx(tx, org_id, &skill_ids).await? } else { 0 };",
+    );
+    let revisions = at("DELETE FROM skill_revisions WHERE org_id = $1 AND owner_user_id = $2");
+    assert!(
+        skills < bundles && bundles < revisions,
+        "the bundles of the deleted skills go after the skills and before the revisions"
+    );
+
+    let bundle_step = squash(body_of(source, "async fn erase_skill_bundles_in_tx("));
+    let step = |needle: &str| {
+        bundle_step
+            .find(needle)
+            .unwrap_or_else(|| panic!("the bundle step states {needle}"))
+    };
+    let guard = step("to_regclass('public.skill_bundles') IS NOT NULL");
+    let lock = step("pg_advisory_xact_lock(hashtextextended('skill_bundles:' || $1::text, 0))");
+    let delete = step("DELETE FROM skill_bundles WHERE org_id = $1 AND skill_id = ANY($2::text[])");
+    let collect = step("DELETE FROM skill_bundle_blobs b");
+    assert!(
+        guard < lock && lock < delete && delete < collect,
+        "the table guard, the bundle lock, the bundle delete, then the blob collection"
+    );
+    assert!(
+        bundle_step.contains("WHERE sb.org_id = b.org_id AND f.sha256 = b.sha256"),
+        "the blob collection keeps every blob a bundle file still names"
+    );
+
+    let body = squash(body_of(
+        source,
+        "pub async fn erase_user_personal_data_for(",
+    ));
+    assert!(
+        body.contains(
+            "erase_user_skills_in_tx(&mut tx, org_id, user_id, skill_bundle_scope_rules_enabled())"
+        ),
+        "the erasure passes the switch it reads"
+    );
+    assert!(
+        body.contains("skill_bundles: skills.skill_bundles"),
+        "the summary counts the removed bundles"
+    );
+}
+
+// ---- DB (P2-go-09-rel1) ----------------------------------------------------------------------
+
+const BUNDLE_ROWS: &str = "SELECT count(*) FROM skill_bundles WHERE org_id = $1 AND skill_id = $2";
+const BUNDLE_FILE_ROWS: &str = "SELECT count(*) FROM skill_bundle_files f \
+     JOIN skill_bundles b ON b.id = f.bundle_id WHERE b.org_id = $1 AND b.skill_id = $2";
+const BLOB_ROWS: &str = "SELECT count(*) FROM skill_bundle_blobs WHERE org_id = $1 AND sha256 = $2";
+const SKILL_ROWS: &str = "SELECT count(*) FROM agent_skills WHERE org_id = $1 AND id = $2";
+
+/// Creates capability-core's bundle tables on a database that has only the session-core migrations, with the
+/// columns and checks of its migration 0021. `IF NOT EXISTS`, so a table that is already there stays as it is.
+async fn ensure_skill_bundle_tables(pool: &Pool) {
+    for statement in [
+        "CREATE TABLE IF NOT EXISTS skill_bundles (\
+            id TEXT PRIMARY KEY, org_id TEXT NOT NULL, skill_id TEXT NOT NULL, \
+            manifest_sha256 TEXT NOT NULL, file_count INTEGER NOT NULL, total_bytes BIGINT NOT NULL, \
+            created_by TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), \
+            CONSTRAINT skill_bundles_manifest_check CHECK (manifest_sha256 ~ '^[0-9a-f]{64}$'), \
+            CONSTRAINT skill_bundles_file_count_check CHECK (file_count BETWEEN 1 AND 256), \
+            CONSTRAINT skill_bundles_total_bytes_check CHECK (total_bytes BETWEEN 0 AND 8388608))",
+        "CREATE TABLE IF NOT EXISTS skill_bundle_files (\
+            bundle_id TEXT NOT NULL REFERENCES skill_bundles (id) ON DELETE CASCADE, \
+            path TEXT NOT NULL, sha256 TEXT NOT NULL, size_bytes INTEGER NOT NULL, \
+            executable BOOLEAN NOT NULL DEFAULT FALSE, is_binary BOOLEAN NOT NULL DEFAULT FALSE, \
+            PRIMARY KEY (bundle_id, path), \
+            CONSTRAINT skill_bundle_files_sha256_check CHECK (sha256 ~ '^[0-9a-f]{64}$'), \
+            CONSTRAINT skill_bundle_files_size_check CHECK (size_bytes BETWEEN 0 AND 1048576))",
+        "CREATE TABLE IF NOT EXISTS skill_bundle_blobs (\
+            org_id TEXT NOT NULL, sha256 TEXT NOT NULL, content BYTEA NOT NULL, size_bytes INTEGER NOT NULL, \
+            PRIMARY KEY (org_id, sha256), \
+            CONSTRAINT skill_bundle_blobs_sha256_check CHECK (sha256 ~ '^[0-9a-f]{64}$'), \
+            CONSTRAINT skill_bundle_blobs_size_check CHECK (size_bytes BETWEEN 0 AND 1048576))",
+    ] {
+        sqlx::query(statement)
+            .execute(pool)
+            .await
+            .expect("create a bundle table");
+    }
+}
+
+/// Seeds one org with a personal skill of `erased-user` (digest `a`), another member's personal skill (`b`)
+/// and an org skill (`c`), each with one live bundle of one file whose blob carries its digest. Returns the
+/// skill ids in that order. A skill id is a primary key, so each id carries the org.
+async fn seed_bundled_skills(pool: &Pool, org: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    for (name, scope, owner, digit) in [
+        ("mine", "user", "erased-user", "a"),
+        ("theirs", "user", "other-user", "b"),
+        ("shared", "org", "", "c"),
+    ] {
+        let skill = format!("p2-go-09-r1-{name}-{org}");
+        let digest = digit.repeat(64);
+        sqlx::query(
+            "INSERT INTO agent_skills (id, org_id, name, content, scope, owner_user_id, created_at, updated_at) \
+             VALUES ($1, $2, $3, 'the skill text', $4, $5, now(), now())",
+        )
+        .bind(&skill)
+        .bind(org)
+        .bind(name)
+        .bind(scope)
+        .bind(owner)
+        .execute(pool)
+        .await
+        .expect("seed skill");
+        let bundle = format!("bundle-{skill}");
+        sqlx::query(
+            "INSERT INTO skill_bundles (id, org_id, skill_id, manifest_sha256, file_count, total_bytes, created_by) \
+             VALUES ($1, $2, $3, $4, 1, 5, 'admin-1')",
+        )
+        .bind(&bundle)
+        .bind(org)
+        .bind(&skill)
+        .bind(&digest)
+        .execute(pool)
+        .await
+        .expect("seed bundle");
+        sqlx::query(
+            "INSERT INTO skill_bundle_files (bundle_id, path, sha256, size_bytes) VALUES ($1, 'SKILL.md', $2, 5)",
+        )
+        .bind(&bundle)
+        .bind(&digest)
+        .execute(pool)
+        .await
+        .expect("seed bundle file");
+        sqlx::query(
+            "INSERT INTO skill_bundle_blobs (org_id, sha256, content, size_bytes) VALUES ($1, $2, $3, 5)",
+        )
+        .bind(org)
+        .bind(&digest)
+        .bind(b"hello".to_vec())
+        .execute(pool)
+        .await
+        .expect("seed bundle blob");
+        ids.push(skill);
+    }
+    ids
+}
+
+async fn count_rows(pool: &Pool, sql: &str, org: &str, key: &str) -> i64 {
+    sqlx::query_scalar(sql)
+        .bind(org)
+        .bind(key)
+        .fetch_one(pool)
+        .await
+        .expect("count the rows")
+}
+
+/// P2-go-09-rel1 (DB tier): with the switch on, a person's erasure removes the bundle, its file and its blob
+/// of the person's own skill in the erasing transaction, and touches neither another member's skill nor the
+/// org skill. With the switch off the same erasure removes the skill and leaves its bundle, file and blob.
+#[tokio::test]
+#[ignore = "requires DATABASE_URL to a disposable Postgres whose name contains \"test\""]
+async fn a_person_erasure_removes_the_bundles_of_their_skills_only_under_the_switch() {
+    use crate::space::test_support;
+    let Some(pool) = test_support::connect().await else {
+        return;
+    };
+    ensure_skill_bundle_tables(&pool).await;
+    let nonce = mp_ids::new_ulid();
+    let on_org = format!("p2-go-09-r1-on-{nonce}");
+    let off_org = format!("p2-go-09-r1-off-{nonce}");
+    let on = seed_bundled_skills(&pool, &on_org).await;
+    let off = seed_bundled_skills(&pool, &off_org).await;
+
+    let mut tx = pool.begin().await.expect("begin the erasing transaction");
+    let removed = erase_user_skills_in_tx(&mut tx, &on_org, "erased-user", true)
+        .await
+        .expect("the erasure with the switch on");
+    tx.commit().await.expect("commit the erasure");
+    assert_eq!(
+        (removed.agent_skills, removed.skill_bundles),
+        (1, 1),
+        "the person's skill and its bundle"
+    );
+    let (mine, theirs, shared) = (&on[0], &on[1], &on[2]);
+    assert_eq!(count_rows(&pool, SKILL_ROWS, &on_org, mine).await, 0);
+    assert_eq!(count_rows(&pool, BUNDLE_ROWS, &on_org, mine).await, 0);
+    assert_eq!(
+        count_rows(&pool, BUNDLE_FILE_ROWS, &on_org, mine).await,
+        0,
+        "the file goes with the bundle"
+    );
+    assert_eq!(
+        count_rows(&pool, BLOB_ROWS, &on_org, &"a".repeat(64)).await,
+        0,
+        "the blob no bundle names any more is collected"
+    );
+    assert_eq!(count_rows(&pool, SKILL_ROWS, &on_org, theirs).await, 1);
+    assert_eq!(count_rows(&pool, BUNDLE_ROWS, &on_org, theirs).await, 1);
+    assert_eq!(
+        count_rows(&pool, BUNDLE_FILE_ROWS, &on_org, theirs).await,
+        1
+    );
+    assert_eq!(
+        count_rows(&pool, BLOB_ROWS, &on_org, &"b".repeat(64)).await,
+        1
+    );
+    assert_eq!(count_rows(&pool, SKILL_ROWS, &on_org, shared).await, 1);
+    assert_eq!(count_rows(&pool, BUNDLE_ROWS, &on_org, shared).await, 1);
+    assert_eq!(
+        count_rows(&pool, BLOB_ROWS, &on_org, &"c".repeat(64)).await,
+        1
+    );
+
+    let mut tx = pool
+        .begin()
+        .await
+        .expect("begin the second erasing transaction");
+    let kept = erase_user_skills_in_tx(&mut tx, &off_org, "erased-user", false)
+        .await
+        .expect("the erasure with the switch off");
+    tx.commit().await.expect("commit the second erasure");
+    assert_eq!(
+        (kept.agent_skills, kept.skill_bundles),
+        (1, 0),
+        "the skill goes and no bundle does"
+    );
+    let off_mine = &off[0];
+    assert_eq!(count_rows(&pool, SKILL_ROWS, &off_org, off_mine).await, 0);
+    assert_eq!(
+        count_rows(&pool, BUNDLE_ROWS, &off_org, off_mine).await,
+        1,
+        "the bundle stays, as before"
+    );
+    assert_eq!(
+        count_rows(&pool, BUNDLE_FILE_ROWS, &off_org, off_mine).await,
+        1
+    );
+    assert_eq!(
+        count_rows(&pool, BLOB_ROWS, &off_org, &"a".repeat(64)).await,
+        1
+    );
 }
 
 // ---- DB --------------------------------------------------------------------------------------

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -21,9 +22,10 @@ import (
 // with Control: the PATCH carries a decision Control signed for exactly this schedule, this
 // contract text and the template that results, under a schema no create decision can satisfy.
 
-// cronRenewalAuditAction is the registry audit action of a renewal. The row carries the contract
-// digest and expiry only, never the contract text, the goal or any tool arguments.
-const cronRenewalAuditAction = "schedule_contract_renewed"
+// cronRenewalAuditAction is the registry audit action of a renewal, from the schedule contract
+// vocabulary of audit.go. The row carries the contract digest, tool count, expiry and class only, never
+// the contract text, the goal or any tool arguments.
+const cronRenewalAuditAction = cron.ContractAuditRenewed
 
 // renewalEnabled is true when stored-consent contracts and their guards are both on. Off, a PATCH
 // that carries the renewal fields is refused as not_supported before anything is read or written,
@@ -64,7 +66,7 @@ WITH upd AS (
     RETURNING id
 ), aud AS (
     INSERT INTO registry_audit_log (id, entity_kind, entity_id, action, actor, org_id, diff_json)
-    SELECT $11::text, 'cron_schedule', $7::text, '` + cronRenewalAuditAction + `', $9::text, $8::text, $12::jsonb FROM upd
+    SELECT $11::text, '` + cron.ContractAuditEntityKind + `', $7::text, '` + cronRenewalAuditAction + `', $9::text, $8::text, $12::jsonb FROM upd
     RETURNING 1
 )
 SELECT count(*) FROM upd
@@ -129,6 +131,10 @@ func (h *CronHandler) renewScheduleContract(w http.ResponseWriter, r *http.Reque
 	text := *body.ApprovalContract
 	intent, err := h.createIntentFor(r.Context(), orgID, map[string]any{"approval_contract": text}, cron.CreateIntent{})
 	if err != nil {
+		if auditErr := h.auditContractRefusal(r.Context(), actor, orgID, id, text, err); auditErr != nil {
+			refusalAuditUnavailable(w)
+			return
+		}
 		jsonErr(w, "schedule contract refused: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -165,9 +171,8 @@ func (h *CronHandler) renewScheduleContract(w http.ResponseWriter, r *http.Reque
 		jsonErr(w, "invalid cron expression: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	diff, _ := json.Marshal(map[string]any{
-		"op": "renew", "contract_digest": intent.ContractDigest, "contract_expires_at": intent.ContractExpiresAt,
-	})
+	// The row carries the same closed diff a created row carries: digest, tool count, expiry and class.
+	diff := cron.ContractAuditDiffJSON(text, "")
 	var updated int
 	err = h.pool.QueryRow(r.Context(), cronRenewalUpdateSQL,
 		newTemplate, newDigest, body.Enabled, body.ScheduleExpr, next, now, id, orgID, creator, oldTemplate,
@@ -179,7 +184,11 @@ func (h *CronHandler) renewScheduleContract(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if err != nil {
-		jsonErr(w, "database unavailable", http.StatusInternalServerError)
+		// The renewal and its audit row are one statement, so a row that cannot be written rolls the
+		// renewal back, and the caller is asked to try again (K3-4).
+		slog.Warn("contract audit row not written", "action", cron.ContractAuditRenewed, "error", err)
+		writeTypedError(w, http.StatusServiceUnavailable, "audit_unavailable",
+			"The renewal could not be recorded in the audit log, so it was not made. Try again shortly.")
 		return
 	}
 	if updated != 1 {

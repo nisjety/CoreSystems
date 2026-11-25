@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
+	"github.com/triodelab/model-plane/pkg/authctx"
 	"github.com/triodelab/model-plane/services/capability-core/internal/cron"
 )
 
@@ -1149,6 +1151,13 @@ type CronHandler struct {
 	runNow         bool
 	runNowDB       cron.RunNowDB
 	fireAuthorizer cron.FireAuthorizer
+	// fireSchema is the cron_fires schema gate (F-f02-02). While it is not ready, Run now and the fire
+	// list answer 503 and the schedule list reads without the fire outcome. Nil, every route is as it was.
+	fireSchema *cron.FireSchemaGate
+	// contractAudit writes the schedule.contract.refused rows of a create and a renewal (K3-4). Nil, no
+	// refused row is written. It is set only while SCHEDULE_CONTRACT_ENABLED is the literal true. The
+	// created row needs no auditor: it is written in the statement that writes its schedule.
+	contractAudit cron.ContractAuditor
 }
 
 // NewCronHandler constructs the handler.
@@ -1188,6 +1197,72 @@ func (h *CronHandler) runNowEnabled() bool {
 	return h.runNow && h.runNowDB != nil && h.fireAuthorizer != nil
 }
 
+// WithFireSchemaGate makes Run now and the fire list wait while cron_fires lacks the columns
+// session-core migration 0056 adds (F-f02-02). The sweeper shares the same gate.
+func (h *CronHandler) WithFireSchemaGate(gate *cron.FireSchemaGate) *CronHandler {
+	h.fireSchema = gate
+	return h
+}
+
+// WithContractAuditor writes the schedule.contract.refused rows of a create and of a renewal (K3-4).
+// Nil turns those off. The created row is written with its schedule whenever a contract is stored.
+func (h *CronHandler) WithContractAuditor(auditor cron.ContractAuditor) *CronHandler {
+	h.contractAudit = auditor
+	return h
+}
+
+// schemaPendingCode and schemaPendingMessage answer a fire route while the fire schema is not in
+// place. Nothing about the schedule is in them.
+const (
+	schemaPendingCode    = "cron_fires_schema_pending"
+	schemaPendingMessage = "Scheduled runs are not ready yet. Try again shortly."
+)
+
+// auditContractRefusal writes the schedule.contract.refused row of a contract that createIntentFor
+// refused. The row carries the closed token of the refusal and a digest, never the contract text.
+// It returns nil when there is no auditor or the row is written; the refusal is then answered as it
+// always was. It returns the append error when the row cannot be written, and the caller answers
+// 503 audit_unavailable instead, so no refusal is answered without its row (K3-4).
+func (h *CronHandler) auditContractRefusal(ctx context.Context, actor, orgID, scheduleID, text string, refusal error) error {
+	if h.contractAudit == nil {
+		return nil
+	}
+	row := cron.ContractAuditRow{
+		EntityID: scheduleID,
+		Action:   cron.ContractAuditRefused,
+		Actor:    actor,
+		OrgID:    orgID,
+		Diff:     cron.ContractAuditDiffJSON(text, cron.ContractRefusalToken(refusal)),
+	}
+	if err := h.contractAudit.Append(ctx, h.pool, row); err != nil {
+		slog.Warn("contract audit row not written", "action", row.Action, "error", err)
+		return err
+	}
+	return nil
+}
+
+// refusalAuditUnavailable answers a contract refusal whose refused row could not be written.
+func refusalAuditUnavailable(w http.ResponseWriter) {
+	writeTypedError(w, http.StatusServiceUnavailable, "audit_unavailable",
+		"The refusal could not be recorded in the audit log. Try again shortly.")
+}
+
+// contractTextOf is the approval_contract text of a decoded template, or "" when there is none.
+func contractTextOf(template any) string {
+	object, ok := template.(map[string]any)
+	if !ok {
+		return ""
+	}
+	text, _ := object["approval_contract"].(string)
+	return text
+}
+
+// contractRefused names a refused contract by its closed audit token. Its message is the refusal's
+// own, so the answer a caller sees does not change.
+func contractRefused(token string, err error) error {
+	return &cron.ContractRefusal{Token: token, Err: err}
+}
+
 // createIntentFor builds the Control binding for one create. A template without
 // an approval_contract yields the contract-free intent, so Control's v1 decision
 // is still the only one accepted for it. A contract is parsed, window-checked
@@ -1202,18 +1277,19 @@ func (h *CronHandler) createIntentFor(ctx context.Context, orgID string, templat
 		return intent, nil
 	}
 	if !h.scheduleContract {
-		return intent, fmt.Errorf("schedule contracts are not enabled")
+		return intent, contractRefused(cron.ContractTokenContractsDisabled, errors.New("schedule contracts are not enabled"))
 	}
 	text, ok := raw.(string)
 	if !ok {
-		return intent, fmt.Errorf("schedule contract must be a JSON text value")
+		return intent, contractRefused(cron.ContractTokenInvalid, errors.New("schedule contract must be a JSON text value"))
 	}
 	contract, err := cron.ParseScheduleContract(text)
 	if err != nil {
-		return intent, err
+		return intent, contractRefused(cron.ContractTokenInvalid, err)
 	}
-	if err := cron.CheckContractWindow(contract, time.Now().UTC()); err != nil {
-		return intent, err
+	now := time.Now().UTC()
+	if err := cron.CheckContractWindow(contract, now); err != nil {
+		return intent, contractRefused(cron.ContractWindowToken(contract, now), err)
 	}
 	names := make([]string, 0, len(contract.Tools))
 	for _, tool := range contract.Tools {
@@ -1221,10 +1297,10 @@ func (h *CronHandler) createIntentFor(ctx context.Context, orgID string, templat
 	}
 	declared, err := h.declaredTools(ctx, orgID, names)
 	if err != nil {
-		return intent, err
+		return intent, contractRefused(cron.ContractTokenInvalid, err)
 	}
 	if err := cron.VerifyContractAgainstRegistry(contract, declared); err != nil {
-		return intent, err
+		return intent, contractRefused(cron.ContractTokenRegistryMismatch, err)
 	}
 	intent.ContractDigest = cron.ContractDigest(text)
 	intent.ContractExpiresAt = contract.ExpiresAt
@@ -1255,11 +1331,75 @@ func (h *CronHandler) declaredTools(ctx context.Context, orgID string, names []s
 	return declared, rows.Err()
 }
 
+// declaredToolsAll reads every registry row the verified org can see: its own rows and the global seed. It is
+// declaredTools without the name filter. The delegable tool list applies cron.DelegableFromRegistry to all the rows
+// of each tool together, so an org override that is stricter hides the tool.
+func (h *CronHandler) declaredToolsAll(ctx context.Context, orgID string) ([]cron.DeclaredTool, error) {
+	rows, err := h.pool.Query(ctx, `
+		SELECT tool_name, capability_id, side_effect_class, approval_floor, COALESCE(call_refinement, '')
+		FROM capability_tools
+		WHERE (org_id = $1 OR org_id = 'global')
+	`, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("read declared tools: %w", err)
+	}
+	defer rows.Close()
+	var declared []cron.DeclaredTool
+	for rows.Next() {
+		var row cron.DeclaredTool
+		if err := rows.Scan(&row.ToolName, &row.CapabilityID, &row.SideEffectClass, &row.ApprovalFloor, &row.CallRefinement); err != nil {
+			return nil, fmt.Errorf("scan declared tool: %w", err)
+		}
+		declared = append(declared, row)
+	}
+	return declared, rows.Err()
+}
+
+// listDelegableTools is GET /api/v1/cron/delegable-tools (F-f02-14, F-f05-18): the read tools the verified org may
+// name in a schedule's approval contract. Any member of the org may list it, since a name is not a grant. It answers
+// 405 to any other method and a typed 404 not_found while SCHEDULE_CONTRACT_ENABLED is off, because a contract is
+// refused then. A ZDR token answers an empty list, since it can create no contract. The list is cron.DelegableFromRegistry,
+// the rule the create-time check applies, and it names the window bounds and nothing else.
+func (h *CronHandler) listDelegableTools(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !h.scheduleContract {
+		writeTypedError(w, http.StatusNotFound, "not_found", "Delegable tools are not available.")
+		return
+	}
+	tools := []cron.DelegableTool{}
+	if principal, _ := authctx.PrincipalFromContext(r.Context()); !principal.ZeroDataRetention {
+		declared, err := h.declaredToolsAll(r.Context(), verifiedOrganizationID(r))
+		if err != nil {
+			slog.Error("read delegable tools failed", "error", err)
+			writeTypedError(w, http.StatusInternalServerError, "database_unavailable", "The delegable tools could not be read.")
+			return
+		}
+		tools = cron.DelegableFromRegistry(declared)
+	}
+	writeJSON(w, map[string]any{
+		"tools":        tools,
+		"max_days":     cron.ContractMaxDays,
+		"default_days": cron.ContractDefaultDays,
+	})
+}
+
 // Register mounts routes.
 func (h *CronHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/cron", h.listOrCreate)
+	// The delegable tool list (F-f02-14) is mounted ahead of the schedule subtree below.
+	mux.HandleFunc("/api/v1/cron/delegable-tools", h.listDelegableTools)
 	mux.HandleFunc("/api/v1/cron/", func(w http.ResponseWriter, r *http.Request) {
 		id := r.URL.Path[len("/api/v1/cron/"):]
+		// The list path and anything under it are never a schedule id, so neither the bare path nor its /fires or
+		// /run forms reads it as one.
+		if id == "delegable-tools" || strings.HasPrefix(id, "delegable-tools/") {
+			http.NotFound(w, r)
+			return
+		}
 		if scheduleID, ok := strings.CutSuffix(id, "/fires"); ok {
 			if r.Method != http.MethodGet {
 				http.NotFound(w, r)
@@ -1289,6 +1429,62 @@ func (h *CronHandler) Register(mux *http.ServeMux) {
 		}
 	})
 }
+
+// cronScheduleListSQL is the schedule list: each schedule with the status and outcome of its newest fire.
+const cronScheduleListSQL = `
+			SELECT s.id, s.org_id, s.name, s.description, s.schedule_expr, s.timezone, s.task_template,
+			       s.enabled, s.last_fire_at, s.next_fire_at, s.created_at, s.updated_at, s.space_ref, s.creator_subject_id,
+			       COALESCE(lf.status, ''), COALESCE(lf.outcome, '')
+			FROM cron_schedules AS s
+			LEFT JOIN LATERAL (
+				SELECT status, outcome FROM cron_fires
+				WHERE schedule_id = s.id
+				ORDER BY fired_at DESC, id DESC
+				LIMIT 1
+			) AS lf ON true
+			WHERE s.org_id=$1 AND s.deleted_at IS NULL
+			  AND ($2 = '' OR s.space_ref = $2)
+			  AND ($3 = '' OR s.creator_subject_id = $3)
+			ORDER BY s.name
+		`
+
+// cronScheduleListNoFiresSQL is cronScheduleListSQL without the fire join. It serves a database whose
+// cron_fires lacks the session-core migration 0056 columns (F-f02-02), where the join would fail.
+const cronScheduleListNoFiresSQL = `
+			SELECT s.id, s.org_id, s.name, s.description, s.schedule_expr, s.timezone, s.task_template,
+			       s.enabled, s.last_fire_at, s.next_fire_at, s.created_at, s.updated_at, s.space_ref, s.creator_subject_id,
+			       '', ''
+			FROM cron_schedules AS s
+			WHERE s.org_id=$1 AND s.deleted_at IS NULL
+			  AND ($2 = '' OR s.space_ref = $2)
+			  AND ($3 = '' OR s.creator_subject_id = $3)
+			ORDER BY s.name
+		`
+
+// cronScheduleInsertSQL writes one schedule. Its approval contract, when there is one, is kept as text
+// inside task_template.
+const cronScheduleInsertSQL = `
+			INSERT INTO cron_schedules (id, org_id, name, description, schedule_expr, timezone,
+			    task_template, enabled, next_fire_at, created_at, updated_at, space_ref, creator_subject_id,
+			    recipient_audience_ref, recipient_audience_hash, resource_authorization_ref, privacy_policy_ref,
+			    authority_revision, membership_revision, privacy_revision, recipient_audience_revision,
+			    entitlement_revision, template_digest)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+		`
+
+// cronScheduleCreateAuditedSQL writes a schedule that carries a contract, and its
+// schedule.contract.created row, in one statement (K3-4). The schedule exists only if its row does, so a
+// row that cannot be written rolls the create back. Parameters $1-$23 are cronScheduleInsertSQL's; $24 is
+// the row id, $25 the actor, $26 the org and $27 the content-free diff.
+const cronScheduleCreateAuditedSQL = `
+WITH ins AS (` + cronScheduleInsertSQL + ` RETURNING id),
+aud AS (
+    INSERT INTO registry_audit_log (id, entity_kind, entity_id, action, actor, org_id, diff_json)
+    SELECT $24::text, '` + cron.ContractAuditEntityKind + `', ins.id, '` + cron.ContractAuditCreated + `', $25::text, $26::text, $27::jsonb FROM ins
+    RETURNING 1
+)
+SELECT count(*) FROM ins
+`
 
 type cronScheduleRow struct {
 	ID           string     `json:"id"`
@@ -1335,22 +1531,13 @@ func (h *CronHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("creator") == "self" {
 			creator = verifiedActorID(r)
 		}
-		rows, err := h.pool.Query(r.Context(), `
-			SELECT s.id, s.org_id, s.name, s.description, s.schedule_expr, s.timezone, s.task_template,
-			       s.enabled, s.last_fire_at, s.next_fire_at, s.created_at, s.updated_at, s.space_ref, s.creator_subject_id,
-			       COALESCE(lf.status, ''), COALESCE(lf.outcome, '')
-			FROM cron_schedules AS s
-			LEFT JOIN LATERAL (
-				SELECT status, outcome FROM cron_fires
-				WHERE schedule_id = s.id
-				ORDER BY fired_at DESC, id DESC
-				LIMIT 1
-			) AS lf ON true
-			WHERE s.org_id=$1 AND s.deleted_at IS NULL
-			  AND ($2 = '' OR s.space_ref = $2)
-			  AND ($3 = '' OR s.creator_subject_id = $3)
-			ORDER BY s.name
-		`, orgID, spaceRef, creator)
+		listSQL := cronScheduleListSQL
+		if !h.fireSchema.Ready(r.Context()) {
+			// Before session-core migration 0056, cron_fires has no outcome column, so the list
+			// reads the schedules alone and shows no last fire.
+			listSQL = cronScheduleListNoFiresSQL
+		}
+		rows, err := h.pool.Query(r.Context(), listSQL, orgID, spaceRef, creator)
 		if err != nil {
 			jsonErr(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -1403,6 +1590,10 @@ func (h *CronHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			ScheduleID: s.ID, TemplateDigest: templateDigest, IdempotencyKey: s.IdempotencyKey,
 		})
 		if err != nil {
+			if auditErr := h.auditContractRefusal(r.Context(), verifiedActorID(r), verifiedOrganizationID(r), s.ID, contractTextOf(s.TaskTemplate), err); auditErr != nil {
+				refusalAuditUnavailable(w)
+				return
+			}
 			jsonErr(w, "Space schedule creation is not authorized", http.StatusForbidden)
 			return
 		}
@@ -1419,21 +1610,36 @@ func (h *CronHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, "invalid cron expression: "+nerr.Error(), http.StatusBadRequest)
 			return
 		}
-		_, err = h.pool.Exec(r.Context(), `
-			INSERT INTO cron_schedules (id, org_id, name, description, schedule_expr, timezone,
-			    task_template, enabled, next_fire_at, created_at, updated_at, space_ref, creator_subject_id,
-			    recipient_audience_ref, recipient_audience_hash, resource_authorization_ref, privacy_policy_ref,
-			    authority_revision, membership_revision, privacy_revision, recipient_audience_revision,
-			    entitlement_revision, template_digest)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
-		`, s.ID, s.OrgID, s.Name, s.Description, s.ScheduleExpr, s.Timezone,
+		args := []any{s.ID, s.OrgID, s.Name, s.Description, s.ScheduleExpr, s.Timezone,
 			tplJSON, s.Enabled, next, now, now, binding.SpaceRef, binding.SubjectID,
 			binding.RecipientAudienceRef, binding.RecipientAudienceHash, binding.ResourceAuthorizationRef, binding.PrivacyPolicyRef,
 			binding.AuthorityRevision, binding.MembershipRevision, binding.PrivacyRevision, binding.RecipientAudienceRevision,
-			binding.EntitlementRevision, templateDigest)
-		if err != nil {
-			jsonErr(w, err.Error(), http.StatusInternalServerError)
-			return
+			binding.EntitlementRevision, templateDigest}
+		if intent.ContractDigest == "" {
+			// A schedule without a contract is written exactly as it always was.
+			_, err = h.pool.Exec(r.Context(), cronScheduleInsertSQL, args...)
+			if err != nil {
+				jsonErr(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		} else {
+			// The schedule and its schedule.contract.created row are one statement, so they commit or roll
+			// back together. A failure of that statement other than a duplicate id rolls the create back and
+			// is answered 503 audit_unavailable (K3-4).
+			diff := cron.ContractAuditDiffJSON(contractTextOf(s.TaskTemplate), "")
+			args = append(args, cron.NewAuditID(), verifiedActorID(r), s.OrgID, string(diff))
+			_, err = h.pool.Exec(r.Context(), cronScheduleCreateAuditedSQL, args...)
+			if err != nil {
+				var pgErr *pgconn.PgError
+				if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+					jsonErr(w, "a schedule with this id already exists", http.StatusConflict)
+					return
+				}
+				slog.Warn("contract audit row not written", "action", cron.ContractAuditCreated, "error", err)
+				writeTypedError(w, http.StatusServiceUnavailable, "audit_unavailable",
+					"The schedule's approval could not be recorded in the audit log, so no schedule was created. Try again shortly.")
+				return
+			}
 		}
 		w.WriteHeader(http.StatusCreated)
 		writeJSON(w, map[string]any{"id": s.ID})
@@ -1488,6 +1694,10 @@ func (h *CronHandler) listFires(w http.ResponseWriter, r *http.Request, schedule
 		jsonErr(w, "not found", http.StatusNotFound)
 		return
 	}
+	if !h.fireSchema.Ready(r.Context()) {
+		writeTypedError(w, http.StatusServiceUnavailable, schemaPendingCode, schemaPendingMessage)
+		return
+	}
 	rows, err := h.pool.Query(r.Context(), `
 		SELECT id, fired_at, status, outcome, completed_at, run_id, thread_id, withheld_effects, fire_key
 		FROM cron_fires
@@ -1526,6 +1736,10 @@ func (h *CronHandler) runNowFire(w http.ResponseWriter, r *http.Request, schedul
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeTypedError(w, http.StatusBadRequest, "invalid_request", "the body must be a JSON object with a request_id")
+		return
+	}
+	if !h.fireSchema.Ready(r.Context()) {
+		writeTypedError(w, http.StatusServiceUnavailable, schemaPendingCode, schemaPendingMessage)
 		return
 	}
 	result, refusal, err := cron.RunNow(r.Context(), h.runNowDB, h.fireAuthorizer, cron.RunNowRequest{

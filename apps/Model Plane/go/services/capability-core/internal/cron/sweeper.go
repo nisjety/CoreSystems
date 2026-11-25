@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -29,7 +30,24 @@ type Sweeper struct {
 	// schedule's approval_contract, so every schedule fires exactly as before WS20-S8.
 	contractGuards bool
 	pauseNotifier  PauseNotifier
+	// fireSchema is the cron_fires schema gate (F-f02-02). Nil, the sweep never waits for it.
+	fireSchema  *FireSchemaGate
+	schemaState atomic.Int32
+	// contractAudit writes the schedule.contract.expired row of a guard pause (K3-4). Nil, no such
+	// row is written. auditRetry holds the rows whose first append failed; the next tick writes them
+	// again. auditRecoverAt is when the sweep next reads the disabled schedules for an expiry row that
+	// is missing (see recoverExpiredAudits).
+	contractAudit  ContractAuditor
+	auditRetry     *ContractAuditRetry
+	auditRecoverAt time.Time
 }
+
+// The states the sweeper last saw the fire schema in, so it logs each change once.
+const (
+	schemaStateUnknown int32 = iota
+	schemaStateWaiting
+	schemaStateReady
+)
 
 // PauseNotifier sends a notification-core request. *notifyclient.Client satisfies it.
 type PauseNotifier interface {
@@ -52,6 +70,11 @@ const (
 	scheduledRunOutcomeNotifyType = "modelplane.scheduled_run_outcome"
 	scheduleNoticeRetention       = "standard"
 )
+
+// expiredAuditRecoveryInterval is how often a sweep reads the disabled schedules for an expiry row that
+// is missing. The first sweep after a start reads them at once, so a row lost with the process is
+// written again on the restart.
+const expiredAuditRecoveryInterval = 10 * time.Minute
 
 // FireIntent is the non-secret record view an authorization implementation
 // must reauthorize just before a scheduler creates its owner effect. It is
@@ -92,6 +115,47 @@ func (s *Sweeper) WithContractGuards(enabled bool) *Sweeper {
 func (s *Sweeper) WithPauseNotifier(notifier PauseNotifier) *Sweeper {
 	s.pauseNotifier = notifier
 	return s
+}
+
+// WithFireSchemaGate makes each sweep wait until cron_fires has the columns session-core
+// migration 0056 adds (F-f02-02). Until then a sweep fires nothing and does not fail.
+func (s *Sweeper) WithFireSchemaGate(gate *FireSchemaGate) *Sweeper {
+	s.fireSchema = gate
+	return s
+}
+
+// WithContractAuditor writes the schedule.contract.expired row of each guard pause (K3-4). Nil turns
+// the rows off, and the pause itself is unchanged.
+func (s *Sweeper) WithContractAuditor(auditor ContractAuditor) *Sweeper {
+	s.contractAudit = auditor
+	s.auditRetry = nil
+	if auditor != nil {
+		s.auditRetry = &ContractAuditRetry{}
+	}
+	return s
+}
+
+// fireSchemaReady asks the gate before a sweep. Not ready, the sweep does nothing. The sweeper logs
+// the wait and the release once each, with no org or schedule ids. A probe error counts as not ready.
+func (s *Sweeper) fireSchemaReady(ctx context.Context) bool {
+	if s.fireSchema == nil {
+		return true
+	}
+	ready, err := s.fireSchema.Check(ctx)
+	if ready {
+		if s.schemaState.Swap(schemaStateReady) != schemaStateReady {
+			slog.Info("cron fire schema ready")
+		}
+		return true
+	}
+	if s.schemaState.Swap(schemaStateWaiting) != schemaStateWaiting {
+		if err != nil {
+			slog.Warn("cron sweeper waiting for session-core migration 0056 (cron_fires columns)", "error", err)
+		} else {
+			slog.Warn("cron sweeper waiting for session-core migration 0056 (cron_fires columns)")
+		}
+	}
+	return false
 }
 
 // Start runs the sweep loop until ctx is cancelled. Errors are logged, not fatal.
@@ -170,7 +234,19 @@ func (s *Sweeper) RunOnce(ctx context.Context) (int, error) {
 	if s.authorizer == nil {
 		return 0, fmt.Errorf("cron schedule fire authorizer is not configured")
 	}
+	// Until session-core's migration 0056 is in place, a fire insert cannot succeed, so the sweep
+	// waits. Nothing is claimed and no schedule is paused or disabled.
+	if !s.fireSchemaReady(ctx) {
+		return 0, nil
+	}
+	// Expiry rows whose first write failed are written again before this tick's pauses.
+	s.auditRetry.Flush(ctx, s.contractAudit, s.pool)
 	now := time.Now().UTC()
+	// A row lost with the process, or dropped from the queue past its limit, is written by the durable
+	// recovery, because the sweep no longer selects a paused schedule.
+	if s.expiredAuditRecoveryDue(now) {
+		s.recoverExpiredAudits(ctx, now)
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return 0, err
@@ -227,12 +303,26 @@ func (s *Sweeper) RunOnce(ctx context.Context) (int, error) {
 			fired++
 		}
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := s.commitBatch(ctx, tx, pauses); err != nil {
 		return 0, errors.Join(err, errors.Join(failed...))
 	}
 	// Notices follow the commit, so a notice never reports a pause that was rolled back.
 	s.sendPauseNotices(ctx, pauses)
 	return fired, errors.Join(failed...)
+}
+
+// commitBatch commits the batch and, only then, queues the expiry rows that failed inside it. A batch that
+// does not commit rolls every one of its pauses back, so none of their rows is ever written.
+func (s *Sweeper) commitBatch(ctx context.Context, tx pgx.Tx, pauses []pauseNotice) error {
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	for _, p := range pauses {
+		if p.unwritten != nil {
+			s.auditRetry.Add(*p.unwritten)
+		}
+	}
+	return nil
 }
 
 // sweepDue handles one due schedule inside its own savepoint and reports whether
@@ -259,7 +349,14 @@ func (s *Sweeper) sweepDue(ctx context.Context, tx pgx.Tx, d dueSchedule, now ti
 	if lapsed {
 		// An expired approval never fires: the schedule pauses instead, and a
 		// renewal is the only way back.
-		return false, pauseSchedule(ctx, tx, d, now, outcomePausedExpired, pauses)
+		if err := pauseSchedule(ctx, tx, d, now, outcomePausedExpired, pauses); err != nil {
+			return false, err
+		}
+		// A row whose write failed waits on its pause, and is queued only once the batch has committed.
+		if row := s.auditExpired(ctx, tx, d); row != nil {
+			(*pauses)[len(*pauses)-1].unwritten = row
+		}
+		return false, nil
 	}
 	if d.nextFire == nil {
 		// First observation: initialize next_fire_at only; do not fire on the
@@ -454,6 +551,9 @@ type pauseNotice struct {
 	scheduleID string
 	outcome    string
 	pausedAt   time.Time
+	// unwritten is the pause's expiry row when its first write failed inside the batch. It is queued only
+	// after the batch commits, so the row of a pause that rolls back is never written.
+	unwritten *ContractAuditRow
 }
 
 // pauseSchedule takes a schedule out of the sweep and records the decision as a
@@ -482,6 +582,113 @@ func pauseSchedule(ctx context.Context, tx pgx.Tx, d dueSchedule, now time.Time,
 	slog.Warn("paused cron schedule under its approval guard", "schedule", d.id, "outcome", outcome)
 	*pauses = append(*pauses, pauseNotice{orgID: d.orgID, subjectID: d.subjectID, scheduleID: d.id, outcome: outcome, pausedAt: now})
 	return nil
+}
+
+// auditExpired writes the schedule.contract.expired row of a guard pause (K3-4). It runs in the pause's
+// transaction, in a savepoint of its own. A row that cannot be written is logged and returned, so the
+// batch can queue it once the pause has committed. It never undoes the pause, because the pause is the
+// safety action.
+func (s *Sweeper) auditExpired(ctx context.Context, tx pgx.Tx, d dueSchedule) *ContractAuditRow {
+	if s.contractAudit == nil {
+		return nil
+	}
+	row := expiredAuditRow(d)
+	if err := inSavepoint(ctx, tx, func(sp pgx.Tx) error {
+		return s.contractAudit.Append(ctx, sp, row)
+	}); err != nil {
+		slog.Warn("contract audit row not written; retried on the next tick", "action", row.Action, "error", err)
+		return &row
+	}
+	return nil
+}
+
+// expiredAuditRecoveryDue reports whether this sweep reads the disabled schedules for an expiry row that is
+// missing. It does so on the first sweep after a start and then every expiredAuditRecoveryInterval, and only
+// while the approval guards and the audit sink are both on.
+func (s *Sweeper) expiredAuditRecoveryDue(now time.Time) bool {
+	if !s.contractGuards || s.contractAudit == nil || now.Before(s.auditRecoverAt) {
+		return false
+	}
+	s.auditRecoverAt = now.Add(expiredAuditRecoveryInterval)
+	return true
+}
+
+// recoverExpiredAudits is the durable route to an expiry row. A guard pause leaves the schedule disabled and
+// keeps its next_fire_at, so ExpiredAuditID recomputes the row the pause wrote, and an insert that finds the
+// row already there does nothing. A row lost with the process, or dropped from the queue, is therefore
+// written by a later sweep, even though the sweep no longer selects a paused schedule.
+func (s *Sweeper) recoverExpiredAudits(ctx context.Context, now time.Time) {
+	schedules, err := loadDisabledSchedules(ctx, s.pool)
+	if err != nil {
+		slog.Warn("cron expiry audit recovery could not read the disabled schedules", "error", err)
+		return
+	}
+	writeMissingExpiredAudits(ctx, s.contractAudit, s.pool, schedules, now)
+}
+
+// disabledScheduleReader is the query the expiry recovery reads through. A *pgxpool.Pool and a pgx.Tx both
+// satisfy it.
+type disabledScheduleReader interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
+// loadDisabledSchedules reads each live schedule that is disabled, with the fields an expiry row is made
+// from. The sweep never selects these schedules, so this read is the only one that finds their rows.
+func loadDisabledSchedules(ctx context.Context, q disabledScheduleReader) ([]dueSchedule, error) {
+	rows, err := q.Query(ctx, `
+		SELECT id, org_id, task_template, next_fire_at
+		FROM cron_schedules
+		WHERE NOT enabled AND deleted_at IS NULL
+		ORDER BY id
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var schedules []dueSchedule
+	for rows.Next() {
+		var d dueSchedule
+		if err := rows.Scan(&d.id, &d.orgID, &d.template, &d.nextFire); err != nil {
+			return nil, err
+		}
+		schedules = append(schedules, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return schedules, nil
+}
+
+// writeMissingExpiredAudits writes the expiry row of each lapsed schedule in schedules. The insert does nothing
+// for a row that already exists, so a schedule whose row is written costs one no-op statement per recovery. A
+// failed write is logged, and a later recovery tries it again.
+func writeMissingExpiredAudits(ctx context.Context, auditor ContractAuditor, db AuditExecer, schedules []dueSchedule, now time.Time) {
+	for _, d := range schedules {
+		if _, lapsed := approvalContract(d.template, now); !lapsed {
+			continue
+		}
+		row := expiredAuditRow(d)
+		if err := auditor.Append(ctx, db, row); err != nil {
+			slog.Warn("contract audit recovery could not write an expiry row; tried again on a later sweep", "action", row.Action, "error", err)
+		}
+	}
+}
+
+// expiredAuditRow is the content-free expiry row of one paused schedule. Its id is fixed to the
+// paused slot, so it is written once however often it is retried.
+func expiredAuditRow(d dueSchedule) ContractAuditRow {
+	fireKey := ""
+	if d.nextFire != nil {
+		fireKey = d.nextFire.UTC().Format(time.RFC3339Nano)
+	}
+	return ContractAuditRow{
+		ID:       ExpiredAuditID(d.id, fireKey),
+		EntityID: d.id,
+		Action:   ContractAuditExpired,
+		Actor:    SweeperAuditActor,
+		OrgID:    d.orgID,
+		Diff:     ContractAuditDiffJSON(ApprovalContractText(d.template), ""),
+	}
 }
 
 // tripsFailureLimit reports whether a schedule's most recent consecutiveFailureLimit

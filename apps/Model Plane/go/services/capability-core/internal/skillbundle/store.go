@@ -40,13 +40,23 @@ type Store struct {
 }
 
 // RetentionEnv is the switch for keeping skill bundles per version (EP-11 S5). Only the literal
-// "true" turns it on. It must stay off until bundle read authorization (register D2-379, D2-383)
-// is fixed, because retained bundles stay readable longer.
+// "true" turns it on, and only together with SKILL_VERSIONS_API: the two switches are coupled.
+// Retention keeps a superseded bundle only while a skill version names it, and that digest is
+// stamped only while SKILL_VERSIONS_API is on, so retention alone would keep nothing. It must
+// stay off until bundle read authorization (register D2-379, D2-383) is fixed, because retained
+// bundles stay readable longer.
 const RetentionEnv = "SKILL_BUNDLE_RETENTION"
 
-// RetentionFromLookup reads SKILL_BUNDLE_RETENTION strictly.
+// skillVersionsAPIEnv is SKILL_VERSIONS_API, the switch RetentionFromLookup is coupled to. It is
+// the twin of api.skillVersionsAPIEnv: the api package imports this one, so skillbundle cannot
+// import api back. Keep the two names equal.
+const skillVersionsAPIEnv = "SKILL_VERSIONS_API"
+
+// RetentionFromLookup reads SKILL_BUNDLE_RETENTION strictly and couples it to SKILL_VERSIONS_API:
+// retention is on only when both are the literal "true" in the same lookup. Every caller takes its
+// answer from here, so none can see retention on while the version digest is not stamped.
 func RetentionFromLookup(lookup func(string) string) bool {
-	return lookup(RetentionEnv) == "true"
+	return lookup(RetentionEnv) == "true" && lookup(skillVersionsAPIEnv) == "true"
 }
 
 // NewStore wraps the pool.
@@ -61,7 +71,8 @@ func (s *Store) WithSkillVersions(on bool) *Store {
 	return s
 }
 
-// WithRetention turns on per-version bundle retention (EP-11 S5).
+// WithRetention turns on per-version bundle retention (EP-11 S5). Callers take the switch from
+// RetentionFromLookup, which is off unless SKILL_VERSIONS_API is on as well.
 func (s *Store) WithRetention(on bool) *Store {
 	s.retention = on
 	return s
@@ -105,8 +116,10 @@ type Summary struct {
 	TotalBytes     int64
 	CreatedBy      string
 	CreatedAt      time.Time
-	// DeckTemplate is true when the bundle holds ThemePath (EP-5 S6). Derived from the bundle's
-	// files on every read rather than stored, so no migration carries it and it cannot go stale.
+	// DeckTemplate is true when the bundle holds ThemePath and has passed ValidateDeckTemplate while
+	// SKILL_DECK_TEMPLATES_ENABLED was on (EP-5 S6, F-f09-08). The file is read on every list, and the pass is
+	// the deck_validated_at stamp (migration 0046), so a bundle uploaded while the switch was off is not a
+	// template until the startup sweep has checked it.
 	DeckTemplate bool
 }
 
@@ -645,7 +658,8 @@ func (s *Store) List(ctx context.Context, orgID string, skillIDs []string) ([]Su
 	}
 	rows, err := s.db.Query(ctx, `
 		SELECT b.skill_id, b.manifest_sha256, b.file_count, b.total_bytes, b.created_by, b.created_at,
-		       EXISTS (SELECT 1 FROM skill_bundle_files f WHERE f.bundle_id = b.id AND f.path = $3)
+		       (EXISTS (SELECT 1 FROM skill_bundle_files f WHERE f.bundle_id = b.id AND f.path = $3)
+		        AND b.deck_validated_at IS NOT NULL)
 		FROM skill_bundles b
 		WHERE b.org_id = $1 AND ($2::text[] IS NULL OR b.skill_id = ANY($2::text[])) AND b.state = 'live'
 		ORDER BY b.skill_id
@@ -741,4 +755,173 @@ func (s *Store) Blob(ctx context.Context, orgID, skillID, sha256 string) ([]byte
 		return nil, fmt.Errorf("read skill blob: %w", err)
 	}
 	return content, nil
+}
+
+// deckValidatedSQL stamps the bundle the digest names as having passed ValidateDeckTemplate (F-f09-08). The digest is
+// the guard: a row replaced since the caller checked it is not the one named, so a stale call marks nothing. The row is
+// the live bundle or the draft, because publishing a draft makes it live and keeps its stamp. A superseded row is not
+// stamped.
+const deckValidatedSQL = `
+UPDATE skill_bundles SET deck_validated_at = now()
+WHERE org_id = $1 AND skill_id = $2 AND manifest_sha256 = $3 AND state IN ('live', 'draft')
+`
+
+// MarkDeckValidated records that the org's bundle for the skill, with manifestSHA256, passed ValidateDeckTemplate while
+// SKILL_DECK_TEMPLATES_ENABLED is on. A digest the skill no longer holds marks nothing, and that is not an error.
+func (s *Store) MarkDeckValidated(ctx context.Context, orgID, skillID, manifestSHA256 string) error {
+	_, err := s.stampDeckValidated(ctx, orgID, skillID, manifestSHA256)
+	return err
+}
+
+// stampDeckValidated runs the stamp in its own transaction, under the org's bundle lock as every bundle write is, and
+// reports how many rows it marked.
+func (s *Store) stampDeckValidated(ctx context.Context, orgID, skillID, manifestSHA256 string) (int64, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("begin skill deck stamp: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, lockOrgSQL, orgID); err != nil {
+		return 0, fmt.Errorf("lock skill bundles: %w", err)
+	}
+	marked, err := markDeckValidated(ctx, tx, orgID, skillID, manifestSHA256)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit skill deck stamp: %w", err)
+	}
+	return marked, nil
+}
+
+// MarkDeckValidatedTx is MarkDeckValidated inside the caller's transaction tx. The import writes its bundle row in its
+// own transaction, which no other connection sees until it commits, so the stamp belongs in that transaction.
+func MarkDeckValidatedTx(ctx context.Context, tx Execer, orgID, skillID, manifestSHA256 string) error {
+	_, err := markDeckValidated(ctx, tx, orgID, skillID, manifestSHA256)
+	return err
+}
+
+// markDeckValidated runs the stamp and reports how many rows it marked.
+func markDeckValidated(ctx context.Context, tx Execer, orgID, skillID, manifestSHA256 string) (int64, error) {
+	tag, err := tx.Exec(ctx, deckValidatedSQL, orgID, skillID, manifestSHA256)
+	if err != nil {
+		return 0, fmt.Errorf("mark skill deck template validated: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// deckSweepLimit bounds one startup sweep: at most this many unchecked bundles are checked, the oldest first. A sweep
+// that stops at the bound is finished by the next start, which runs it again.
+const deckSweepLimit = 500
+
+// deckSweepBundleTimeout bounds the reads and the check of one bundle, so one slow read cannot hold the whole sweep.
+const deckSweepBundleTimeout = 30 * time.Second
+
+// deckCandidatesSQL lists the live bundles that hold the theme file and have no stamp yet, oldest first. $1 is the theme
+// path and $2 the bound.
+const deckCandidatesSQL = `
+SELECT b.id, b.org_id, b.skill_id, b.manifest_sha256
+FROM skill_bundles b
+WHERE b.state = 'live' AND b.deck_validated_at IS NULL
+  AND EXISTS (SELECT 1 FROM skill_bundle_files f WHERE f.bundle_id = b.id AND f.path = $1)
+ORDER BY b.created_at, b.id
+LIMIT $2
+`
+
+// deckCandidate is one bundle the sweep checks.
+type deckCandidate struct {
+	id, orgID, skillID, manifestSHA256 string
+}
+
+// RevalidateDeckTemplates is the startup sweep of F-f09-08. A bundle uploaded while SKILL_DECK_TEMPLATES_ENABLED was off
+// was never checked, so with the switch on it is run through ValidateDeckTemplate here and stamped when it passes. It
+// checks at most deckSweepLimit live bundles, one at a time, oldest first. A bundle that fails stays unstamped and so
+// unlisted, and it is neither changed nor deleted. The counts are the whole result: a failure is not logged with its
+// path or its content. Call it only while the switch is on.
+func (s *Store) RevalidateDeckTemplates(ctx context.Context) (checked, passed, failed int, err error) {
+	candidates, err := s.listDeckCandidates(ctx)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	if len(candidates) > deckSweepLimit {
+		candidates = candidates[:deckSweepLimit]
+	}
+	for _, candidate := range candidates {
+		if err := ctx.Err(); err != nil {
+			return checked, passed, failed, err
+		}
+		checked++
+		if s.revalidateDeckTemplate(ctx, candidate) {
+			passed++
+		} else {
+			failed++
+		}
+	}
+	return checked, passed, failed, nil
+}
+
+// listDeckCandidates reads the sweep's candidates, bounded by deckSweepLimit in the statement itself.
+func (s *Store) listDeckCandidates(ctx context.Context) ([]deckCandidate, error) {
+	rows, err := s.db.Query(ctx, deckCandidatesSQL, ThemePath, deckSweepLimit)
+	if err != nil {
+		return nil, fmt.Errorf("list deck template candidates: %w", err)
+	}
+	defer rows.Close()
+	candidates := []deckCandidate{}
+	for rows.Next() {
+		var candidate deckCandidate
+		if err := rows.Scan(&candidate.id, &candidate.orgID, &candidate.skillID, &candidate.manifestSHA256); err != nil {
+			return nil, fmt.Errorf("scan deck template candidate: %w", err)
+		}
+		candidates = append(candidates, candidate)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list deck template candidates: %w", err)
+	}
+	return candidates, nil
+}
+
+// revalidateDeckTemplate checks one candidate and reports whether it passed and was stamped. A bundle that cannot be
+// read, fails the check, or was replaced before its stamp counts as not passed, and nothing is changed for it.
+func (s *Store) revalidateDeckTemplate(ctx context.Context, candidate deckCandidate) bool {
+	bundleCtx, cancel := context.WithTimeout(ctx, deckSweepBundleTimeout)
+	defer cancel()
+	bundle, err := s.loadDeckBundle(bundleCtx, candidate)
+	if err != nil || ValidateDeckTemplate(bundle) != nil {
+		return false
+	}
+	marked, err := s.stampDeckValidated(bundleCtx, candidate.orgID, candidate.skillID, candidate.manifestSHA256)
+	return err == nil && marked > 0
+}
+
+// loadDeckBundle reads one stored bundle back the way an upload hands it to ValidateDeckTemplate: its files with their
+// bodies. It uses the manifest and blob readers the reads use, so each body is the one its digest names.
+func (s *Store) loadDeckBundle(ctx context.Context, candidate deckCandidate) (Bundle, error) {
+	manifest, err := s.readManifest(ctx, candidate.skillID, `
+		SELECT b.manifest_sha256, f.path, f.sha256, f.size_bytes, f.executable, f.is_binary
+		FROM skill_bundles b
+		JOIN skill_bundle_files f ON f.bundle_id = b.id
+		WHERE b.id = $1
+		ORDER BY f.path
+	`, candidate.id)
+	if err != nil {
+		return Bundle{}, err
+	}
+	bundle := Bundle{ManifestSHA256: manifest.ManifestSHA256, Files: make([]File, 0, len(manifest.Files))}
+	bodies := make(map[string][]byte, len(manifest.Files))
+	for _, file := range manifest.Files {
+		body, known := bodies[file.SHA256]
+		if !known {
+			body, err = s.Blob(ctx, candidate.orgID, candidate.skillID, file.SHA256)
+			if err != nil {
+				return Bundle{}, err
+			}
+			bodies[file.SHA256] = body
+		}
+		file.Body = body
+		bundle.Files = append(bundle.Files, file)
+		bundle.TotalBytes += file.Size
+	}
+	return bundle, nil
 }

@@ -55,6 +55,15 @@ func OrgAgentPolicyAPIFromLookup(lookup func(string) string) bool {
 	return lookup(orgAgentPolicyAPIEnv) == "true"
 }
 
+// orgWebCoversBrowserEnv is CAPABILITY_ORG_WEB_MODE_COVERS_BROWSER, the switch that puts web.covers_browser in force.
+const orgWebCoversBrowserEnv = "CAPABILITY_ORG_WEB_MODE_COVERS_BROWSER"
+
+// OrgWebCoversBrowserFromLookup reads CAPABILITY_ORG_WEB_MODE_COVERS_BROWSER strictly: only the literal "true" puts
+// web.covers_browser in force (D-f09-3). Off, the key is neither shown nor accepted.
+func OrgWebCoversBrowserFromLookup(lookup func(string) string) bool {
+	return lookup(orgWebCoversBrowserEnv) == "true"
+}
+
 // orgAgentSetting is one row of the closed key schema. It mirrors the SETTINGS table of
 // mp-contracts/src/org_agent_policy.rs; the golden test below holds the two together.
 type orgAgentSetting struct {
@@ -65,6 +74,8 @@ type orgAgentSetting struct {
 	failClose      string
 	reserved       bool
 	reservedValues []string
+	// browserSwitch marks a key in force only while CAPABILITY_ORG_WEB_MODE_COVERS_BROWSER is on (D-f09-3).
+	browserSwitch bool
 }
 
 var orgAgentPolicySettings = []orgAgentSetting{
@@ -88,6 +99,12 @@ var orgAgentPolicySettings = []orgAgentSetting{
 	{key: "web.mode", kind: "enum", order: []string{"off", "cached_only", "live"}, def: "live", failClose: "off", reservedValues: []string{"cached_only"}},
 	// Wave 3 EP-9 W2: whether a paid search provider may serve the org's agents.
 	{key: "web.paid_providers", kind: "enum", order: []string{"off", "on"}, def: "on", failClose: "off"},
+	// F-f09-13 (owner decision D-f09-3) and O-19: whether the org's browser tools follow web.mode too. `true`, the default,
+	// withholds them while web.mode is not live, as the public web tools are; `false` keeps them open. It is a bool, and
+	// its fail-closed value is `true`, so an unreadable value covers the browser tools. The key is in force only while
+	// CAPABILITY_ORG_WEB_MODE_COVERS_BROWSER is the literal "true": with that switch off it is neither shown nor accepted
+	// (see inForce), so the document, its digest and the effective read are those of a build without it.
+	{key: "web.covers_browser", kind: "bool", order: []string{"true", "false"}, def: "true", failClose: "true", browserSwitch: true},
 	// Wave 4 W4-D M1a: the origins an MCP App may reach. `approved_only` names origins; it is reserved
 	// until MCP_APPS_NETWORK_ENABLED serves them, so a write of it is refused not_enforced.
 	{key: "mcp_apps.network_origins", kind: "origin_allow_list", order: []string{"none", "approved_only"}, def: "none", failClose: "none", reserved: true},
@@ -338,15 +355,52 @@ func orgAgentPolicyDigest(settings map[string]any) (string, []byte, error) {
 
 // OrgAgentPolicyHandler serves /api/v1/org-agent-policy and its effective and history reads.
 type OrgAgentPolicyHandler struct {
-	pool    registryDatabase
-	enabled bool
-	ceiling map[string]string
+	pool          registryDatabase
+	enabled       bool
+	ceiling       map[string]string
+	coversBrowser bool // CAPABILITY_ORG_WEB_MODE_COVERS_BROWSER, set by WithWebCoversBrowser
 }
 
 // NewOrgAgentPolicyHandler constructs the handler. enabled comes from
 // OrgAgentPolicyAPIFromLookup; when false every route answers 404.
 func NewOrgAgentPolicyHandler(pool registryDatabase, enabled bool) *OrgAgentPolicyHandler {
 	return &OrgAgentPolicyHandler{pool: pool, enabled: enabled, ceiling: loosestOrgAgentCeiling()}
+}
+
+// WithWebCoversBrowser sets CAPABILITY_ORG_WEB_MODE_COVERS_BROWSER (D-f09-3). It is off unless the caller turns it on.
+// Off, web.covers_browser is neither shown in a read nor accepted by a write, so the document and its digest are the
+// ones a build without the key has.
+func (h *OrgAgentPolicyHandler) WithWebCoversBrowser(on bool) *OrgAgentPolicyHandler {
+	h.coversBrowser = on
+	return h
+}
+
+// inForce reports whether this handler serves a key of the schema. Every key is served, except a browser-switched key
+// while CAPABILITY_ORG_WEB_MODE_COVERS_BROWSER is off.
+func (h *OrgAgentPolicyHandler) inForce(def orgAgentSetting) bool {
+	return !def.browserSwitch || h.coversBrowser
+}
+
+// settingsInForce drops the keys this handler does not serve from a document, so the document, its digest and every
+// read of it are those of a build without them.
+func (h *OrgAgentPolicyHandler) settingsInForce(settings map[string]any) map[string]any {
+	for _, def := range orgAgentPolicySettings {
+		if !h.inForce(def) {
+			delete(settings, def.key)
+		}
+	}
+	return settings
+}
+
+// keyOutOfForce refuses a written key this handler does not serve. A browser-switched key written while its switch is
+// off is an unknown key, the answer a build without the key gives, so such a write cannot change the document's digest.
+func (h *OrgAgentPolicyHandler) keyOutOfForce(written map[string]any) *orgAgentRefusal {
+	for _, def := range orgAgentPolicySettings {
+		if _, present := written[def.key]; present && !h.inForce(def) {
+			return &orgAgentRefuseUnknownKey
+		}
+	}
+	return nil
 }
 
 // Register mounts the routes on the mux behind the blanket JWT middleware.
@@ -422,7 +476,7 @@ func (h *OrgAgentPolicyHandler) load(ctx context.Context, orgID string) (orgAgen
 	)
 	err := h.pool.QueryRow(ctx, orgAgentPolicyReadSQL, orgID).Scan(&row.Revision, &doc, &row.Digest, &row.UpdatedBy, &row.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		settings := orgAgentPolicyDefaults()
+		settings := h.settingsInForce(orgAgentPolicyDefaults())
 		digest, _, digestErr := orgAgentPolicyDigest(settings)
 		if digestErr != nil {
 			return orgAgentPolicyRow{}, digestErr
@@ -436,6 +490,7 @@ func (h *OrgAgentPolicyHandler) load(ctx context.Context, orgID string) (orgAgen
 	if err := json.Unmarshal([]byte(doc), &row.Settings); err != nil {
 		return orgAgentPolicyRow{}, fmt.Errorf("stored org agent policy document: %w", err)
 	}
+	row.Settings = h.settingsInForce(row.Settings)
 	return row, nil
 }
 
@@ -587,11 +642,16 @@ func (h *OrgAgentPolicyHandler) put(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
+	if refusal := h.keyOutOfForce(request.Settings); refusal != nil {
+		jsonErr(w, refusal.code, refusal.status)
+		return
+	}
 	settings, refusal := validateOrgAgentSettings(request.Settings, h.ceiling)
 	if refusal != nil {
 		jsonErr(w, refusal.code, refusal.status)
 		return
 	}
+	settings = h.settingsInForce(settings)
 	digest, doc, err := orgAgentPolicyDigest(settings)
 	if err != nil {
 		jsonErr(w, "database unavailable", http.StatusInternalServerError)
@@ -660,6 +720,9 @@ func (h *OrgAgentPolicyHandler) effective(w http.ResponseWriter, r *http.Request
 	}
 	settings := make([]orgAgentEffectiveSetting, 0, len(orgAgentPolicySettings))
 	for _, def := range orgAgentPolicySettings {
+		if !h.inForce(def) {
+			continue
+		}
 		value, stored := row.Settings[def.key]
 		if !stored {
 			// A document written before the key existed holds the key's default.
@@ -751,6 +814,7 @@ func (h *OrgAgentPolicyHandler) history(w http.ResponseWriter, r *http.Request) 
 			jsonErr(w, "database unavailable", http.StatusInternalServerError)
 			return
 		}
+		entry.Settings = h.settingsInForce(entry.Settings)
 		entries = append(entries, entry)
 	}
 	if err := rows.Err(); err != nil {

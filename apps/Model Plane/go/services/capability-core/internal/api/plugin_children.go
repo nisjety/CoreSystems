@@ -167,8 +167,9 @@ func (s *pluginChildStore) CreateMCPServer(ctx context.Context, tx plugins.DB, w
 }
 
 // RemoveSkill deletes a skill or template a plugin created, as the skill delete route does: the
-// revision trigger records the admin and the plugin as the reason, and with bundle retention on the
-// skill's bundles go with it. A skill already deleted by hand changes nothing.
+// revision trigger records the admin and the plugin as the reason, and the skill's bundles go with it
+// whenever the route's delete removes them (deletesBundles: retention on, or SKILL_BUNDLE_SCOPE_RULES with
+// SKILL_BUNDLES_ENABLED). A skill already deleted by hand changes nothing.
 func (s *pluginChildStore) RemoveSkill(ctx context.Context, tx plugins.DB, orgID, id, actorID, reason string) error {
 	if s.skills == nil {
 		return errors.New("skills are not available in this deployment")
@@ -177,7 +178,7 @@ func (s *pluginChildStore) RemoveSkill(ctx context.Context, tx plugins.DB, orgID
 		return err
 	}
 	result, err := tx.Exec(ctx, `DELETE FROM agent_skills WHERE id=$1 AND org_id=$2`, id, orgID)
-	if err == nil && s.skills.bundleRetention && result.RowsAffected() == 1 {
+	if err == nil && s.skills.deletesBundles() && result.RowsAffected() == 1 {
 		err = skillbundle.DeleteSkillBundles(ctx, tx, orgID, id)
 	}
 	return err

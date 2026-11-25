@@ -312,16 +312,21 @@ func TestRenewalAuditRowCarriesNoContent(t *testing.T) {
 	if err := json.Unmarshal([]byte(diff), &keys); err != nil {
 		t.Fatal(err)
 	}
-	if len(keys) != 3 || keys["op"] != "renew" || keys["contract_digest"] != cron.ContractDigest(f.contract) || keys["contract_expires_at"] == nil {
-		t.Fatalf("audit diff must hold the operation, digest and expiry only: %s", diff)
+	if len(keys) != 4 || keys["contract_digest"] != cron.ContractDigest(f.contract) || keys["tool_count"] != float64(1) ||
+		keys["expires_at"] != f.now.AddDate(0, 0, 30).UTC().Format("2006-01-02T15:04:05Z") || keys["class"] != cron.ContractClassCeiling {
+		t.Fatalf("audit diff must hold the digest, tool count, expiry and class only: %s", diff)
 	}
 	for _, leak := range []string{renewGoalText, "web_search", "approval_contract", "cap.tool"} {
 		if strings.Contains(diff, leak) {
 			t.Fatalf("audit diff leaks %q: %s", leak, diff)
 		}
 	}
-	if !strings.Contains(cronRenewalUpdateSQL, "'"+cronRenewalAuditAction+"'") || cronRenewalAuditAction != "schedule_contract_renewed" {
-		t.Fatal("the renewal statement does not write the schedule_contract_renewed audit row")
+	if cronRenewalAuditAction != "schedule.contract.renewed" || !strings.Contains(cronRenewalUpdateSQL, "'"+cronRenewalAuditAction+"'") {
+		t.Fatal("the renewal statement does not write the schedule.contract.renewed audit row")
+	}
+	if cron.ContractAuditEntityKind != "schedule" || !strings.Contains(cronRenewalUpdateSQL, "'"+cron.ContractAuditEntityKind+"'") ||
+		strings.Contains(cronRenewalUpdateSQL, "'cron_schedule'") {
+		t.Fatal("the renewal row must carry the entity kind schedule, not cron_schedule")
 	}
 }
 

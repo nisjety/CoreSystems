@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -205,8 +206,7 @@ func VerifyContractAgainstRegistry(contract ScheduleContract, declared []Declare
 				continue
 			}
 			matches++
-			if row.CapabilityID != approved.Capability || row.SideEffectClass != models.SideEffectRead ||
-				row.ApprovalFloor != models.ApprovalFloorNone || row.CallRefinement != "" {
+			if row.CapabilityID != approved.Capability || !delegableRow(row) {
 				return fmt.Errorf("tool %q is not a read tool with no approval floor in the registry", approved.Tool)
 			}
 		}
@@ -215,6 +215,65 @@ func VerifyContractAgainstRegistry(contract ScheduleContract, declared []Declare
 		}
 	}
 	return nil
+}
+
+// delegableRow is the one rule a registry row must pass for its tool to be delegable: a read-class row with no
+// approval floor and no call refinement, under a name that is not on the non-delegable list. The create-time check
+// (VerifyContractAgainstRegistry) and the delegable tool list (DelegableFromRegistry) both apply it, so the list
+// cannot offer a tool that the create check refuses.
+func delegableRow(row DeclaredTool) bool {
+	return row.SideEffectClass == models.SideEffectRead && row.ApprovalFloor == models.ApprovalFloorNone &&
+		row.CallRefinement == "" && !IsNonDelegableTool(row.ToolName)
+}
+
+// MaxDelegableTools is the most tools the delegable tool list returns.
+const MaxDelegableTools = 100
+
+// DelegableTool is one tool the delegable list offers: the tool, and the one capability every registry row of it
+// names. It is a name only, with no description, schema or grant.
+type DelegableTool struct {
+	Tool       string `json:"tool"`
+	Capability string `json:"capability"`
+}
+
+// DelegableFromRegistry is the list of tools a schedule's approval contract may name, built from the registry rows
+// an org can see: its own rows and the global seed. A tool is listed only when every row for its name passes
+// delegableRow and they all name one capability. An org override that is stricter therefore hides the tool, and so
+// does a tool declared under two capabilities, since a contract names one. A name or capability that the contract's
+// identifier rules refuse is hidden too, so the list never offers what ParseScheduleContract would reject. The list
+// is sorted by tool name and holds at most MaxDelegableTools entries.
+func DelegableFromRegistry(declared []DeclaredTool) []DelegableTool {
+	byTool := map[string][]DeclaredTool{}
+	for _, row := range declared {
+		byTool[row.ToolName] = append(byTool[row.ToolName], row)
+	}
+	names := make([]string, 0, len(byTool))
+	for name := range byTool {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	tools := []DelegableTool{}
+	for _, name := range names {
+		if len(tools) == MaxDelegableTools {
+			break
+		}
+		rows := byTool[name]
+		capability := rows[0].CapabilityID
+		if !contractToolNamePattern.MatchString(name) || !contractCapabilityID.MatchString(capability) {
+			continue
+		}
+		listed := true
+		for _, row := range rows {
+			if row.CapabilityID != capability || !delegableRow(row) {
+				listed = false
+				break
+			}
+		}
+		if listed {
+			tools = append(tools, DelegableTool{Tool: name, Capability: capability})
+		}
+	}
+	return tools
 }
 
 // ContractDigest is `sha256:<hex>` over the exact UTF-8 bytes of the stored

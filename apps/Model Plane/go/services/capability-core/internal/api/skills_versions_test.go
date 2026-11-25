@@ -209,3 +209,94 @@ func TestSkillReadsCarryVersionOnlyWithTheSwitchOn(t *testing.T) {
 		t.Fatalf("a row read with the switch off carries no version fields: %s", encoded)
 	}
 }
+
+// kindVersionsMux mounts the skill routes with SKILL_VERSIONS_API on and AUTHORED_KINDS_ENABLED as kinds says,
+// over a database whose kind probe the test answers, and returns the signer for its callers.
+func kindVersionsMux(t *testing.T, database registryDatabase, kinds bool) (http.Handler, mcpTokenSigner) {
+	t.Helper()
+	t.Setenv(skillVersionsAPIEnv, "true")
+	setAuthoredKinds(t, kinds)
+	mux := http.NewServeMux()
+	NewSkillsHandler(database).Register(mux)
+	return mcpAuthenticatedHandlerWithSigner(t, mux)
+}
+
+// P2-go-14-rel1: with AUTHORED_KINDS_ENABLED off on a database with the kind column, the history route reads
+// with get's rule, kind filter included. A template or preset is then refused by id as get refuses it, and its
+// name, text and versions are never read.
+func TestSkillVersionsRouteKindFilterWhileKindsAreOff(t *testing.T) {
+	freshKindProbe(t)
+	database := &kindProbeDatabase{recordingDatabase: &recordingDatabase{}, present: true}
+	handler, sign := kindVersionsMux(t, database, false)
+	nonZDR := false
+	token := sign("user", nil, &nonZDR)
+	normalize := func(sql string) string { return strings.Join(strings.Fields(sql), " ") }
+
+	// get, the read by id that refuses a template or preset, names the skill filter after one probe.
+	serveSkills(handler, token, "/api/v1/skills/tpl-1")
+	get := normalize(database.queryRows[0].query)
+	if !strings.Contains(get, "AND kind = 'skill'") || database.probes != 1 {
+		t.Fatalf("get = %q after %d probes; want the skill filter after one probe", get, database.probes)
+	}
+
+	// A template's or preset's history is refused as get refuses it: not found, and no version is read.
+	database.nextRows = append(database.nextRows, boolRow{value: false})
+	refused := serveSkills(handler, token, "/api/v1/skills/tpl-1/versions")
+	if refused.Code != http.StatusNotFound || !strings.Contains(refused.Body.String(), `"skill_not_found"`) {
+		t.Fatalf("a template's history = %d %s, want 404 skill_not_found", refused.Code, refused.Body.String())
+	}
+	if len(database.queries) != 0 {
+		t.Fatalf("a refused history read ran %d statements, want none", len(database.queries))
+	}
+	visibility := normalize(database.queryRows[1].query)
+	if visibility != normalize(skillVisibleSkillSQL) {
+		t.Fatalf("history visibility = %q, want the skill-filtered rule %q", visibility, normalize(skillVisibleSkillSQL))
+	}
+	predicate := get[strings.Index(get, "WHERE id = $1"):]
+	if !strings.Contains(visibility, predicate) {
+		t.Fatalf("history visibility %q does not hold get's predicate %q", visibility, predicate)
+	}
+
+	// A skill the rule admits reads its history as it did.
+	database.nextRows = append(database.nextRows, boolRow{value: true})
+	database.rows = &skillVersionRows{versions: []int32{1}}
+	admitted := serveSkills(handler, token, "/api/v1/skills/skill-1/versions")
+	if admitted.Code != http.StatusOK || len(database.queries) != 1 {
+		t.Fatalf("a skill's history = %d %s after %d history reads, want 200 and one read", admitted.Code, admitted.Body.String(), len(database.queries))
+	}
+}
+
+// Where the kind filter does not apply, the history route keeps the rule it always named: with the kind column
+// absent or its probe failing, and with AUTHORED_KINDS_ENABLED on, which never probes.
+func TestSkillVersionsRouteKeepsItsStatementWithoutTheKindFilter(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		kinds    bool
+		present  bool
+		probeErr error
+		probes   int
+	}{
+		{name: "column absent", probes: 1},
+		{name: "probe fails", probeErr: errors.New("the kind probe is refused"), probes: 1},
+		{name: "switch on with the column", kinds: true, present: true, probes: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			freshKindProbe(t)
+			database := &kindProbeDatabase{recordingDatabase: &recordingDatabase{}, present: test.present, probeErr: test.probeErr}
+			handler, sign := kindVersionsMux(t, database, test.kinds)
+			nonZDR := false
+			database.nextRows = append(database.nextRows, boolRow{value: true})
+			database.rows = &skillVersionRows{versions: []int32{1}}
+			response := serveSkills(handler, sign("user", nil, &nonZDR), "/api/v1/skills/skill-1/versions")
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d, body=%s, want 200", response.Code, response.Body.String())
+			}
+			if got := database.queryRows[0].query; got != skillVisibleSQL {
+				t.Fatalf("visibility query = %q, want the rule as it was", got)
+			}
+			if database.probes != test.probes {
+				t.Fatalf("probes = %d, want %d", database.probes, test.probes)
+			}
+		})
+	}
+}

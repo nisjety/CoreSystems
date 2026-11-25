@@ -449,6 +449,13 @@ mod tests {
             assert_eq!(limit, rule.limit, "limit of {}", rule.code);
         }
         assert_eq!(contract["mode"]["env"], MODE_ENV);
+        // A set value the reader does not take reads as the contract's unknown mode, which is report, and the
+        // reader returns that same mode.
+        assert_eq!(contract["mode"]["unknown"], "report");
+        assert_eq!(
+            contract["mode"]["unknown"],
+            Mode::from_env_value(Some("not-a-mode")).as_str()
+        );
         assert_eq!(contract["refusal"]["grpc_skip_reason_prefix"], SKIP_REASON_PREFIX);
         assert_eq!(strings(&contract["transcript_prefixes"]), TRANSCRIPT_PREFIXES);
         assert_eq!(contract["transcript_min_lines"], TRANSCRIPT_MIN_LINES);

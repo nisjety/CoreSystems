@@ -119,6 +119,9 @@ type importedFile struct {
 	document  skillbundle.SkillDocument
 	bundle    skillbundle.Bundle
 	hasBundle bool
+	// deckChecked is true when the bundle passed ValidateDeckTemplate with SKILL_DECK_TEMPLATES_ENABLED on (F-f09-08),
+	// so the import stamps its draft bundle in the same transaction.
+	deckChecked bool
 }
 
 func (h *SkillImportHandler) importSkill(w http.ResponseWriter, r *http.Request) {
@@ -232,6 +235,12 @@ func (h *SkillImportHandler) importSkill(w http.ResponseWriter, r *http.Request)
 			if err := skillbundle.PutImportedDraft(r.Context(), pgxTx, orgID, skillID, principal.ActorID, imported.bundle); err != nil {
 				return err
 			}
+			if imported.deckChecked {
+				// F-f09-08: stamped inside the import's transaction, with the draft bundle it describes.
+				if err := skillbundle.MarkDeckValidatedTx(r.Context(), pgxTx, orgID, skillID, imported.bundle.ManifestSHA256); err != nil {
+					return err
+				}
+			}
 		}
 		_, err = tx.Exec(r.Context(), importDraftSQL, skillID, orgID, manifest, now, principal.ActorID)
 		return err
@@ -269,11 +278,13 @@ func (h *SkillImportHandler) checkFile(w http.ResponseWriter, raw []byte) (impor
 	if bytes.HasPrefix(raw, zipMagic) {
 		var bundle skillbundle.Bundle
 		bundle, err = skillbundle.Parse(raw)
+		deckChecked := false
 		if err == nil && skillbundle.DeckTemplatesFromLookup(os.Getenv) {
 			err = skillbundle.ValidateDeckTemplate(bundle)
+			deckChecked = err == nil
 		}
 		if err == nil {
-			imported = importedFile{document: skillbundle.BundleSkillDocument(bundle), bundle: bundle, hasBundle: len(bundle.Files) > 1}
+			imported = importedFile{document: skillbundle.BundleSkillDocument(bundle), bundle: bundle, hasBundle: len(bundle.Files) > 1, deckChecked: deckChecked}
 		}
 	} else {
 		imported.document, err = skillbundle.ParseSkillFile(raw)

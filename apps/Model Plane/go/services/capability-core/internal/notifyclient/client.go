@@ -143,6 +143,45 @@ func New(baseURL, serviceToken string, httpClient *http.Client) (*Client, bool) 
 	}, true
 }
 
+// StatusError is a non-2xx answer from notification-core. It carries the status
+// only: the response body is never kept, so notification-core's refusal text
+// reaches no error, log line or metric. Accept returns it as a *StatusError, and
+// StatusOf and IsPermanent find it through any wrapping.
+type StatusError struct {
+	Status int
+}
+
+// Error names the status and nothing else.
+func (e StatusError) Error() string {
+	return fmt.Sprintf("notifyclient: notification-core returned %d", e.Status)
+}
+
+// StatusOf returns the status notification-core answered with, and whether err
+// carries one.
+func StatusOf(err error) (int, bool) {
+	var refusal *StatusError
+	if errors.As(err, &refusal) && refusal != nil {
+		return refusal.Status, true
+	}
+	var value StatusError
+	if errors.As(err, &value) {
+		return value.Status, true
+	}
+	return 0, false
+}
+
+// IsPermanent reports whether err is a refusal that the same request can never
+// win: a 4xx status other than 408 (request timeout) and 429 (too many requests),
+// which are worth another try. A transport failure, a 5xx answer and any error
+// that is not a status are not permanent.
+func IsPermanent(err error) bool {
+	status, ok := StatusOf(err)
+	if !ok {
+		return false
+	}
+	return status >= 400 && status < 500 && status != http.StatusRequestTimeout && status != http.StatusTooManyRequests
+}
+
 // Accept posts req to notification-core's POST /notification-requests,
 // signed as capability-core.
 //
@@ -226,8 +265,10 @@ func (c *Client) Accept(ctx context.Context, req Request) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("notifyclient: notification-core returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+		// Drained only so the connection can be reused. The body is never put in the
+		// error: see StatusError.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return &StatusError{Status: resp.StatusCode}
 	}
 	return nil
 }

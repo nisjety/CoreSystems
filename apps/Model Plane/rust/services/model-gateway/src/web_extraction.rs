@@ -66,11 +66,47 @@ pub(crate) const FLAG_ENV: &str = "MODEL_GATEWAY_EXTRACT_TOOL";
 /// literal `true` (no trimming, no case folding).
 #[must_use]
 pub fn extract_tool_enabled() -> bool {
+    #[cfg(test)]
+    {
+        if let Some(on) = test_seam::flag() {
+            return on;
+        }
+    }
     flag_value_enables(std::env::var(FLAG_ENV).ok().as_deref())
 }
 
 fn flag_value_enables(value: Option<&str>) -> bool {
     mp_contracts::loop_fold::switch_from(value)
+}
+
+/// A test seam for the tool's switch. A test turns the tool on for its own thread, and the guard restores what the thread
+/// saw before, so no test changes the process environment that another test reads on its own thread.
+#[cfg(test)]
+pub(crate) mod test_seam {
+    use std::cell::Cell;
+
+    thread_local! {
+        static FLAG: Cell<Option<bool>> = const { Cell::new(None) };
+    }
+
+    /// The switch this thread's calls see, when a test has named one.
+    pub(crate) fn flag() -> Option<bool> {
+        FLAG.with(Cell::get)
+    }
+
+    /// Makes the tool's switch `on` for this thread's calls until the guard is dropped.
+    pub(crate) fn set_flag(on: bool) -> FlagGuard {
+        FlagGuard(FLAG.with(|cell| cell.replace(Some(on))))
+    }
+
+    /// Restores the switch this thread saw before [`set_flag`] named one.
+    pub(crate) struct FlagGuard(Option<bool>);
+
+    impl Drop for FlagGuard {
+        fn drop(&mut self) {
+            FLAG.with(|cell| cell.set(self.0));
+        }
+    }
 }
 
 /// What to produce from each page.
@@ -161,6 +197,9 @@ pub struct ExtractSpec {
     /// after the fetch and before any inference call. `None` for a caller that applies no domain rules; the tool loop and
     /// the gRPC method both set it.
     pub site_policy_tool: Option<&'static str>,
+    /// The Space the extraction runs in, empty outside one (F-f03-03). Each page's final URL is judged for that Space
+    /// before any inference call, as the organisation's own answer is.
+    pub space_id: String,
 }
 
 impl ExtractSpec {
@@ -225,6 +264,8 @@ impl ExtractSpec {
             transport: "grpc",
             // The gRPC method applies the org's domain rules to each page's final URL, as the tool loop does (C-09).
             site_policy_tool: Some("extract_structured"),
+            // The gRPC request names no Space, so its pages are judged against the organisation's own answer.
+            space_id: String::new(),
         })
     }
 }
@@ -372,11 +413,12 @@ async fn extract_page(state: &AppState, spec: &ExtractSpec, url: &str, id: Strin
     // outcome carries the typed refusal and nothing derived from the page (no final URL, title or fingerprint). The same
     // check `fetch_url` runs; under `off` nothing is read and under `shadow` it only logs.
     if let Some(tool) = spec.site_policy_tool {
-        if let Some(refusal) = crate::site_policy_client::final_url_refusal(
+        if let Some(refusal) = crate::site_policy_client::final_url_refusal_in_space(
             crate::site_policy_client::policy_mode(),
             crate::site_policy_client::shared_checker(),
             &crate::site_policy_client::SiteOwner::of(state),
             &spec.org_id,
+            &spec.space_id,
             url,
             &scrape.final_url,
             tool,
@@ -1493,6 +1535,7 @@ mod tests {
             inference_bearer: "bearer-x".to_owned(),
             transport: "grpc",
             site_policy_tool: None,
+            space_id: String::new(),
         }
     }
 
@@ -1773,6 +1816,67 @@ mod tests {
         assert_eq!(out[0].result.error_message, "no extractable content from page");
         assert!(out[0].fetch_error.is_none());
         assert!(h.seen.lock().unwrap().is_empty());
+    }
+
+    /// F-f03-03 at the extraction: a page that ended on a host the Space floor denies for its Space is refused before any
+    /// inference call. The same spec with the switch off reads the page, because the organisation's own answer allows the
+    /// host. The requested host is allowed in both.
+    #[tokio::test]
+    async fn a_page_that_ended_on_a_host_the_space_floor_denies_is_refused_before_inference() {
+        let _mode = crate::site_policy_client::test_seam::set(
+            mp_contracts::site_policy::WebDomainPolicyMode::Enforce,
+        );
+        let org = crate::domain_rules_tests::org_core_by_space("org-f0303-extract").await;
+        let mut h = harness(
+            always(r#"{"price": 12.5, "currency": "NOK"}"#),
+            Duration::ZERO,
+        )
+        .await;
+        h.state.org_core_base_url = org.uri();
+        h.state.org_core_service_token = "test-token".to_owned();
+        Mock::given(method("POST"))
+            .and(path("/v1/scrape"))
+            .and(body_partial_json(
+                json!({ "url": "https://example.org/start" }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "status": 200,
+                    "url": {
+                        "requested": "https://example.org/start",
+                        "final_url": "https://partner.example/landing"
+                    },
+                    "title": "Landing",
+                    "formats": {"markdown": "Price: 12.5 NOK"}
+                }
+            })))
+            .mount(&h.quarry)
+            .await;
+        let mut spec = json_spec(&["https://example.org/start"], false);
+        spec.org_id = "org-f0303-extract".to_owned();
+        spec.site_policy_tool = Some("extract_structured");
+        spec.space_id = "space-b".to_owned();
+        {
+            let _floor = crate::site_policy_client::test_seam::set_space_floor(true);
+            let out = extract(&h.state, &spec).await;
+            let error = out[0].result.error_message.as_str();
+            assert!(
+                error.starts_with(crate::site_policy_client::SITE_BLOCKED_CODE),
+                "{error}"
+            );
+            assert!(error.contains("partner.example"), "{error}");
+            assert!(
+                h.seen.lock().unwrap().is_empty(),
+                "a refused page reaches no inference call"
+            );
+        }
+        {
+            let _floor = crate::site_policy_client::test_seam::set_space_floor(false);
+            let out = extract(&h.state, &spec).await;
+            let error = out[0].result.error_message.as_str();
+            assert_eq!(error, "", "switched off, the page is read");
+            assert_eq!(h.seen.lock().unwrap().len(), 1);
+        }
     }
 
     #[tokio::test]

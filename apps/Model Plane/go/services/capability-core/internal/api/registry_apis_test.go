@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -393,5 +394,169 @@ func TestAFailedSharingUpdateReleasesTheRowLock(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("a registration stayed blocked after a failed sharing update: the row lock was not released")
+	}
+}
+
+// kindProbeDatabase answers the agent_skills kind probe as present, absent or failed, and records every
+// other statement on the embedded recordingDatabase, where a read's own statement is looked for.
+type kindProbeDatabase struct {
+	*recordingDatabase
+	present  bool
+	probeErr error
+	probes   int
+}
+
+func (database *kindProbeDatabase) QueryRow(ctx context.Context, query string, args ...any) pgx.Row {
+	if query != skillsKindColumnProbeSQL {
+		return database.recordingDatabase.QueryRow(ctx, query, args...)
+	}
+	database.probes++
+	// A driver answers a cancelled context with its error, as pgx does.
+	if err := ctx.Err(); err != nil {
+		return errorRow{err: err}
+	}
+	if database.probeErr != nil {
+		return errorRow{err: database.probeErr}
+	}
+	return boolRow{value: database.present}
+}
+
+// freshKindProbe gives one test an unprobed cache, so its first off-switch read runs the probe against
+// that test's own fake. The cleanup leaves the cache answered absent, as init does for the package.
+func freshKindProbe(t *testing.T) {
+	t.Helper()
+	skillsKindColumnOnce = sync.Once{}
+	skillsKindColumnPresent = false
+	t.Cleanup(func() {
+		skillsKindColumnOnce = sync.Once{}
+		skillsKindColumnOnce.Do(func() { skillsKindColumnPresent = false })
+	})
+}
+
+// init answers the probe as absent for every test that does not exercise it. Their fixtures record the
+// statements of a database that predates migration 0109, with no probe among them. Without this, the first
+// off-switch skills read in the package would add one recorded probe to whichever test happened to run first.
+func init() {
+	skillsKindColumnOnce.Do(func() {})
+}
+
+// Off, a read on a database with the kind column names skills only: the list and the read by id carry the
+// literal, and the bind numbering does not move.
+func TestOffSkillsReadNamesSkillsOnlyWhenTheKindColumnExists(t *testing.T) {
+	setAuthoredKinds(t, false)
+	t.Run("list", func(t *testing.T) {
+		freshKindProbe(t)
+		database := &kindProbeDatabase{recordingDatabase: &recordingDatabase{}, present: true}
+		response := serveSkill(t, database, writeToken, http.MethodGet, "/api/v1/skills", "")
+		if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "kinds_enabled") {
+			t.Fatalf("off list = %d %s, want the old body", response.Code, response.Body.String())
+		}
+		if database.probes != 1 || len(database.queries) != 1 {
+			t.Fatalf("probes = %d, list statements = %d; want one probe and one list", database.probes, len(database.queries))
+		}
+		query := database.queries[0]
+		if !strings.Contains(query.query, "AND kind = 'skill'") || strings.Contains(query.query, "$4") || len(query.args) != 3 {
+			t.Fatalf("off list query %q args %v, want the literal skill filter and no new bind", query.query, query.args)
+		}
+	})
+	t.Run("read by id", func(t *testing.T) {
+		freshKindProbe(t)
+		database := &kindProbeDatabase{recordingDatabase: &recordingDatabase{}, present: true}
+		serveSkill(t, database, writeToken, http.MethodGet, "/api/v1/skills/sk-1", "")
+		if database.probes != 1 || len(database.queryRows) != 1 {
+			t.Fatalf("probes = %d, read-by-id statements = %d; want one probe and one read", database.probes, len(database.queryRows))
+		}
+		query := database.queryRows[0]
+		if !strings.Contains(query.query, "AND kind = 'skill'") || strings.Contains(query.query, "$5") || len(query.args) != 4 {
+			t.Fatalf("off read-by-id query %q args %v, want the literal skill filter and no new bind", query.query, query.args)
+		}
+	})
+}
+
+// Off, a database that predates migration 0109 (no column, or a probe that fails) gets the statements it
+// always got: no literal and no new bind, after one probe.
+func TestOffSkillsReadIsUnchangedWithoutTheKindColumn(t *testing.T) {
+	setAuthoredKinds(t, false)
+	for _, test := range []struct {
+		name     string
+		present  bool
+		probeErr error
+	}{
+		{name: "column absent"},
+		{name: "probe fails", probeErr: fmt.Errorf("the kind probe is refused")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			freshKindProbe(t)
+			list := &kindProbeDatabase{recordingDatabase: &recordingDatabase{}, present: test.present, probeErr: test.probeErr}
+			response := serveSkill(t, list, writeToken, http.MethodGet, "/api/v1/skills", "")
+			if response.Code != http.StatusOK || list.probes != 1 || len(list.queries) != 1 {
+				t.Fatalf("list = %d with %d probes and %d list statements: %s", response.Code, list.probes, len(list.queries), response.Body.String())
+			}
+			if query := list.queries[0]; strings.Contains(query.query, "kind") || len(query.args) != 3 {
+				t.Fatalf("list statement changed: %q %v", query.query, query.args)
+			}
+
+			freshKindProbe(t)
+			read := &kindProbeDatabase{recordingDatabase: &recordingDatabase{}, present: test.present, probeErr: test.probeErr}
+			serveSkill(t, read, writeToken, http.MethodGet, "/api/v1/skills/sk-1", "")
+			if read.probes != 1 || len(read.queryRows) != 1 {
+				t.Fatalf("read by id = %d probes and %d statements, want 1 and 1", read.probes, len(read.queryRows))
+			}
+			if query := read.queryRows[0]; strings.Contains(query.query, "kind") || len(query.args) != 4 {
+				t.Fatalf("read-by-id statement changed: %q %v", query.query, query.args)
+			}
+		})
+	}
+}
+
+// On, the reads take the kind they are given as a bind and never probe: the probe is for the switch being off.
+func TestAuthoredKindsOnReadsNeverProbe(t *testing.T) {
+	setAuthoredKinds(t, true)
+	freshKindProbe(t)
+	list := &kindProbeDatabase{recordingDatabase: &recordingDatabase{}, present: false}
+	serveSkill(t, list, writeToken, http.MethodGet, "/api/v1/skills", "")
+	if list.probes != 0 || len(list.queries) != 1 || !strings.Contains(list.queries[0].query, "AND kind = $4") {
+		t.Fatalf("on list: %d probes and %d statements, want the bound kind and no probe", list.probes, len(list.queries))
+	}
+	read := &kindProbeDatabase{recordingDatabase: &recordingDatabase{}, present: false}
+	serveSkill(t, read, writeToken, http.MethodGet, "/api/v1/skills/sk-1", "")
+	if read.probes != 0 || len(read.queryRows) != 1 || !strings.Contains(read.queryRows[0].query, "AND kind = $5") {
+		t.Fatalf("on read by id: %d probes and %d statements, want the bound kind and no probe", read.probes, len(read.queryRows))
+	}
+}
+
+// The probe runs once per process: a later off-switch read uses the first answer and does not ask again.
+func TestSkillsKindProbeRunsOncePerProcess(t *testing.T) {
+	setAuthoredKinds(t, false)
+	freshKindProbe(t)
+	first := &kindProbeDatabase{recordingDatabase: &recordingDatabase{}, present: true}
+	serveSkill(t, first, writeToken, http.MethodGet, "/api/v1/skills", "")
+	second := &kindProbeDatabase{recordingDatabase: &recordingDatabase{}, present: false}
+	serveSkill(t, second, writeToken, http.MethodGet, "/api/v1/skills", "")
+	if first.probes != 1 || second.probes != 0 {
+		t.Fatalf("probes = %d then %d, want 1 then 0", first.probes, second.probes)
+	}
+	if len(second.queries) != 1 || !strings.Contains(second.queries[0].query, "AND kind = 'skill'") {
+		t.Fatalf("the second read ignored the cached answer: %v", second.queries)
+	}
+}
+
+// A first read whose request is already cancelled still gets the probe's answer: the probe runs on a context
+// that the request's cancellation does not reach, so a client that hangs up cannot pin an absent answer.
+func TestSkillsKindProbeSurvivesACancelledFirstRead(t *testing.T) {
+	setAuthoredKinds(t, false)
+	freshKindProbe(t)
+	database := &kindProbeDatabase{recordingDatabase: &recordingDatabase{}, present: true}
+	skills := NewSkillsHandler(database)
+	mux := http.NewServeMux()
+	skills.Register(mux)
+	handler, sign := mcpAuthenticatedHandlerWithSigner(t, mux)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/skills", nil).WithContext(ctx)
+	request.Header.Set("Authorization", "Bearer "+writeToken(sign))
+	handler.ServeHTTP(httptest.NewRecorder(), request)
+	if database.probes != 1 || len(database.queries) != 1 || !strings.Contains(database.queries[0].query, "AND kind = 'skill'") {
+		t.Fatalf("a cancelled first read: %d probes, statements %v; want one probe and the literal filter", database.probes, database.queries)
 	}
 }

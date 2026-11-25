@@ -154,15 +154,34 @@ const (
 	ModeEnforce Mode = "enforce"
 )
 
-// ModeFromLookup reads SKILL_LINT_MODE strictly: only the exact words "report" and
-// "enforce" turn the lint on, anything else leaves it off.
+// ModeFromLookup reads SKILL_LINT_MODE as mp-contracts skill_lint reads it. The exact words "report" and "enforce" are
+// read exactly, never through padding or another casing. Unset, blank, and "off" once its surrounding whitespace is
+// removed read off. Any other set value reads as report: it counts what enforce would refuse and refuses nothing, so a
+// value this switch does not read can neither switch the lint off nor start refusing writes.
 func ModeFromLookup(lookup func(string) string) Mode {
-	switch value := lookup(ModeEnv); value {
-	case string(ModeReport), string(ModeEnforce):
-		return Mode(value)
-	default:
+	value := lookup(ModeEnv)
+	switch value {
+	case string(ModeReport):
+		return ModeReport
+	case string(ModeEnforce):
+		return ModeEnforce
+	}
+	switch strings.TrimSpace(value) {
+	case "", string(ModeOff):
 		return ModeOff
 	}
+	return ModeReport
+}
+
+// UnreadableMode reports whether a set SKILL_LINT_MODE value is neither blank nor one of the exact words off, report
+// and enforce. ModeFromLookup reads such a value as report, or as off when it is only padded off, so the startup log
+// names it. The value itself is never logged: the variable's name is enough.
+func UnreadableMode(value string) bool {
+	switch value {
+	case string(ModeOff), string(ModeReport), string(ModeEnforce):
+		return false
+	}
+	return strings.TrimSpace(value) != ""
 }
 
 // Lint runs every rule over input and returns the findings, in rule order.
