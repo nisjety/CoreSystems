@@ -14,12 +14,13 @@ use mp_contracts::model_plane::v1::{
     run_service_client::RunServiceClient,
     run_service_server::{RunService, RunServiceServer},
     AcknowledgeApprovalDeliveryRequest, AcknowledgeApprovalDeliveryResponse,
-    AnswerRunQuestionRequest, AnswerRunQuestionResponse, Approval, ApprovalState,
+    AnswerRunQuestionRequest, AnswerRunQuestionResponse, Approval, ApprovalContinuation,
+    ApprovalState,
     AttachSubagentRequest, AttachSubagentResponse, CancelRunRequest,
     CreateRunQuestionRequest, CreateRunQuestionResponse, ListRunQuestionsRequest,
     ListRunQuestionsResponse, QuestionItem, QuestionOption, QuestionState, RunQuestion,
     CancelRunResponse, ClaimApprovalDeliveriesRequest, ClaimApprovalDeliveriesResponse,
-    ConsumeApprovalRequest, ConsumeApprovalResponse,
+    ConsumeApprovalRequest, ConsumeApprovalResponse, ContinuationState,
     CreateApprovalRequest, CreateApprovalResponse, DecideApprovalRequest, DecideApprovalResponse,
     GetApprovalContinuationRequest, GetApprovalContinuationResponse, GetApprovalRequest,
     GetApprovalResponse, GetPlanRequest, GetPlanResponse, GetRunRequest,
@@ -689,7 +690,12 @@ impl OrchestrationCoreService for MockOrchestration {
                 consumed_at: None,
                 tool_key: String::new(),
                 action_label: String::new(),
-                continuation: None,
+                // Session Core derives awaiting_continue for every loop-owned approval, so the
+                // mock states the same continuation for an `appr-loop` id.
+                continuation: (!continuation_mode.is_empty()).then(|| ApprovalContinuation {
+                    state: ContinuationState::AwaitingContinue as i32,
+                    ..Default::default()
+                }),
                 continuation_mode,
                 cause: None,
                 id: request.approval_id,
@@ -1301,8 +1307,8 @@ async fn decide_approval_grant_succeeds_without_a_continuation_dispatcher() {
     );
     assert_eq!(json["approval"]["state"], "APPROVAL_STATE_GRANTED");
     assert_eq!(
-        json["continuation_delivery"], "pending",
-        "no descriptor-backed dispatcher exists yet, so delivery is reported pending, not resumed, body={json}"
+        json["continuation_delivery"], "unknown",
+        "the mock states no continuation, so delivery is reported unknown, not resumed, body={json}"
     );
     assert_eq!(
         *capture.decide_approval.lock().unwrap(),
@@ -1312,7 +1318,7 @@ async fn decide_approval_grant_succeeds_without_a_continuation_dispatcher() {
             "user-1".to_owned(),
             String::new()
         )),
-        "the grant must still reach the durable store despite the placeholder"
+        "the grant must still reach the durable store"
     );
 }
 
