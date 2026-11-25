@@ -120,14 +120,18 @@ impl HistoryFloor {
         }
     }
 
-    /// Whether the window shows nothing at all.
+    /// Whether the window shows nothing at all. Test-only: production code reads the floor through
+    /// [`Self::document_bound`] and [`Self::admits`].
+    #[cfg(test)]
     #[must_use]
     pub const fn is_closed(self) -> bool {
         matches!(self, Self::Closed)
     }
 
     /// The instant a SQL predicate binds (`created_at >= $n`). `None` is no timestamp bound: callers check
-    /// [`Self::is_closed`] first, because a closed window has no instant and must not read as an open one.
+    /// `is_closed` first, because a closed window has no instant and must not read as an open one.
+    /// Test-only: production code binds [`Self::document_bound`] instead.
+    #[cfg(test)]
     #[must_use]
     pub const fn since(self) -> Option<DateTime<Utc>> {
         match self {
@@ -150,7 +154,7 @@ impl HistoryFloor {
 
     /// D21b: the instant a Space document that is NOT a room file must have entered the room at or after,
     /// as the SQL predicate binds it next to the room-file exception
-    /// (`$n IS NULL OR type = 'space_upload' OR created_at >= $n`). Unlike [`Self::since`], a closed
+    /// (`$n IS NULL OR type = 'space_upload' OR created_at >= $n`). Unlike `since`, a closed
     /// window has a bound here: one no document reaches, so a closed window still lists the room's files
     /// and hides everything else, instead of short-circuiting to an empty answer.
     #[must_use]
