@@ -1,0 +1,4 @@
+# Test-only dependencies for the imports-core suite (M0-CI). The Docker image installs requirements.txt
+# alone and never this file. CI: pip install -r requirements-test.txt, then python -m pytest tests
+-r requirements.txt
+pytest==9.2.0
