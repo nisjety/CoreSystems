@@ -1,6 +1,10 @@
 import { For, Show, createSignal } from 'solid-js'
 
 import {
+  ago,
+  customSnooze,
+  customSnoozeBounds,
+  customSnoozeProblemText,
   headlineText,
   itemHref,
   itemSalience,
@@ -8,22 +12,12 @@ import {
   needsYouSentence,
   SNOOZE_PRESETS,
   snoozeLabel,
+  type CustomSnoozeProblem,
 } from '@/features/attention/lib/attention-grammar'
+import { actorDisplayName, createRosterNames } from '@/features/attention/lib/attention-roster'
 import { ThreadFollowControl } from '@/features/attention/components/ThreadFollowControl'
 import type { AttentionItem, AttentionNeedsYou } from '@/shared/api/spaces-attention-items-client'
 import { useI18n } from '@/shared/i18n'
-
-/** How long ago, in the viewer's language. An unreadable time draws nothing. */
-function ago(at: number | null, locale: string, now: number): string {
-  if (at === null || !Number.isFinite(at) || at <= 0) return ''
-  const seconds = Math.round((at - now) / 1000)
-  const abs = Math.abs(seconds)
-  const formatter = new Intl.RelativeTimeFormat(locale, { numeric: 'auto' })
-  if (abs < 60) return formatter.format(0, 'second')
-  if (abs < 3600) return formatter.format(Math.round(seconds / 60), 'minute')
-  if (abs < 86_400) return formatter.format(Math.round(seconds / 3600), 'hour')
-  return formatter.format(Math.round(seconds / 86_400), 'day')
-}
 
 export interface AttentionItemRowProps {
   readonly item: AttentionItem
@@ -42,14 +36,33 @@ export interface AttentionItemRowProps {
 export function AttentionItemRow(props: AttentionItemRowProps) {
   const i18n = useI18n()
   const [snoozing, setSnoozing] = createSignal(false)
+  const [custom, setCustom] = createSignal(false)
+  const [customAt, setCustomAt] = createSignal('')
+  const [customProblem, setCustomProblem] = createSignal<CustomSnoozeProblem | null>(null)
   const [following, setFollowing] = createSignal(false)
+  // The room's roster names the person or agent a row is about. Until it answers, the fallback words stand.
+  const names = createRosterNames(() => props.item.spaceRef)
   const headline = () => headlineText(props.item, i18n.tr)
   const salience = () => itemSalience(props.item.kind)
+  const sentence = () => itemSentence(props.item, i18n.tr, actorDisplayName(props.item.actor, names()))
+
+  // A typed time is checked against the same window the server enforces; a refusal says why and changes nothing.
+  function submitCustom() {
+    const result = customSnooze(customAt(), Date.now())
+    if (!result.ok) {
+      setCustomProblem(result.problem)
+      return
+    }
+    setSnoozing(false)
+    setCustom(false)
+    setCustomProblem(null)
+    props.onState(props.item, { state: 'snoozed', snoozeUntil: result.snoozeUntil })
+  }
 
   return (
     <li class="verevon-attention-row" data-kind={props.item.kind} data-salience={salience()}>
       <a class="verevon-attention-row__main" href={itemHref(props.item)} link>
-        <span class="verevon-attention-row__sentence">{itemSentence(props.item, i18n.tr)}</span>
+        <span class="verevon-attention-row__sentence">{sentence()}</span>
         <Show when={headline()}>
           {(text) => (
             <span class="verevon-attention-row__headline" data-state={props.item.headlineState}>
@@ -86,7 +99,11 @@ export function AttentionItemRow(props: AttentionItemRowProps) {
             class="verevon-attention-action"
             aria-expanded={snoozing() ? 'true' : 'false'}
             disabled={props.busy}
-            onClick={() => setSnoozing((open) => !open)}
+            onClick={() => {
+              setSnoozing((open) => !open)
+              setCustom(false)
+              setCustomProblem(null)
+            }}
           >
             {i18n.tr('Utsett', 'Snooze')}
           </button>
@@ -122,7 +139,44 @@ export function AttentionItemRow(props: AttentionItemRowProps) {
               </button>
             )}
           </For>
+          <button
+            type="button"
+            class="verevon-attention-action"
+            aria-expanded={custom() ? 'true' : 'false'}
+            disabled={props.busy}
+            onClick={() => {
+              setCustomProblem(null)
+              if (!custom()) setCustomAt(customSnoozeBounds(Date.now()).initial)
+              setCustom((open) => !open)
+            }}
+          >
+            {i18n.tr('Egendefinert', 'Custom')}
+          </button>
         </div>
+        <Show when={custom()}>
+          <div class="verevon-attention-row__custom" role="group" aria-label={i18n.tr('Egendefinert tidspunkt', 'Custom time')}>
+            <input
+              type="datetime-local"
+              class="verevon-attention-row__picker"
+              aria-label={i18n.tr('Utsett til tidspunkt', 'Snooze until this time')}
+              min={customSnoozeBounds(Date.now()).min}
+              max={customSnoozeBounds(Date.now()).max}
+              value={customAt()}
+              disabled={props.busy}
+              onInput={(event) => setCustomAt(event.currentTarget.value)}
+            />
+            <button type="button" class="verevon-attention-action" disabled={props.busy} onClick={() => submitCustom()}>
+              {i18n.tr('Utsett til dette', 'Snooze to this time')}
+            </button>
+          </div>
+          <Show when={customProblem()}>
+            {(problem) => (
+              <p class="verevon-attention__notice verevon-attention-row__problem" role="alert">
+                {customSnoozeProblemText(problem(), i18n.tr)}
+              </p>
+            )}
+          </Show>
+        </Show>
       </Show>
     </li>
   )

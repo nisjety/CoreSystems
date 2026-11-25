@@ -1,0 +1,99 @@
+/*
+ * "Trenger deg" on Home (WS11-S7): one full-width card above the recent work. Its colours are the
+ * Home tokens from dashboard-overview.css, so light and dark follow the Home surface.
+ */
+
+.home-needs-you {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+}
+
+.home-needs-you__state {
+  margin: 10px 0 0;
+  color: var(--home-muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.home-needs-you__list {
+  display: flex;
+  flex-direction: column;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.home-needs-you__row {
+  border-bottom: 1px solid var(--home-line);
+}
+
+.home-needs-you__row:last-child {
+  border-bottom: 0;
+}
+
+.home-needs-you__row a {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+  padding: 6px 0;
+  color: inherit;
+  text-decoration: none;
+}
+
+.home-needs-you__row a:hover .home-needs-you__copy strong {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.home-needs-you__row a:focus-visible {
+  outline: 2px solid var(--home-ink);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+.home-needs-you__copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.home-needs-you__copy strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--home-ink);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 18px;
+}
+
+.home-needs-you__row time,
+.home-needs-you__row svg {
+  flex-shrink: 0;
+  color: var(--home-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.home-needs-you > footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
+.home-needs-you > footer a {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  color: var(--home-ink);
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.home-needs-you > footer a:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}

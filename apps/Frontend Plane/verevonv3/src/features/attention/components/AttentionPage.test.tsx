@@ -5,6 +5,8 @@ import { cleanup, screen, waitFor, within } from '@solidjs/testing-library'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import AttentionPage from './AttentionPage'
+import { localDateTimeValue } from '@/features/attention/lib/attention-grammar'
+import { resetRosterNamesForTests } from '@/features/attention/lib/attention-roster'
 import type { AttentionItem, AttentionItemsPage } from '@/shared/api/spaces-attention-items-client'
 import { ApiError } from '@/shared/api/http'
 import { I18nProvider } from '@/shared/i18n'
@@ -20,6 +22,7 @@ const inbox = vi.hoisted(() => ({
   refreshSpaceAttention: vi.fn(),
   getThreadFollow: vi.fn(),
   setThreadFollow: vi.fn(),
+  getSpaceRoster: vi.fn(),
 }))
 
 vi.mock('@/shared/api/spaces-attention-items-client', async (importOriginal) => ({
@@ -31,6 +34,10 @@ vi.mock('@/shared/api/spaces-attention-items-client', async (importOriginal) => 
 }))
 vi.mock('@/features/spaces/lib/space-attention', () => ({
   refreshSpaceAttention: inbox.refreshSpaceAttention,
+}))
+vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/shared/api/spaces-client')>()),
+  getSpaceRoster: inbox.getSpaceRoster,
 }))
 
 const NOW = Date.parse('2026-11-18T09:00:00Z')
@@ -92,6 +99,10 @@ beforeEach(() => {
   inbox.refreshSpaceAttention.mockReset()
   inbox.getThreadFollow.mockReset()
   inbox.setThreadFollow.mockReset()
+  // No room's roster is held from an earlier test, and by default a roster names nobody.
+  resetRosterNamesForTests()
+  inbox.getSpaceRoster.mockReset()
+  inbox.getSpaceRoster.mockResolvedValue([])
 })
 
 afterEach(() => cleanup())
@@ -269,5 +280,58 @@ describe('AttentionPage', () => {
 
     expect(within(row).queryByRole('button', { name: 'Varsler' })).toBeNull()
     expect(inbox.getThreadFollow).not.toHaveBeenCalled()
+  })
+
+  it('names the person and the agent from the room roster, and keeps the fallback words where the roster is silent', async () => {
+    inbox.getSpaceRoster.mockResolvedValue([
+      { subject_type: 'user', subject_id: 'user-1', role: 'editor', revision: 1, display_name: 'Ola Nordmann' },
+      { subject_type: 'service', subject_id: 'agent-1', role: 'editor', revision: 1, display_name: 'Research bot' },
+    ])
+    inbox.listAttentionItems.mockResolvedValue(
+      page({
+        items: [
+          item({ itemId: 'item-person', kind: 'mention', actor: { kind: 'user', subjectId: 'user-1', agentRef: null } }),
+          item({ itemId: 'item-agent', kind: 'mention', actor: { kind: 'agent', subjectId: null, agentRef: 'agent-1' } }),
+          item({ itemId: 'item-stranger', kind: 'mention', actor: { kind: 'user', subjectId: 'user-9', agentRef: null } }),
+        ],
+      }),
+    )
+
+    renderPage()
+
+    expect(await screen.findByText('Ola Nordmann nevnte deg i Room Alpha')).toBeTruthy()
+    expect(await screen.findByText('Research bot nevnte deg i Room Alpha')).toBeTruthy()
+    expect(screen.getByText('Noen nevnte deg i Room Alpha')).toBeTruthy()
+    // Three rows of one room share one roster read.
+    expect(inbox.getSpaceRoster).toHaveBeenCalledTimes(1)
+    expect(inbox.getSpaceRoster).toHaveBeenCalledWith('room-a')
+  })
+
+  it('snoozes a row to a custom time, refuses a time that is too soon in words, and sends the time that is allowed', async () => {
+    inbox.listAttentionItems.mockResolvedValue(page({ items: [item({ itemId: 'item-1', kind: 'mention' })] }))
+    inbox.setAttentionItemState.mockResolvedValue({ itemId: 'item-1', state: 'snoozed', snoozedUntil: Date.now() + 7_200_000 })
+
+    renderPage()
+    const row = (await screen.findByText('Noen nevnte deg i Room Alpha')).closest('li') as HTMLElement
+    fireEvent.click(within(row).getByRole('button', { name: 'Utsett' }))
+    fireEvent.click(within(row).getByRole('button', { name: 'Egendefinert' }))
+    const picker = within(row).getByLabelText('Utsett til tidspunkt') as HTMLInputElement
+
+    // Under a minute ahead: refused with the reason, and nothing is sent.
+    fireEvent.input(picker, { target: { value: localDateTimeValue(Date.now() + 10_000) } })
+    fireEvent.click(within(row).getByRole('button', { name: 'Utsett til dette' }))
+    expect(within(row).getByRole('alert').textContent).toBe('Utsett minst ett minutt fram i tid.')
+    expect(inbox.setAttentionItemState).not.toHaveBeenCalled()
+
+    // Two hours ahead: sent as the snooze time, and the row leaves this tab.
+    fireEvent.input(picker, { target: { value: localDateTimeValue(Date.now() + 7_200_000) } })
+    fireEvent.click(within(row).getByRole('button', { name: 'Utsett til dette' }))
+
+    await waitFor(() => expect(inbox.setAttentionItemState).toHaveBeenCalledTimes(1))
+    const [itemId, change] = inbox.setAttentionItemState.mock.calls[0] as [string, { state: string; snoozeUntil: number }]
+    expect(itemId).toBe('item-1')
+    expect(change.state).toBe('snoozed')
+    expect(Math.abs(change.snoozeUntil - (Date.now() + 7_200_000))).toBeLessThan(2 * 60_000)
+    await waitFor(() => expect(screen.queryByText('Noen nevnte deg i Room Alpha')).toBeNull())
   })
 })

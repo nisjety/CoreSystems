@@ -105,7 +105,9 @@ export function groupByLane(
   return lanes
 }
 
-function who(item: AttentionItem, tr: Tr): string {
+/** Who a row names: the roster's name when the room's roster gave one, else the honest fallback words. */
+function who(item: AttentionItem, tr: Tr, name?: string): string {
+  if (name) return name
   if (item.actor.kind === 'agent') return tr('En agent', 'An agent')
   if (item.actor.kind === 'user') return tr('Noen', 'Someone')
   return tr('Verevon', 'Verevon')
@@ -116,13 +118,18 @@ export function roomName(item: { spaceName: string | null }, tr: Tr): string {
   return item.spaceName ?? tr('et rom', 'a room')
 }
 
-/** One sentence per row. The title, when released, is shown beside it and never inside it. */
-export function itemSentence(item: AttentionItem, tr: Tr): string {
+/**
+ * One sentence per row. The title, when released, is shown beside it and never inside it. `actorName`
+ * is the actor's name from the room's roster (see attention-roster.ts), when the roster gave one.
+ */
+export function itemSentence(item: AttentionItem, tr: Tr, actorName?: string): string {
   const room = roomName(item, tr)
   const more = item.count > 1 ? ` (${item.count})` : ''
   switch (item.kind) {
-    case 'mention':
-      return tr(`${who(item, tr)} nevnte deg i ${room}${more}`, `${who(item, tr)} mentioned you in ${room}${more}`)
+    case 'mention': {
+      const name = who(item, tr, actorName)
+      return tr(`${name} nevnte deg i ${room}${more}`, `${name} mentioned you in ${room}${more}`)
+    }
     case 'reply':
       return tr(`Nye svar i en tråd du følger i ${room}${more}`, `New replies in a thread you follow in ${room}${more}`)
     case 'invite':
@@ -176,4 +183,81 @@ export function snoozeLabel(id: string, tr: Tr): string {
     default:
       return tr('1 uke', '1 week')
   }
+}
+
+/** The window the server accepts for a snooze: at least a minute and at most 30 days ahead (spaceAttentionRules.ts). */
+export const MIN_SNOOZE_MS = 60 * 1000
+export const MAX_SNOOZE_MS = 30 * 24 * 60 * 60 * 1000
+const MINUTE_MS = 60 * 1000
+/** The time a custom snooze starts from when the viewer opens the picker: an hour ahead, like the first preset. */
+const CUSTOM_SNOOZE_DEFAULT_MS = 60 * 60 * 1000
+
+export type CustomSnoozeProblem = 'invalid' | 'too_soon' | 'too_late'
+export type CustomSnooze = { readonly ok: true; readonly snoozeUntil: number } | { readonly ok: false; readonly problem: CustomSnoozeProblem }
+
+/**
+ * A `datetime-local` value (local time, to the minute, `YYYY-MM-DDTHH:mm`) as a snooze time, or the
+ * reason it cannot be used. The window is checked here so the viewer sees the reason, not a refusal.
+ */
+export function customSnooze(value: string, now: number): CustomSnooze {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(value.trim())
+  if (!match) return { ok: false, problem: 'invalid' }
+  const [year, month, day, hour, minute] = match.slice(1).map(Number) as [number, number, number, number, number]
+  const at = new Date(year, month - 1, day, hour, minute).getTime()
+  // Date rolls an impossible part (31 June, 25:00) over into its neighbour; reading it back catches that.
+  if (!Number.isFinite(at)) return { ok: false, problem: 'invalid' }
+  const back = new Date(at)
+  if (
+    back.getFullYear() !== year ||
+    back.getMonth() !== month - 1 ||
+    back.getDate() !== day ||
+    back.getHours() !== hour ||
+    back.getMinutes() !== minute
+  ) {
+    return { ok: false, problem: 'invalid' }
+  }
+  if (at < now + MIN_SNOOZE_MS) return { ok: false, problem: 'too_soon' }
+  if (at > now + MAX_SNOOZE_MS) return { ok: false, problem: 'too_late' }
+  return { ok: true, snoozeUntil: at }
+}
+
+/** The words for a refused custom snooze time. */
+export function customSnoozeProblemText(problem: CustomSnoozeProblem, tr: Tr): string {
+  switch (problem) {
+    case 'invalid':
+      return tr('Velg et tidspunkt.', 'Pick a time.')
+    case 'too_soon':
+      return tr('Utsett minst ett minutt fram i tid.', 'Snooze for at least a minute from now.')
+    case 'too_late':
+      return tr('Utsett høyst 30 dager fram i tid.', 'Snooze for at most 30 days from now.')
+  }
+}
+
+/** A time as a `datetime-local` value in local time, to the minute. */
+export function localDateTimeValue(ms: number): string {
+  const date = new Date(ms)
+  const pad = (part: number) => String(part).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+/** The picker's starting value and its limits, from the same window `customSnooze` enforces. */
+export function customSnoozeBounds(now: number): { readonly initial: string; readonly min: string; readonly max: string } {
+  return {
+    initial: localDateTimeValue(now + CUSTOM_SNOOZE_DEFAULT_MS),
+    // Rounded inwards to whole minutes, so a limit the picker offers is one the check accepts.
+    min: localDateTimeValue(Math.ceil((now + MIN_SNOOZE_MS) / MINUTE_MS) * MINUTE_MS),
+    max: localDateTimeValue(Math.floor((now + MAX_SNOOZE_MS) / MINUTE_MS) * MINUTE_MS),
+  }
+}
+
+/** How long ago, in the viewer's language. An unreadable time draws nothing. */
+export function ago(at: number | null, locale: string, now: number): string {
+  if (at === null || !Number.isFinite(at) || at <= 0) return ''
+  const seconds = Math.round((at - now) / 1000)
+  const abs = Math.abs(seconds)
+  const formatter = new Intl.RelativeTimeFormat(locale, { numeric: 'auto' })
+  if (abs < 60) return formatter.format(0, 'second')
+  if (abs < 3600) return formatter.format(Math.round(seconds / 60), 'minute')
+  if (abs < 86_400) return formatter.format(Math.round(seconds / 3600), 'hour')
+  return formatter.format(Math.round(seconds / 86_400), 'day')
 }

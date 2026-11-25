@@ -9,6 +9,7 @@ import { selectChatThread, type ChatThreadHistoryItem } from '@/features/chat/li
 import { DashboardImageCard } from './DashboardCards'
 import { DashboardCrawlRuns } from './DashboardCrawlRuns'
 import { DashboardCrawlSchedules } from './DashboardCrawlSchedules'
+import { DashboardNeedsYouCard } from './DashboardNeedsYouCard'
 import { DashboardUpdatesCard } from './DashboardUpdatesCard'
 import { DashboardWebHistory } from './DashboardWebHistory'
 import { dashboardCards, type DashboardCard } from './dashboard-cards'
@@ -95,6 +96,7 @@ export function DashboardOverview(props: { tab: DashboardTab; onPrompt: (card: D
   const webHistoryAllowed = useLocalRetentionAllowed()
   return (
     <section class="home-overview-grid" aria-label={i18n.tr('Oversikt over arbeidsområdet', 'Workspace overview')}>
+      <DashboardNeedsYouCard />
       <Show when={props.tab === 'Crawl'} fallback={<>
         <Show when={props.tab === 'Søk' && webHistoryAllowed()} fallback={<DashboardRecentWork />}><DashboardWebHistory /></Show>
         <For each={dashboardCards.filter((card) => card.id === 'weather')}>{(card) => <DashboardImageCard card={card} onPrompt={props.onPrompt} />}</For>
