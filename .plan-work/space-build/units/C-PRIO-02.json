@@ -1,0 +1,36 @@
+{
+  "slice": "C-PRIO-02",
+  "status": "partial",
+  "commit": "e5e54c855",
+  "files": [
+    "apps/Model Plane/rust/services/model-gateway/src/room_run.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/stream_buffer.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/space_routes/runs.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/zdr_posture.rs",
+    "apps/Model Plane/rust/services/session-core/src/run_phase.rs",
+    "apps/Model Plane/rust/services/session-core/src/run_phase_tests.rs",
+    "apps/Model Plane/rust/services/session-core/src/run_service_grpc.rs",
+    "apps/Model Plane/rust/services/session-core/src/space/attention.rs",
+    "apps/Model Plane/rust/services/session-core/src/space/run_control.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/run_live.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers_spaces/ws09.rs",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceActivityFeed.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceActivityFeedStop.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRunCard.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRunCard.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/lib/room-run-grammar.ts",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/lib/room-run-grammar.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-run-stop.ts",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-run-stop.test.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/domains/spaces/ws09.ts"
+  ],
+  "compile": "model-gateway: cargo test --lib compiles (room_run 34, stream_buffer 15 +3 ignored, stop_posture_gate 3, zdr_posture 34 pass). session-core: cargo test --bin session-core compiles (run_phase 5 +12 ignored, room_stop 5 +4 ignored, wake_state 1, attention 72 +23 ignored pass). gateway: cargo test run_live compiles (12 pass, incl. a_zdr_org_may_stop_a_run...). SPA: vitest src/features/spaces 140 files / 2285 tests pass; eslint clean on changed files; tsc6 -p tsconfig.app.json only the 21 pre-existing quarry-client errors.",
+  "migrations": [],
+  "flags": [],
+  "tests_owed": [
+    "apps/Model Plane/rust/services/session-core/src/run_phase_tests.rs: run_phase_pg_a_requested_unexpired_approval_reads_as_awaiting_approval (DB-gated, ignored; asserts running -> awaiting_approval -> running on grant or expiry, stored status stays queued) - not run, no DB",
+    "apps/Model Plane/rust/services/session-core/src/space/run_control.rs: room_stop_zero_retention_and_waived_runs_stop_like_any_other_run (DB-gated, ignored, edited to expect a stop) - not run, no DB",
+    "live proof M2-S1 (addressed wake order, run card for B, manager Stop under ZDR, thread_run_active): needs a live stack, owed"
+  ],
+  "notes": "Continued from uncommitted run-stop hunks an earlier attempt left in this tree; each hunk was re-read and verified before commit. Commits e5e54c855 (model plane), 8170d4e71 (gateway), a4c34fba1 (SPA). Not done here: presets (ctl), registry rows space-surface.v1.json and agent-action-admission.json (reg), mid-stream awaiting_approval flip (reg frame contract), live proof. Other builders' uncommitted gateway files (mod.rs, dm.rs, files.rs, message_lifecycle.rs, message_search.rs, pins.rs) were left untouched and not committed."
+}

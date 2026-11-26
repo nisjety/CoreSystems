@@ -1,0 +1,11 @@
+- P2 deviation: new posts still settle when their thread is listed, not by message id; the listing carries no message id, and a transcript-based settle would draw the new post twice until its transcript loads.
+- P2 deviation: a receipt that names no message_id keeps the old thread updated_at fallback in `reconcile`; only that case still reads updated_at.
+- P2 decision: the reply swap is drawn in place in `SpaceRoomPost` from that post's own transcript turns, and the journal settles the same replies through `onRecorded`, wired in `SpaceConversationPanel`.
+- P2 risk: a reply whose post transcript is not loaded (windowed timeline off-screen, or shared reads off) keeps its pending row until the transcript loads or the 30 s accepted TTL drops it; the old updated_at rule removed it sooner.
+- P1 bug: fixed before commit: a service the probe marked down stayed unreachable after a successful send; any sign of life now clears it, and a down answer overtaken by one is ignored.
+- P2 decision: the optional `/health` probe runs when the connectivity watch starts online and on the online event; no answer or a 5xx is unreachable. It reuses the `connectivity_banner` flag, adds no flag, sends no credentials or content, and the route exists at gateway `main.rs:96` (nginx `location = /health`, Vite proxy).
+- P3 gap: the last-fresh stamp is one module-level slot keyed by room, so a room that is not the last one heard from shows no time; re-opening the same room shows its earlier stamp until its first read or frame.
+- P2 test-gap: `tests/e2e/space-human-posts.spec.ts` (second member, send, reply swap by id) was not run; it needs the live stack.
+- P3 follow-up: `post_new` entries now carry `messageId` but no swap reads it; a transcript-level swap for new posts can use it if the listing ever carries message ids.
+- P3 risk: pre-existing: `tsc6 -p tsconfig.app.json` reports 21 errors, all in `src/shared/api/quarry-client.ts` (unbuilt `@quarry/client`); the `node_modules/.bin/tsc6` shim fails under Git Bash (its NODE_PATH uses `/proc/cygdrive` paths), so `node node_modules/typescript/bin/tsc6` was run.
+- P3 risk: pre-existing: ESLint warnings in SpacePage.tsx, SpaceRoomComposer.tsx, SpaceRoomTimeline.tsx and the banner's early return predate this change; per-file warning counts match HEAD.

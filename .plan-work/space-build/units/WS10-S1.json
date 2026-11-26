@@ -1,42 +1,17 @@
 {
  "slice": "WS10-S1",
- "status": "built",
- "commit": "5334f633f",
+ "status": "already-present",
+ "commit": "252090930",
  "files": [
-  "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
-  "apps/Model Plane/go/gen/model_plane/v1/orchestration.pb.go",
-  "apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/orchestration_pb2.py",
-  "apps/Model Plane/api/openapi.yaml",
-  "apps/Model Plane/rust/services/session-core/src/space/approvals.rs",
-  "apps/Model Plane/rust/services/session-core/src/space/mod.rs",
-  "apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs",
-  "apps/Model Plane/rust/services/execution-core/src/space_gate.rs",
-  "apps/Model Plane/rust/services/execution-core/src/lib.rs",
-  "apps/Model Plane/rust/services/execution-core/src/approval_delivery_worker.rs",
-  "apps/Model Plane/rust/services/execution-core/src/browser_events.rs",
-  "apps/Model Plane/rust/services/execution-core/src/grpc.rs",
-  "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
-  "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
-  "apps/Model Plane/rust/services/model-gateway/src/approvals.rs",
-  "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
-  "apps/Model Plane/rust/services/model-gateway/tests/orchestration_http_test.rs",
-  "apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts",
-  "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceApprovalPanel.tsx",
-  "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-approvals.ts"
+  "apps/Model Plane/rust/services/model-gateway/tests/orchestration_http_test.rs"
  ],
- "compile": "ok (cargo check session-core, execution-core, model-gateway; tsc app project clean for touched files; go build go/gen)",
+ "compile": "ok: model-gateway --test orchestration_http_test (46 passed after the edit; the decide subset failed at HEAD before it); model-gateway --lib approvals (30 passed); session-core --bin session-core space::approvals (12 passed, 1 DB-gated ignored); execution-core --lib space_gate (26 passed); mp-orchestration --test proto_wire_parity (10 passed); SPA vitest on 5 approval test files (134 passed)",
  "migrations": [],
  "flags": [],
  "tests_owed": [
-  "apps/Model Plane/rust/services/session-core/src/space/approvals.rs: card_from_request rejects unknown keys, non-strings, >128 chars, >4 KiB; descriptor forces action_continuation; ZDR drops action_label",
-  "apps/Model Plane/rust/services/session-core/src/space/approvals.rs: derive_continuation table (not granted -> None; loop mode; outcome completed/failed/cancelled; receipt only -> running; none -> not_resumable; live_poll; legacy invalid_continuation -> not_resumable; pending -> queued)",
-  "apps/Model Plane/rust/services/session-core (DB, --ignored): get/list/decide approval carry continuation from outbox+receipt+outcome rows",
-  "apps/Model Plane/rust/services/model-gateway/tests/orchestration_http_test.rs: update continuation_delivery expectations near 1015-1070 (queued, not_resumable, live, unknown); approval_value projects tool_key, action_label, resume_class, continuation",
-  "apps/Model Plane/rust/services/execution-core/src/space_gate.rs: action_label allowlist (no raw arguments), card_context_json shape; RESUMABLE_TOOLS parity with parse_resumable_action",
-  "cargo test -p mp-orchestration --test proto_wire_parity; Go go/gen wire-parity test",
-  "apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.test.ts: normalizeApproval reads tool_key, action_label, resume_class, continuation",
-  "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-approvals.test.ts: grantedOutcome per continuation state; settleApproval never calls resumeRun on approve",
-  "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceApprovalPanel.test.tsx: copy per resumeClass; outcome copy per grantedOutcome"
+  "apps/Model Plane/rust/services/session-core/src/space/approvals.rs: continuation_is_derived_from_the_outbox_receipt_and_outcome_rows (DB-gated and ignored; needs DATABASE_URL, not run here)",
+  "apps/Model Plane/rust/services/model-gateway/src/grpc.rs: no direct unit test of approve_approval for a grant (the retired always-Err path); covered only by the handle_approve_approval lib tests and the HTTP decide tests",
+  "Go go/gen wire-parity test: not run in this pass"
  ],
- "notes": "Single commit covers Model Plane (proto, session-core derivation, execution-core card context, model-gateway wire) and the SPA half. No migration: card lives in approvals.metadata.card. Go and Python mirrors regenerated; legacy TS mirror (Frontend Plane/verevon) not regenerated. See depth file for deviations (resume_class read from context.card, secret-key helper not reused)."
+ "notes": "Already present: the always-Err call is retired (6afdb642a; grpc.rs approve_approval returns Ok for a grant, quarantine_granted_approval_continuation is gone from approvals.rs, no references remain). Gating depth items are in: DEPTH-WS10-S9-1 (6afdb642a) and DEPTH-WS10-S1-1 (e5e54c855, 47bef7c12, dd109838c). Only code change: test-only commit 252090930 fixing two stale grant expectations that failed at HEAD. The ledger still shows S9-1 and S1-1 as missing (stale). The build rules said no tests; the task required verification, so verification was run."
 }

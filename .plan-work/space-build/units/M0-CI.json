@@ -1,22 +1,23 @@
 {
  "slice": "M0-CI",
- "status": "built",
- "commit": "c8dd68419",
+ "status": "partial",
+ "commit": "f0a19e6cb, 81c6ffaa4",
  "files": [
-  ".github/workflows/space-gate.yml",
-  ".github/workflows/convex-core.yml",
-  "scripts/gates/space-changed-areas.sh",
-  "scripts/gates/space-baseline-compare.sh",
-  "scripts/tests/baseline-capture.mjs"
+  "apps/Ingestion Plane/imports-core/tests/conftest.py",
+  "apps/Ingestion Plane/imports-core/pytest.ini",
+  "apps/Ingestion Plane/imports-core/requirements-test.txt",
+  "apps/Data Plane v2/services/retrieval-engine-rs/src/space_scope.rs"
  ],
- "compile": "ok",
+ "compile": "ok: retrieval-engine-rs cargo test --tests -j 2 before the fix: 943 passed, 0 failed, 25 ignored; after the fix: cargo build --bins has no warnings, --lib space_scope 23 passed, --bin space_scope 23 passed, --test space_history_floor 6 passed 4 ignored; go build, go vet and go test ./... ok for wiki-store-go (28 DB-gated SKIP, not run) and documents-api-go; go vet -tags=integration ok for both; tools/migrator builds; registry sync 14/14 and --self-test 12/12; imports-core pytest 219 passed, 1 skipped with no env set",
  "migrations": [],
  "flags": [],
  "tests_owed": [
-  "space-gate.yml on a real pull request: GitHub accepts the workflow, space-gate goes red on a seeded failing test in an area job and green on an untouched area (skipped jobs)",
-  "convex-core.yml on a real pull request: pnpm install --frozen-lockfile works with pnpm 11.3.0, and convex-test/typecheck/lint run and compare",
-  "scripts/gates/space-baseline-compare.sh <id>: with a committed docs/plans/evidence/baseline-<date>/ (M0-T0 capture), an unchanged failing set passes and a new failing id fails",
-  "scripts/gates/space-changed-areas.sh and space-baseline-compare.sh --self-test: already run locally and green; they also run in CI as the gate-self-test job"
+  "space-gate.yml job wiki-store-go on a disposable Postgres: WIKI_TEST_DATABASE_URL set after init.sql and tools/migrator, go test -count=1 -p 1 ./internal/canvas/... ./internal/handler/... with no --- SKIP line (copy of dataplane-v2-ci.yml wiki-store-postgres-tests)",
+  "space-gate.yml job documents-api-go: go test -tags=integration ./internal/repo/... with TEST_DATABASE_URL on Postgres 16 (copy of dataplane-v2-ci.yml documents-api-postgres-tests)",
+  "space-gate.yml job retrieval-engine-rs: cargo test -p retrieval-engine-rs --tests on ubuntu-latest, with TEST_DATABASE_URL for the ignored DB cases (space_files_listing.rs, space_retrieval_audience_claim.rs)",
+  "space-gate.yml job imports-core: pip install -r requirements-test.txt on Python 3.13.12, then python -m pytest tests from apps/Ingestion Plane/imports-core; expect 219 passed and 1 skipped with no env set",
+  "space-gate.yml control-go: CONTROL_LIFECYCLE_TEST_DATABASE_URL set so org-core lifecycle suites run and do not skip",
+  "scripts/tests/space-self-api-registry-sync.test.sh and its --self-test run as a space-gate job: expect 14 and 12 passed (already green locally)"
  ],
- "notes": "Built to scope: space-gate.yml (base-agnostic, one job per touched area, single required check space-gate), convex-core.yml, two gate scripts with self-tests. Buf path fix: buf.yml already quotes every 'apps/Model Plane/proto' path (e45caa71c), so no edit; space-gate's proto job repeats lint ratchet, breaking and goldens for PRs buf.yml's branch filter skips. Workflows parsed locally as YAML; not run on GitHub. No model calls anywhere."
+ "notes": "In-group part built: imports-core collects and runs without secrets (conftest.py), plain pytest works (pytest.ini), and the CI test deps are pinned (requirements-test.txt). retrieval-engine-rs dead_code fixed so RUSTFLAGS -D warnings passes (space_scope.rs, #[cfg(test)] on is_closed and since). Not done, needs ops: space-gate.yml jobs and aggregate needs, and space-changed-areas.sh area outputs (see depth file for the exact dependency paths). Playwright blocked by D30; required-check setting is a repository setting. Registry sync passes (14/14, self-test 12/12) with no change needed in reg."
 }
