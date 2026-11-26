@@ -76,6 +76,24 @@
       "reason": "Cancels one of the caller's own pending reminders: removes data, so it is allowed under ZDR; another member's reminder answers like a missing one."
     },
     {
+      "id": "bff:DELETE:/api/v1/spaces/status",
+      "kind": "route",
+      "plane": "frontend",
+      "service": "verevonv3-gateway",
+      "method": "DELETE",
+      "path": "/api/v1/spaces/status",
+      "handler": "domains/spaces/status.rs::clear_status",
+      "route_class": "Config",
+      "decision_type": "none",
+      "min_role": "org_member",
+      "zdr_class": "n/a",
+      "basis": "path-rule",
+      "idempotency": "natural_key",
+      "flag": "status_api",
+      "payload_allow_list": [],
+      "reason": "Clears the caller's own status in their organization: an idempotent delete of one row, keyed by (organization, subject), that keeps no content, so it is allowed under Zero Data Retention."
+    },
+    {
       "id": "bff:DELETE:/api/v1/spaces/{space_ref}/agents/{binding_ref}",
       "kind": "route",
       "plane": "frontend",
