@@ -9,21 +9,23 @@
 //! so the reply is 202). A DM has a fixed roster, no managers and no agents.
 //!
 //! Gate order of the open route: flag (404 `dm_disabled`), verified organization (403
-//! `active_membership_required`), Zero Data Retention (typed 412/503 before any Control or
-//! Convex call: a DM persists message content), body shape (400 `dm_participants_invalid`), the
-//! Control pre-check, then Application. The caller and the organization come from the session,
-//! never from the body; the body can name neither.
+//! `active_membership_required`), the per-user open ceiling (typed 429 `rate_limited`, 20 a
+//! minute), Zero Data Retention (typed 412/503 before any Control or Convex call: a DM persists
+//! message content), body shape (400 `dm_participants_invalid`), the Control pre-check, then
+//! Application. The caller and the organization come from the session, never from the body; the
+//! body can name neither.
 //!
 //! Errors are `{error:{code,message,details}}`: 400 `dm_participants_invalid`
 //! (`details.reason`), 403 `dm_not_entitled` (`details.missing[]`), 404 `dm_disabled`, 409
 //! `dm_registration_failed` / `space_not_hideable` / `dm_agent_bind_refused`, 412
-//! `zdr_durable_mutation_forbidden`, 503 `zdr_decision_unavailable` /
+//! `zdr_durable_mutation_forbidden`, 429 `rate_limited` (`details.retry_after_seconds`), 503
+//! `zdr_decision_unavailable` /
 //! `space_provisioning_unavailable` / `dm_hide_unavailable`.
 //!
 //! Hide is presentation only (ids and a time, no content): it never touches Control membership,
 //! and a post in the DM clears every viewer's hide so the DM resurfaces ([`resurface`]).
 
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::OnceLock};
 
 use axum::{
     body::Bytes,
@@ -41,6 +43,7 @@ use crate::{
     contracts::ActionActor,
     envelope::{error, error_with_details, unwrap_data},
     middleware::AuthenticatedUser,
+    rate_limit::RateLimiter,
     upstream::{authorized_org_id, proxy_json},
     zdr::durable_write_refusal,
 };
@@ -55,6 +58,15 @@ const MAX_ID_LEN: usize = 128;
 const MAX_SPACE_REF_LEN: usize = 200;
 const MAX_REQUEST_ID_LEN: usize = 200;
 const BODY_LIMIT_BYTES: usize = 16 * 1024;
+/// Direct-message opens per user per organization per minute, a new DM and a re-open alike. A test
+/// run shares one process-wide limiter and one user, so the ceiling is lifted there; the limiter
+/// itself is tested directly with its own small bucket.
+const OPENS_PER_MINUTE: f64 = if cfg!(test) { 100_000.0 } else { 20.0 };
+
+/// Process-wide limiter, built on first use from the gateway's Dragonfly connection (in-process
+/// fallback when the cache is off). Not an `AppState` field, like the post and member limiters, so
+/// no test state literal changes.
+static OPEN_LIMITER: OnceLock<RateLimiter> = OnceLock::new();
 
 /// Registered through `module_routes()` behind `require_session`. The static `dm` segment wins
 /// over the `{space_ref}` matchers of the main table.
@@ -294,6 +306,25 @@ fn open_error(message: Option<String>) -> Reply {
     provisioning_unavailable()
 }
 
+/// One open token for the caller, or the typed 429. The Retry-After seconds travel in
+/// `details.retry_after_seconds` because the open answers a bare `(status, json)`.
+async fn check_open_ceiling(limiter: &RateLimiter, org_id: &str, user_id: &str) -> Result<(), Reply> {
+    match limiter
+        .try_acquire(&format!("space-dm-open:{}:{user_id}", org_id.trim()))
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(retry_after) => Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(error_with_details(
+                "rate_limited",
+                "Too many direct messages opened. Retry shortly.",
+                json!({ "retry_after_seconds": retry_after.max(1) }),
+            )),
+        )),
+    }
+}
+
 /// `POST /api/v1/spaces/dm`.
 async fn open_dm(
     State(state): State<AppState>,
@@ -318,6 +349,13 @@ pub(crate) async fn open_dm_core(
     let org_id = authorized_org_id(state, user).await;
     if org_id.trim().is_empty() {
         return membership_required();
+    }
+    // The per-user ceiling answers before the Zero Data Retention check and before any Control or
+    // Convex call.
+    let limiter = OPEN_LIMITER
+        .get_or_init(|| RateLimiter::from_cache_with_rpm(&state.cache, OPENS_PER_MINUTE));
+    if let Err(reply) = check_open_ceiling(limiter, &org_id, &user.user_id).await {
+        return reply;
     }
     // A DM persists message content: refused typed for a Zero Data Retention org before any
     // Control or Convex call.
@@ -649,8 +687,12 @@ pub(super) async fn agent_attach_refusal(
 
 #[cfg(test)]
 mod tests {
-    use super::{decorate_index_row, hidden_set, open_dm_core, parse_request, resurface, set_hidden};
+    use super::{
+        check_open_ceiling, decorate_index_row, hidden_set, open_dm_core, parse_request,
+        resurface, set_hidden,
+    };
     use crate::config::AppState;
+    use crate::rate_limit::RateLimiter;
     use crate::middleware::{AuthenticatedUser, AuthorizedMembership};
     use axum::{
         extract::{Extension, State},
@@ -663,6 +705,24 @@ mod tests {
 
     const ELIGIBILITY: &str = "/api/v1/internal/spaces/dm-eligibility";
     const INDEX: &str = "/api/v1/internal/spaces";
+
+    #[tokio::test]
+    async fn the_open_ceiling_is_per_user_and_per_org_and_answers_a_typed_429() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let state = AppState::for_tests();
+        let limiter = RateLimiter::from_cache_with_rpm(&state.cache, 2.0);
+        assert!(check_open_ceiling(&limiter, "org-1", "user-1").await.is_ok());
+        assert!(check_open_ceiling(&limiter, "org-1", "user-1").await.is_ok());
+        let (status, axum::Json(body)) = check_open_ceiling(&limiter, "org-1", "user-1")
+            .await
+            .expect_err("the third open in the minute is refused");
+        assert_eq!(status.as_u16(), 429);
+        assert_eq!(body["error"]["code"], "rate_limited");
+        assert!(body["error"]["details"]["retry_after_seconds"].as_u64().unwrap() >= 1);
+        // Another user, and the same user in another organization, have their own bucket.
+        assert!(check_open_ceiling(&limiter, "org-1", "user-2").await.is_ok());
+        assert!(check_open_ceiling(&limiter, "org-2", "user-1").await.is_ok());
+    }
 
     fn member() -> AuthenticatedUser {
         AuthenticatedUser {

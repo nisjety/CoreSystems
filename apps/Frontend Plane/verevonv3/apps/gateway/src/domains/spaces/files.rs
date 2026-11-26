@@ -13,7 +13,8 @@
 //! ownership, quota, dedupe and the typed validation refusals. The flags are rollout controls,
 //! never authorization inputs.
 //!
-//! Order of refusals on R1 (each stops before the next): flag, organization, ids, multipart
+//! Order of refusals on R1 (each stops before the next): flag, organization, ids, the per-user
+//! upload ceiling (typed 429), multipart
 //! content type, idempotency key, Zero Data Retention (typed 412, before any Control call),
 //! declared length, Space lifecycle, the Control import decision, then the upstream call.
 //! Errors are `{error:{code,message,details}}`: 400 `invalid_space` / `invalid_document` /
@@ -21,14 +22,14 @@
 //! `active_membership_required` / `space_files_not_authorized` (`details.reason_code`), 404
 //! `room_files_disabled` / `space_not_found` / `file_not_found` / `upload_not_found`, 411
 //! `upload_length_required`, 412 `zdr_durable_mutation_forbidden` (`details.surface:"room_files"`),
-//! 413 `room_file_too_large`, 422 `upload_requires_multipart`, 503 `space_lifecycle_unavailable`
+//! 413 `room_file_too_large`, 422 `upload_requires_multipart`, 429 `rate_limited`, 503 `space_lifecycle_unavailable`
 //! / `imports_auth_unavailable` / `room_files_unavailable`. Imports-core's own typed refusals
 //! (`room_file_*`, `room_files_quota_exceeded`) pass through unchanged.
 
 use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, OnceLock,
     },
     time::Duration,
 };
@@ -55,6 +56,7 @@ use crate::{
     contracts::ActionActor,
     envelope::{error, error_with_details, unwrap_data},
     middleware::AuthenticatedUser,
+    rate_limit::RateLimiter,
     upstream::{authorized_org_id, proxy_bearer_json, proxy_json},
     zdr::durable_write_refusal,
 };
@@ -80,6 +82,13 @@ const LIST_MAX_LIMIT: i64 = 200;
 const MAX_ID_LEN: usize = 200;
 const MAX_CURSOR_LEN: usize = 256;
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+/// Upload requests per user per organization per minute. A request carries up to ten files, so this
+/// is a batch ceiling. A test run lifts the ceiling.
+const UPLOADS_PER_MINUTE: f64 = if cfg!(test) { 100_000.0 } else { 20.0 };
+
+/// Process-wide limiter, built on first use from the gateway's Dragonfly connection (in-process
+/// fallback when the cache is off). Not an `AppState` field, so no test state literal changes.
+static UPLOAD_LIMITER: OnceLock<RateLimiter> = OnceLock::new();
 
 /// Registered through `module_routes()` behind `require_session`.
 pub(super) fn routes() -> Router<AppState> {
@@ -374,6 +383,25 @@ fn zdr_refusal(reply: Reply) -> Reply {
     (status, Json(body))
 }
 
+/// One upload token for the caller, or the typed 429. The Retry-After seconds travel in
+/// `details.retry_after_seconds` because the upload answers a bare `(status, json)`.
+async fn check_upload_limit(limiter: &RateLimiter, org_id: &str, user_id: &str) -> Result<(), Reply> {
+    match limiter
+        .try_acquire(&format!("space-upload:{}:{user_id}", org_id.trim()))
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(retry_after) => Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(error_with_details(
+                "rate_limited",
+                "Too many uploads. Retry shortly.",
+                json!({ "retry_after_seconds": retry_after.max(1) }),
+            )),
+        )),
+    }
+}
+
 async fn upload_files(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -396,6 +424,11 @@ async fn upload_core(
 ) -> Result<Response, Reply> {
     let org_id = authorized_org_id(state, user).await;
     let (org_id, space_ref) = pre_gate(state, org_id, space_ref)?;
+    // The per-user ceiling answers before the Zero Data Retention check and before any Control,
+    // Application or Ingestion call.
+    let limiter = UPLOAD_LIMITER
+        .get_or_init(|| RateLimiter::from_cache_with_rpm(&state.cache, UPLOADS_PER_MINUTE));
+    check_upload_limit(limiter, &org_id, &user.user_id).await?;
     // ZDR first among the content checks: a Zero Data Retention organization never reaches
     // Control, Application or Ingestion with a file.
     if let Some(refusal) = durable_write_refusal(state, user, Some(headers), None).await {
@@ -1224,6 +1257,26 @@ mod tests {
             }
             Err((status, Json(body))) => (status.as_u16(), body, None),
         }
+    }
+
+    #[tokio::test]
+    async fn the_upload_ceiling_is_per_user_and_per_org_and_answers_a_typed_429() {
+        use super::check_upload_limit;
+        use crate::rate_limit::RateLimiter;
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let state = crate::config::AppState::for_tests();
+        let limiter = RateLimiter::from_cache_with_rpm(&state.cache, 2.0);
+        assert!(check_upload_limit(&limiter, "org-1", "user-1").await.is_ok());
+        assert!(check_upload_limit(&limiter, "org-1", "user-1").await.is_ok());
+        let (status, Json(body)) = check_upload_limit(&limiter, "org-1", "user-1")
+            .await
+            .expect_err("the third upload in the minute is refused");
+        assert_eq!(status.as_u16(), 429);
+        assert_eq!(body["error"]["code"], "rate_limited");
+        assert!(body["error"]["details"]["retry_after_seconds"].as_u64().unwrap() >= 1);
+        // Another user, and the same user in another organization, have their own bucket.
+        assert!(check_upload_limit(&limiter, "org-1", "user-2").await.is_ok());
+        assert!(check_upload_limit(&limiter, "org-2", "user-1").await.is_ok());
     }
 
     // ----- pure helpers ----------------------------------------------------------------------

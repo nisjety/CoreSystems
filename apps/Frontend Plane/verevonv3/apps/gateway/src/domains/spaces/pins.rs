@@ -7,6 +7,7 @@
 //! personal fact and is untouched.
 //!
 //! Order of refusals for a pin (each one stops before the next runs): flag, organization, ids,
+//! the per-user ceiling (typed 429 `rate_limited`; a pin and an unpin share it),
 //! Space lifecycle, the caller's LIVE Control role (editor, manager or owner), the Control
 //! shared-read decision, then proof that the thread exists in this Space and is readable by the
 //! pinner (a one-turn read through model-gateway under the caller's own bearers), and only then
@@ -17,8 +18,11 @@
 //!
 //! Errors are `{error:{code,message,details}}`: 400 `invalid_space` / `invalid_thread`, 403
 //! `active_membership_required` / `room_role_forbidden` / `space_read_not_authorized`, 404
-//! `feature_disabled` / `space_not_found` / `thread_not_found`, 409 `room_pins_limit`, 503
+//! `feature_disabled` / `space_not_found` / `thread_not_found`, 409 `room_pins_limit`, 429
+//! `rate_limited`, 503
 //! `space_lifecycle_unavailable` / `delegated_auth_unavailable` / `room_pins_unavailable`.
+
+use std::sync::OnceLock;
 
 use axum::{
     extract::{Extension, Path, State},
@@ -37,6 +41,7 @@ use crate::{
     config::AppState,
     envelope::{error, error_with_details},
     middleware::AuthenticatedUser,
+    rate_limit::RateLimiter,
     upstream::authorized_org_id,
 };
 
@@ -45,6 +50,13 @@ type Reply = (StatusCode, Json<Value>);
 /// Control roles that may pin or unpin. A viewer reads the pins, never changes them.
 const PIN_ROLES: [&str; 3] = ["editor", "manager", "owner"];
 const MAX_ID_LEN: usize = 200;
+/// Pins and unpins per user per organization per minute, both verbs together. A test run lifts the
+/// ceiling.
+const PINS_PER_MINUTE: f64 = if cfg!(test) { 100_000.0 } else { 30.0 };
+
+/// Process-wide limiter, built on first use from the gateway's Dragonfly connection (in-process
+/// fallback when the cache is off). Not an `AppState` field, so no test state literal changes.
+static PIN_LIMITER: OnceLock<RateLimiter> = OnceLock::new();
 
 /// Registered through `module_routes()` behind `require_session`.
 pub(super) fn routes() -> Router<AppState> {
@@ -76,6 +88,25 @@ fn unavailable() -> Reply {
 
 fn valid_id(value: &str) -> bool {
     !value.is_empty() && value.len() <= MAX_ID_LEN && !value.chars().any(char::is_control)
+}
+
+/// One pin token for the caller, or the typed 429. The Retry-After seconds travel in
+/// `details.retry_after_seconds` because the verbs answer a bare `(status, json)`.
+async fn check_pin_ceiling(limiter: &RateLimiter, org_id: &str, user_id: &str) -> Result<(), Reply> {
+    match limiter
+        .try_acquire(&format!("space-pin:{}:{user_id}", org_id.trim()))
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(retry_after) => Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(error_with_details(
+                "rate_limited",
+                "Too many pin changes. Retry shortly.",
+                json!({ "retry_after_seconds": retry_after.max(1) }),
+            )),
+        )),
+    }
 }
 
 /// Organization, trimmed Space ref and thread id, with the Space lifecycle and the caller's live
@@ -113,6 +144,14 @@ async fn authorize_change(
             "A thread id is required.",
         ));
     }
+    // The per-user ceiling answers before the lifecycle, role and read calls. A pin and an unpin
+    // share it.
+    check_pin_ceiling(
+        PIN_LIMITER.get_or_init(|| RateLimiter::from_cache_with_rpm(&state.cache, PINS_PER_MINUTE)),
+        &org_id,
+        &user.user_id,
+    )
+    .await?;
     match space_lifecycle_by_ref(state, user, &org_id, space_ref).await {
         Ok(Some(_)) => {}
         Ok(None) => {
@@ -721,5 +760,25 @@ mod tests {
             .find(|gap| gap["section"] == "pins")
             .expect("a named pins gap");
         assert_eq!(gap["code"], "pins_unavailable");
+    }
+
+    #[tokio::test]
+    async fn the_pin_ceiling_is_per_user_and_per_org_and_answers_a_typed_429() {
+        use super::check_pin_ceiling;
+        use crate::rate_limit::RateLimiter;
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let state = AppState::for_tests();
+        let limiter = RateLimiter::from_cache_with_rpm(&state.cache, 2.0);
+        assert!(check_pin_ceiling(&limiter, "org-1", "user-1").await.is_ok());
+        assert!(check_pin_ceiling(&limiter, "org-1", "user-1").await.is_ok());
+        let (status, axum::Json(body)) = check_pin_ceiling(&limiter, "org-1", "user-1")
+            .await
+            .expect_err("the third pin change in the minute is refused");
+        assert_eq!(status.as_u16(), 429);
+        assert_eq!(body["error"]["code"], "rate_limited");
+        assert!(body["error"]["details"]["retry_after_seconds"].as_u64().unwrap() >= 1);
+        // Another user, and the same user in another organization, have their own bucket.
+        assert!(check_pin_ceiling(&limiter, "org-1", "user-2").await.is_ok());
+        assert!(check_pin_ceiling(&limiter, "org-2", "user-1").await.is_ok());
     }
 }

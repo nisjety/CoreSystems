@@ -24,10 +24,12 @@
 //! Errors are `{error:{code,message,details}}`: 400 `invalid_request` / `invalid_query` (details
 //! `{min_chars,max_chars}`) / `invalid_filter` / `invalid_cursor` / `invalid_space`, 403
 //! `active_membership_required` / `space_read_not_authorized`, 404 `space_not_found` /
-//! `space_search_disabled` / `entry_not_found`, 429 `search_busy`, 502
+//! `space_search_disabled` / `entry_not_found`, 429 `rate_limited` / `search_busy`, 502
 //! `invalid_model_gateway_response`, 503 `space_lifecycle_unavailable` /
 //! `space_decision_unavailable` / `delegated_auth_unavailable` / `search_timeout` /
 //! `search_unavailable`.
+
+use std::sync::OnceLock;
 
 use axum::{
     extract::{rejection::JsonRejection, Extension, Path, State},
@@ -45,7 +47,7 @@ use super::{
 };
 use crate::{
     config::AppState, envelope::error_with_details, middleware::AuthenticatedUser,
-    upstream::authorized_org_id,
+    rate_limit::RateLimiter, upstream::authorized_org_id,
 };
 
 const QUERY_MIN_CHARS: usize = 2;
@@ -53,6 +55,14 @@ const QUERY_MAX_CHARS: usize = 200;
 const MAX_ID_LEN: usize = 200;
 const MAX_CURSOR_LEN: usize = 2048;
 const MAX_TIME_LEN: usize = 64;
+/// Message searches per user per organization per minute. Each one mints a fresh Control decision,
+/// runs a Session Core query and reads the Space list from Convex, so it is the costliest read here.
+/// The SPA debounces typing by 250 ms. A test run lifts the ceiling.
+const SEARCHES_PER_MINUTE: f64 = if cfg!(test) { 100_000.0 } else { 30.0 };
+
+/// Process-wide limiter, built on first use from the gateway's Dragonfly connection (in-process
+/// fallback when the cache is off). Not an `AppState` field, so no test state literal changes.
+static SEARCH_LIMITER: OnceLock<RateLimiter> = OnceLock::new();
 
 /// Registered through `module_routes()` behind `require_session`.
 pub(super) fn routes() -> Router<AppState> {
@@ -143,6 +153,28 @@ fn valid_message_id(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+/// One search token for the caller, or the typed 429 (the route wraps it in its `no-store` reply).
+async fn check_search_limit(
+    limiter: &RateLimiter,
+    org_id: &str,
+    user_id: &str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    match limiter
+        .try_acquire(&format!("space-search:{}:{user_id}", org_id.trim()))
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(retry_after) => Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(error_with_details(
+                "rate_limited",
+                "Too many searches. Retry shortly.",
+                json!({ "retry_after_seconds": retry_after.max(1) }),
+            )),
+        )),
+    }
 }
 
 /// The organization and Space lifecycle checks both routes share. `Ok(org_id, space_ref)`.
@@ -436,6 +468,17 @@ async fn search_space_messages(
         Ok(valid) => valid,
         Err(response) => return response,
     };
+    // The per-user ceiling answers before the Space lookup, the Control decision and Session Core.
+    // An organization-less caller is refused by `authorize_scope` with no upstream call, so it is
+    // not counted.
+    let org_id = authorized_org_id(&state, &user).await;
+    if !org_id.trim().is_empty() {
+        let limiter = SEARCH_LIMITER
+            .get_or_init(|| RateLimiter::from_cache_with_rpm(&state.cache, SEARCHES_PER_MINUTE));
+        if let Err((status, Json(payload))) = check_search_limit(limiter, &org_id, &user.user_id).await {
+            return reply(status, payload);
+        }
+    }
     let (org_id, space_ref) = match authorize_scope(&state, &user, &space_ref).await {
         Ok(scope) => scope,
         Err(response) => return response,
@@ -643,6 +686,26 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const SPACE: &str = "space-1";
+
+    #[tokio::test]
+    async fn the_search_ceiling_is_per_user_and_per_org_and_answers_a_typed_429() {
+        use super::check_search_limit;
+        use crate::rate_limit::RateLimiter;
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let state = AppState::for_tests();
+        let limiter = RateLimiter::from_cache_with_rpm(&state.cache, 2.0);
+        assert!(check_search_limit(&limiter, "org-1", "user-1").await.is_ok());
+        assert!(check_search_limit(&limiter, "org-1", "user-1").await.is_ok());
+        let (status, axum::Json(body)) = check_search_limit(&limiter, "org-1", "user-1")
+            .await
+            .expect_err("the third search in the minute is refused");
+        assert_eq!(status.as_u16(), 429);
+        assert_eq!(body["error"]["code"], "rate_limited");
+        assert!(body["error"]["details"]["retry_after_seconds"].as_u64().unwrap() >= 1);
+        // Another user, and the same user in another organization, have their own bucket.
+        assert!(check_search_limit(&limiter, "org-1", "user-2").await.is_ok());
+        assert!(check_search_limit(&limiter, "org-2", "user-1").await.is_ok());
+    }
 
     fn search_body(value: Value) -> SearchBody {
         serde_json::from_value(value).expect("a SearchBody")

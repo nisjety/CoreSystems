@@ -15,8 +15,9 @@
 //! or decision field in the body is a 400 and is never forwarded.
 //!
 //! Order (each step is a refusal before the next one runs): flag (404
-//! `space_message_revise_disabled`), verified organization, request shape, Zero Data Retention
-//! (typed 412/503 before any Control or model call: a revision persists free text), Space
+//! `space_message_revise_disabled`), verified organization, request shape, the per-user ceiling
+//! (typed 429 `rate_limited`), Zero Data Retention (typed 412/503 before any Control or model call:
+//! a revision persists free text), Space
 //! lifecycle, bearers, Control decision, model-gateway. When the audience moved between the
 //! decision and the write, Session Core answers 409 `space_authority_stale`: a fresh decision is
 //! minted once and the call is resent.
@@ -26,7 +27,8 @@
 //! (Control) / `message_revise_forbidden` (Session Core), 404 `space_message_revise_disabled` /
 //! `space_not_found` / `message_not_found` / `thread_not_found`, 409 `message_already_deleted` /
 //! `thread_run_active` / `idempotency_key_conflict` / `space_authority_stale` / `room_archived` /
-//! `revision_limit` / `message_state_conflict`, 412 the typed ZDR refusal, 503 `zdr_decision_unavailable` /
+//! `revision_limit` / `message_state_conflict`, 412 the typed ZDR refusal, 429 `rate_limited`, 503
+//! `zdr_decision_unavailable` /
 //! `space_lifecycle_unavailable` / `space_decision_unavailable` / `delegated_auth_unavailable` /
 //! `session_unavailable`.
 //!
@@ -39,7 +41,8 @@
 //! add and remove the caller's one emoji on one message. Application (Convex `spaceReactions`)
 //! stores ids, the emoji and a time only; this module decides nothing about content. Order of
 //! refusals for a `PUT`: flag (404 `space_reactions_disabled`), organization, request shape (400
-//! `invalid_emoji`), Zero Data Retention (typed 412/503 before any Control, model or Convex call),
+//! `invalid_emoji`), the per-user ceiling (typed 429 `rate_limited`; a `DELETE` counts too), Zero
+//! Data Retention (typed 412/503 before any Control, model or Convex call),
 //! Space lifecycle, the caller's LIVE Control role (editor or above, else 403
 //! `space_role_cannot_react`), the Control shared-read decision (403 `space_read_not_authorized`),
 //! proof through model-gateway's target route that the message exists in that Space thread, is
@@ -48,6 +51,8 @@
 //! membership and skips the message proof, so a reaction on a since-deleted message stays removable.
 //! A reaction never starts a run and is never read by approval or wake code. The transcript route
 //! calls `attach_reactions`; Convex failing there never fails the read.
+
+use std::sync::OnceLock;
 
 use axum::{
     body::Bytes,
@@ -75,6 +80,7 @@ use crate::{
     },
     envelope::{error, error_with_details, unwrap_data},
     middleware::AuthenticatedUser,
+    rate_limit::RateLimiter,
     upstream::{authorized_org_id, proxy_json},
     zdr,
 };
@@ -91,6 +97,17 @@ const BODY_LIMIT_BYTES: usize = 64 * 1024;
 const KEY_PREFIX: &str = "msg-rev-";
 /// The closed set model-gateway and Session Core accept for a moderator delete.
 const MODERATION_REASONS: [&str; 5] = ["policy_violation", "spam", "harassment", "privacy", "other"];
+/// Edits and deletes per user per organization per minute. A test run lifts the ceiling (see
+/// `human_posts::POSTS_PER_MINUTE`).
+const REVISIONS_PER_MINUTE: f64 = if cfg!(test) { 100_000.0 } else { 30.0 };
+/// Reaction adds and removes per user per organization per minute: one click is one request.
+const REACTIONS_PER_MINUTE: f64 = if cfg!(test) { 100_000.0 } else { 60.0 };
+
+/// Process-wide limiters, built on first use from the gateway's Dragonfly connection (in-process
+/// fallback when the cache is off). Each route family has its own bucket and key; neither is an
+/// `AppState` field, so no test state literal changes.
+static REVISE_LIMITER: OnceLock<RateLimiter> = OnceLock::new();
+static REACTION_LIMITER: OnceLock<RateLimiter> = OnceLock::new();
 
 /// Registered through `module_routes()` behind `require_session`. The method router shares no
 /// path with the post routes (`.../messages` has no id segment).
@@ -234,6 +251,31 @@ async fn delete_route(
     .await
 }
 
+/// One token of `scope` for the caller, or the typed 429. The Retry-After seconds travel in
+/// `details.retry_after_seconds` because these flows answer a bare `(status, json)`.
+async fn check_ceiling(
+    limiter: &RateLimiter,
+    scope: &str,
+    org_id: &str,
+    user_id: &str,
+    message: &'static str,
+) -> Result<(), Reply> {
+    match limiter
+        .try_acquire(&format!("{scope}:{}:{user_id}", org_id.trim()))
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(retry_after) => Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(error_with_details(
+                "rate_limited",
+                message,
+                json!({ "retry_after_seconds": retry_after.max(1) }),
+            )),
+        )),
+    }
+}
+
 /// The whole revise flow, shared by the two routes and the two actions. `body` is the untrusted
 /// request object (for the request-level ZDR flag); `None` for a delete.
 #[allow(clippy::too_many_arguments)]
@@ -277,6 +319,21 @@ pub(crate) async fn revise_message(
     }
     if !valid_key(idempotency_key) {
         return invalid_key();
+    }
+    // The per-user ceiling answers before the Zero Data Retention check and before any Control or
+    // model call.
+    let limiter = REVISE_LIMITER
+        .get_or_init(|| RateLimiter::from_cache_with_rpm(&state.cache, REVISIONS_PER_MINUTE));
+    if let Err(reply) = check_ceiling(
+        limiter,
+        "space-revise",
+        &org_id,
+        &user.user_id,
+        "Too many message changes. Retry shortly.",
+    )
+    .await
+    {
+        return reply;
     }
     // A durable write of free text: refused for a Zero Data Retention caller, typed, before any
     // Control or model call.
@@ -693,6 +750,20 @@ pub(crate) async fn set_reaction(
     {
         return invalid_emoji();
     }
+    // The per-user ceiling answers before any Control, model or Convex call. A removal counts too.
+    let limiter = REACTION_LIMITER
+        .get_or_init(|| RateLimiter::from_cache_with_rpm(&state.cache, REACTIONS_PER_MINUTE));
+    if let Err(reply) = check_ceiling(
+        limiter,
+        "space-reaction",
+        &org_id,
+        &user.user_id,
+        "Too many reaction changes. Retry shortly.",
+    )
+    .await
+    {
+        return reply;
+    }
     // Adding persists a new row about the room: refused for a Zero Data Retention caller, typed,
     // before any Control, model or Application call. Removing erases a row and is not refused.
     if present {
@@ -938,7 +1009,8 @@ mod tests {
     //! through the real router against mock Auth, Control, org-core, Application (Convex) and
     //! Model Gateway. Message edit and delete share the module; the delete test here pins only that
     //! a landed delete clears the message's reactions.
-    use super::attach_reactions;
+    use super::{attach_reactions, check_ceiling};
+    use crate::rate_limit::RateLimiter;
     use crate::config::AppState;
     use crate::middleware::{AuthenticatedUser, AuthorizedMembership};
     use axum::{body::Body, http::Request};
@@ -1171,6 +1243,27 @@ mod tests {
     }
 
     // ----- the happy path ---------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn the_revision_and_reaction_ceilings_are_per_user_and_per_org_and_answer_a_typed_429() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let state = AppState::for_tests();
+        let limiter = RateLimiter::from_cache_with_rpm(&state.cache, 2.0);
+        const MESSAGE_429: &str = "Too many message changes. Retry shortly.";
+        assert!(check_ceiling(&limiter, "space-revise", "org-1", "user-1", MESSAGE_429).await.is_ok());
+        assert!(check_ceiling(&limiter, "space-revise", "org-1", "user-1", MESSAGE_429).await.is_ok());
+        let (status, axum::Json(body)) =
+            check_ceiling(&limiter, "space-revise", "org-1", "user-1", MESSAGE_429)
+                .await
+                .expect_err("the third revision in the minute is refused");
+        assert_eq!(status.as_u16(), 429);
+        assert_eq!(body["error"]["code"], "rate_limited");
+        assert!(body["error"]["details"]["retry_after_seconds"].as_u64().unwrap() >= 1);
+        // A reaction has its own bucket; another user and another organization are unaffected.
+        assert!(check_ceiling(&limiter, "space-reaction", "org-1", "user-1", MESSAGE_429).await.is_ok());
+        assert!(check_ceiling(&limiter, "space-revise", "org-1", "user-2", MESSAGE_429).await.is_ok());
+        assert!(check_ceiling(&limiter, "space-revise", "org-2", "user-1", MESSAGE_429).await.is_ok());
+    }
 
     #[tokio::test]
     async fn an_editor_adds_a_reaction_and_gets_the_chips() {
