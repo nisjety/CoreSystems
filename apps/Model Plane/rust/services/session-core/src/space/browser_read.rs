@@ -548,6 +548,96 @@ fn fold_run_facts(rows: &[ActingRow]) -> HashMap<String, RunFacts> {
     facts
 }
 
+/// The owner's summary of one room browser run (`SummarizeRoomBrowserRun`, WS20-S3): the step count, the first
+/// hosts and evidence ids, and the hand-off count. Only these survive [`summarize_run`].
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct RunSummary {
+    pub(crate) steps: u32,
+    pub(crate) hosts: Vec<String>,
+    pub(crate) evidence_ids: Vec<String>,
+    pub(crate) handoffs: u32,
+}
+
+/// The most evidence ids a summary carries: the first ones seen, as the hosts are.
+pub(crate) const MAX_SUMMARY_EVIDENCE: usize = 6;
+/// The longest evidence id a summary accepts.
+const MAX_EVIDENCE_ID_BYTES: usize = 128;
+
+/// The event types a run summary reads: the dispatched actions, the observations (hosts and evidence) and the
+/// hand-offs requested. Every other type stays in the database.
+const SUMMARY_EVENT_TYPES: &[&str] = &[
+    "BROWSER_ACTION_DISPATCHED",
+    "BROWSER_OBSERVATION_RECEIVED",
+    "BROWSER_HANDOFF_REQUESTED",
+];
+
+/// One event a summary reads: its type, the URL fields its host comes from and the observation's screenshot
+/// reference (the evidence id).
+#[derive(sqlx::FromRow)]
+struct SummaryRow {
+    event_type: String,
+    url: Option<String>,
+    page_url: Option<String>,
+    screenshot_ref: Option<String>,
+}
+
+/// The summary events of one run of the caller's org, in time order. `$3` is the event types to read.
+const ROOM_RUN_SUMMARY_SQL: &str = "SELECT e.event_type AS event_type, \
+    e.payload->>'url' AS url, e.payload->>'page_url' AS page_url, \
+    e.payload->>'screenshot_ref' AS screenshot_ref \
+    FROM events e \
+    WHERE e.org_id = $1 AND e.run_id = $2 AND e.event_type = ANY($3) \
+    ORDER BY e.ts, e.id";
+
+/// The start and end instants of a browser run of the caller's org (the end is zero while the run has not ended).
+/// A run that is not a gateway browser run has no row here.
+const ROOM_RUN_SUMMARY_RUN_SQL: &str = "SELECT extract(epoch from r.created_at)::bigint AS started_at_unix, \
+    COALESCE(extract(epoch from r.ended_at)::bigint, 0) AS finished_at_unix \
+    FROM runs r \
+    JOIN managed_run_terminalization_outbox o ON o.run_id = r.id \
+    WHERE r.id = $1 AND r.org_id = $2 AND o.configured_source = 'gateway_browser'";
+
+/// Folds one run's summary rows, in time order, into its [`RunSummary`]. A host or an evidence id that is not a
+/// plain token counts for nothing. Only the counts, the hosts and the evidence ids survive the fold.
+fn summarize_run(rows: &[SummaryRow]) -> RunSummary {
+    let mut summary = RunSummary::default();
+    for row in rows {
+        match row.event_type.as_str() {
+            "BROWSER_ACTION_DISPATCHED" => summary.steps = summary.steps.saturating_add(1),
+            "BROWSER_HANDOFF_REQUESTED" => summary.handoffs = summary.handoffs.saturating_add(1),
+            "BROWSER_OBSERVATION_RECEIVED" => {
+                if let Some(id) = row.screenshot_ref.as_deref().filter(|id| evidence_id_ok(id)) {
+                    let seen = summary.evidence_ids.iter().any(|known| known == id);
+                    if !seen && summary.evidence_ids.len() < MAX_SUMMARY_EVIDENCE {
+                        summary.evidence_ids.push(id.to_owned());
+                    }
+                }
+            }
+            _ => {}
+        }
+        let raw = row
+            .page_url
+            .as_deref()
+            .filter(|url| !url.is_empty())
+            .or(row.url.as_deref())
+            .unwrap_or_default();
+        let host = host_of(raw);
+        if !host.is_empty() && summary.hosts.len() < MAX_ROW_HOSTS && !summary.hosts.contains(&host) {
+            summary.hosts.push(host);
+        }
+    }
+    summary
+}
+
+/// Whether a screenshot reference is a plain token: 1 to 128 ASCII letters, digits or `-_.:`.
+fn evidence_id_ok(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_EVIDENCE_ID_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+}
+
 /// The run's header when it is a room browser run of this Space inside the audience ceiling and the member's
 /// floors. Otherwise NotFound: a run the viewer may not see is indistinguishable from a run that does not exist.
 /// The evidence and timeline reads take their run through here, so a run before the floor is refused for each.
@@ -685,6 +775,64 @@ impl SpaceBrowserRead for SpaceBrowserReadGrpc {
             })?
             .ok_or_else(|| Status::permission_denied("run access denied"))?;
         Ok(Response::new(pb::ResolveRunSpaceResponse { space_id }))
+    }
+
+    async fn summarize_room_browser_run(
+        &self,
+        request: Request<pb::SummarizeRoomBrowserRunRequest>,
+    ) -> Result<Response<pb::SummarizeRoomBrowserRunResponse>, Status> {
+        // The starter's own summary, read for the run's result turn. A zero-retention credential is refused
+        // first, as every room read is. Nothing is written.
+        let caller = identity(&request)?;
+        refuse_zero_retention(&caller)?;
+        authorize_operation(&caller, SPACE_BROWSER_READ_SCOPE)?;
+        let req = request.into_inner();
+        if req.run_id.trim().is_empty() || req.org_id.trim().is_empty() || req.user_id.trim().is_empty() {
+            return Err(Status::invalid_argument("run_id, org_id, and user_id are required"));
+        }
+        caller.authorize_org(&req.org_id)?;
+        if !caller.is_service() {
+            caller.authorize_user(&req.user_id)?;
+        }
+        // Only the run's owner reads its summary (the owner check ResolveRunSpace makes too).
+        if !crate::retention_receipt::run_owner_matches(&self.pool, &caller, &req.run_id, &req.org_id, &req.user_id)
+            .await?
+        {
+            return Err(Status::permission_denied("run access denied"));
+        }
+        let (started_at_unix, finished_at_unix) = sqlx::query_as::<_, (i64, i64)>(ROOM_RUN_SUMMARY_RUN_SQL)
+            .bind(&req.run_id)
+            .bind(&req.org_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| {
+                tracing::warn!(error = %error, "room browser run summary failed");
+                Status::unavailable("browser run summary is unavailable")
+            })?
+            .ok_or_else(|| Status::not_found("run not found"))?;
+        let types: Vec<String> = SUMMARY_EVENT_TYPES
+            .iter()
+            .map(|event_type| (*event_type).to_owned())
+            .collect();
+        let rows = sqlx::query_as::<_, SummaryRow>(ROOM_RUN_SUMMARY_SQL)
+            .bind(&req.org_id)
+            .bind(&req.run_id)
+            .bind(types)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| {
+                tracing::warn!(error = %error, "room browser run summary events failed");
+                Status::unavailable("browser run summary is unavailable")
+            })?;
+        let summary = summarize_run(&rows);
+        Ok(Response::new(pb::SummarizeRoomBrowserRunResponse {
+            steps: summary.steps,
+            hosts: summary.hosts,
+            evidence_ids: summary.evidence_ids,
+            handoffs: summary.handoffs,
+            started_at_unix,
+            finished_at_unix,
+        }))
     }
 
     async fn list_room_browser_runs(
@@ -1341,6 +1489,71 @@ mod tests {
             optional_id(&"e".repeat(MAX_ID_BYTES + 1)).expect_err("too long").code(),
             tonic::Code::InvalidArgument
         );
+    }
+
+    // ---- summarize_run ----------------------------------------------------------------------
+
+    fn summary_row(
+        event_type: &str,
+        url: Option<&str>,
+        page_url: Option<&str>,
+        screenshot_ref: Option<&str>,
+    ) -> SummaryRow {
+        SummaryRow {
+            event_type: event_type.to_owned(),
+            url: url.map(str::to_owned),
+            page_url: page_url.map(str::to_owned),
+            screenshot_ref: screenshot_ref.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn summarize_run_counts_dispatched_steps_and_requested_handoffs_and_keeps_hosts_and_evidence_ids() {
+        let rows = vec![
+            summary_row(DISPATCHED, Some("https://shop.example.com/a?token=x"), None, None),
+            summary_row(OBSERVED, None, Some("https://shop.example.com/a"), Some("art-1")),
+            summary_row("BROWSER_HANDOFF_REQUESTED", None, None, None),
+            summary_row("BROWSER_HANDOFF_REQUESTED", None, None, None),
+        ];
+        let summary = summarize_run(&rows);
+        assert_eq!(summary.steps, 1);
+        assert_eq!(summary.handoffs, 2);
+        assert_eq!(summary.hosts, hosts(&["shop.example.com"]));
+        assert_eq!(summary.evidence_ids, hosts(&["art-1"]));
+    }
+
+    #[test]
+    fn summarize_run_keeps_the_first_eight_hosts_and_six_evidence_ids_and_counts_every_step() {
+        let names = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"];
+        let mut rows: Vec<SummaryRow> = names
+            .iter()
+            .map(|name| summary_row(DISPATCHED, Some(&format!("https://{name}.example.com/")), None, None))
+            .collect();
+        rows.extend(
+            names
+                .iter()
+                .map(|name| summary_row(OBSERVED, None, None, Some(&format!("art-{name}")))),
+        );
+        let summary = summarize_run(&rows);
+        assert_eq!(summary.steps, 10);
+        assert_eq!(summary.hosts.len(), 8);
+        assert_eq!(summary.hosts[0], "a.example.com");
+        assert_eq!(summary.evidence_ids.len(), 6);
+        assert_eq!(summary.evidence_ids[5], "art-f");
+    }
+
+    #[test]
+    fn summarize_run_drops_an_evidence_id_that_is_not_a_plain_token_and_repeats_none() {
+        let rows = vec![
+            summary_row(OBSERVED, None, None, Some("../../etc/passwd")),
+            summary_row(OBSERVED, None, None, Some("has space")),
+            summary_row(OBSERVED, None, None, Some("")),
+            summary_row(OBSERVED, None, None, None),
+            summary_row(OBSERVED, None, None, Some("ok-1")),
+            summary_row(OBSERVED, None, None, Some("ok-1")),
+        ];
+        assert_eq!(summarize_run(&rows).evidence_ids, hosts(&["ok-1"]));
+        assert_eq!(summarize_run(&[]), RunSummary::default());
     }
 
     // ---- real Postgres (every test is `#[ignore]`d) -----------------------------------------

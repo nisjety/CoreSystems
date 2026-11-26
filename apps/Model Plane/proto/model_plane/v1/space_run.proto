@@ -136,6 +136,11 @@ service SpaceBrowserRead {
   // Whether an evidence id is one of the run's persisted observations (WS20-S4, R4). Returns the Quarry
   // artifact reference model-gateway fetches; Session Core never returns the bytes.
   rpc AuthorizeRoomBrowserEvidence(AuthorizeRoomBrowserEvidenceRequest) returns (AuthorizeRoomBrowserEvidenceResponse);
+
+  // The starter's own summary of one room browser run, read for the run's result turn (WS20-S3). The caller
+  // must be the run's owner. Counts, at most eight hosts and six evidence ids, and the run's start and end
+  // instants. Never a URL, title, rationale, selector, decided-by subject or evidence byte.
+  rpc SummarizeRoomBrowserRun(SummarizeRoomBrowserRunRequest) returns (SummarizeRoomBrowserRunResponse);
 }
 
 message CountActiveRoomBrowserRunsRequest {
@@ -274,4 +279,30 @@ message AuthorizeRoomBrowserEvidenceRequest {
 message AuthorizeRoomBrowserEvidenceResponse {
   // The Quarry artifact reference to fetch. It is the evidence id, once checked against the run.
   string artifact_id = 1;
+}
+
+// Arguments of the owner's summary read of one room browser run (WS20-S3).
+message SummarizeRoomBrowserRunRequest {
+  // The room browser run to summarize.
+  string run_id = 1;
+  // Must be the caller's own org.
+  string org_id = 2;
+  // Must be the caller's own user id; the run must be this user's.
+  string user_id = 3;
+}
+
+// The owner's summary of one room browser run. Counts and ids only.
+message SummarizeRoomBrowserRunResponse {
+  // Browser actions the run dispatched.
+  uint32 steps = 1;
+  // Distinct hosts the run acted on, first seen first, at most eight. Hosts only, never a URL.
+  repeated string hosts = 2;
+  // Evidence ids of the run's persisted observations, first seen first, at most six.
+  repeated string evidence_ids = 3;
+  // Hand-offs the run requested.
+  uint32 handoffs = 4;
+  // Unix seconds the run was created.
+  int64 started_at_unix = 5;
+  // Unix seconds the run ended; zero while it has not.
+  int64 finished_at_unix = 6;
 }

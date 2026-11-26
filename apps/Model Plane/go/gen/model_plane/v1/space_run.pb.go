@@ -1598,6 +1598,161 @@ func (x *AuthorizeRoomBrowserEvidenceResponse) GetArtifactId() string {
 	return ""
 }
 
+// Arguments of the owner's summary read of one room browser run (WS20-S3).
+type SummarizeRoomBrowserRunRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The room browser run to summarize.
+	RunId string `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	// Must be the caller's own org.
+	OrgId string `protobuf:"bytes,2,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// Must be the caller's own user id; the run must be this user's.
+	UserId        string `protobuf:"bytes,3,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SummarizeRoomBrowserRunRequest) Reset() {
+	*x = SummarizeRoomBrowserRunRequest{}
+	mi := &file_model_plane_v1_space_run_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SummarizeRoomBrowserRunRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SummarizeRoomBrowserRunRequest) ProtoMessage() {}
+
+func (x *SummarizeRoomBrowserRunRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_space_run_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SummarizeRoomBrowserRunRequest.ProtoReflect.Descriptor instead.
+func (*SummarizeRoomBrowserRunRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_space_run_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *SummarizeRoomBrowserRunRequest) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *SummarizeRoomBrowserRunRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *SummarizeRoomBrowserRunRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+// The owner's summary of one room browser run. Counts and ids only.
+type SummarizeRoomBrowserRunResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Browser actions the run dispatched.
+	Steps uint32 `protobuf:"varint,1,opt,name=steps,proto3" json:"steps,omitempty"`
+	// Distinct hosts the run acted on, first seen first, at most eight. Hosts only, never a URL.
+	Hosts []string `protobuf:"bytes,2,rep,name=hosts,proto3" json:"hosts,omitempty"`
+	// Evidence ids of the run's persisted observations, first seen first, at most six.
+	EvidenceIds []string `protobuf:"bytes,3,rep,name=evidence_ids,json=evidenceIds,proto3" json:"evidence_ids,omitempty"`
+	// Hand-offs the run requested.
+	Handoffs uint32 `protobuf:"varint,4,opt,name=handoffs,proto3" json:"handoffs,omitempty"`
+	// Unix seconds the run was created.
+	StartedAtUnix int64 `protobuf:"varint,5,opt,name=started_at_unix,json=startedAtUnix,proto3" json:"started_at_unix,omitempty"`
+	// Unix seconds the run ended; zero while it has not.
+	FinishedAtUnix int64 `protobuf:"varint,6,opt,name=finished_at_unix,json=finishedAtUnix,proto3" json:"finished_at_unix,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *SummarizeRoomBrowserRunResponse) Reset() {
+	*x = SummarizeRoomBrowserRunResponse{}
+	mi := &file_model_plane_v1_space_run_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SummarizeRoomBrowserRunResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SummarizeRoomBrowserRunResponse) ProtoMessage() {}
+
+func (x *SummarizeRoomBrowserRunResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_space_run_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SummarizeRoomBrowserRunResponse.ProtoReflect.Descriptor instead.
+func (*SummarizeRoomBrowserRunResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_space_run_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *SummarizeRoomBrowserRunResponse) GetSteps() uint32 {
+	if x != nil {
+		return x.Steps
+	}
+	return 0
+}
+
+func (x *SummarizeRoomBrowserRunResponse) GetHosts() []string {
+	if x != nil {
+		return x.Hosts
+	}
+	return nil
+}
+
+func (x *SummarizeRoomBrowserRunResponse) GetEvidenceIds() []string {
+	if x != nil {
+		return x.EvidenceIds
+	}
+	return nil
+}
+
+func (x *SummarizeRoomBrowserRunResponse) GetHandoffs() uint32 {
+	if x != nil {
+		return x.Handoffs
+	}
+	return 0
+}
+
+func (x *SummarizeRoomBrowserRunResponse) GetStartedAtUnix() int64 {
+	if x != nil {
+		return x.StartedAtUnix
+	}
+	return 0
+}
+
+func (x *SummarizeRoomBrowserRunResponse) GetFinishedAtUnix() int64 {
+	if x != nil {
+		return x.FinishedAtUnix
+	}
+	return 0
+}
+
 var File_model_plane_v1_space_run_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_space_run_proto_rawDesc = "" +
@@ -1718,7 +1873,18 @@ const file_model_plane_v1_space_run_proto_rawDesc = "" +
 	"\x19space_read_decision_token\x18\x05 \x01(\tR\x16spaceReadDecisionToken\"G\n" +
 	"$AuthorizeRoomBrowserEvidenceResponse\x12\x1f\n" +
 	"\vartifact_id\x18\x01 \x01(\tR\n" +
-	"artifactId*\x94\x01\n" +
+	"artifactId\"g\n" +
+	"\x1eSummarizeRoomBrowserRunRequest\x12\x15\n" +
+	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x15\n" +
+	"\x06org_id\x18\x02 \x01(\tR\x05orgId\x12\x17\n" +
+	"\auser_id\x18\x03 \x01(\tR\x06userId\"\xde\x01\n" +
+	"\x1fSummarizeRoomBrowserRunResponse\x12\x14\n" +
+	"\x05steps\x18\x01 \x01(\rR\x05steps\x12\x14\n" +
+	"\x05hosts\x18\x02 \x03(\tR\x05hosts\x12!\n" +
+	"\fevidence_ids\x18\x03 \x03(\tR\vevidenceIds\x12\x1a\n" +
+	"\bhandoffs\x18\x04 \x01(\rR\bhandoffs\x12&\n" +
+	"\x0fstarted_at_unix\x18\x05 \x01(\x03R\rstartedAtUnix\x12(\n" +
+	"\x10finished_at_unix\x18\x06 \x01(\x03R\x0efinishedAtUnix*\x94\x01\n" +
 	"\x10RunActionOutcome\x12\"\n" +
 	"\x1eRUN_ACTION_OUTCOME_UNSPECIFIED\x10\x00\x12\x1e\n" +
 	"\x1aRUN_ACTION_OUTCOME_APPLIED\x10\x01\x12\x1f\n" +
@@ -1726,13 +1892,14 @@ const file_model_plane_v1_space_run_proto_rawDesc = "" +
 	"\x17RUN_ACTION_OUTCOME_NOOP\x10\x032\xfa\x01\n" +
 	"\x0fSpaceRunActions\x12q\n" +
 	"\x14ApplyRunThreadAction\x12+.model_plane.v1.ApplyRunThreadActionRequest\x1a,.model_plane.v1.ApplyRunThreadActionResponse\x12t\n" +
-	"\x15ProbeRunThreadActions\x12,.model_plane.v1.ProbeRunThreadActionsRequest\x1a-.model_plane.v1.ProbeRunThreadActionsResponse2\xf4\x04\n" +
+	"\x15ProbeRunThreadActions\x12,.model_plane.v1.ProbeRunThreadActionsRequest\x1a-.model_plane.v1.ProbeRunThreadActionsResponse2\xf0\x05\n" +
 	"\x10SpaceBrowserRead\x12\x83\x01\n" +
 	"\x1aCountActiveRoomBrowserRuns\x121.model_plane.v1.CountActiveRoomBrowserRunsRequest\x1a2.model_plane.v1.CountActiveRoomBrowserRunsResponse\x12b\n" +
 	"\x0fResolveRunSpace\x12&.model_plane.v1.ResolveRunSpaceRequest\x1a'.model_plane.v1.ResolveRunSpaceResponse\x12n\n" +
 	"\x13ListRoomBrowserRuns\x12*.model_plane.v1.ListRoomBrowserRunsRequest\x1a+.model_plane.v1.ListRoomBrowserRunsResponse\x12z\n" +
 	"\x17ReadRoomBrowserTimeline\x12..model_plane.v1.ReadRoomBrowserTimelineRequest\x1a/.model_plane.v1.ReadRoomBrowserTimelineResponse\x12\x89\x01\n" +
-	"\x1cAuthorizeRoomBrowserEvidence\x123.model_plane.v1.AuthorizeRoomBrowserEvidenceRequest\x1a4.model_plane.v1.AuthorizeRoomBrowserEvidenceResponseB\xb5\x01\n" +
+	"\x1cAuthorizeRoomBrowserEvidence\x123.model_plane.v1.AuthorizeRoomBrowserEvidenceRequest\x1a4.model_plane.v1.AuthorizeRoomBrowserEvidenceResponse\x12z\n" +
+	"\x17SummarizeRoomBrowserRun\x12..model_plane.v1.SummarizeRoomBrowserRunRequest\x1a/.model_plane.v1.SummarizeRoomBrowserRunResponseB\xb5\x01\n" +
 	"\x12com.model_plane.v1B\rSpaceRunProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3"
 
 var (
@@ -1748,7 +1915,7 @@ func file_model_plane_v1_space_run_proto_rawDescGZIP() []byte {
 }
 
 var file_model_plane_v1_space_run_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_model_plane_v1_space_run_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
+var file_model_plane_v1_space_run_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_model_plane_v1_space_run_proto_goTypes = []any{
 	(RunActionOutcome)(0),                        // 0: model_plane.v1.RunActionOutcome
 	(*ApplyRunThreadActionRequest)(nil),          // 1: model_plane.v1.ApplyRunThreadActionRequest
@@ -1772,6 +1939,8 @@ var file_model_plane_v1_space_run_proto_goTypes = []any{
 	(*RoomBrowserEvent)(nil),                     // 19: model_plane.v1.RoomBrowserEvent
 	(*AuthorizeRoomBrowserEvidenceRequest)(nil),  // 20: model_plane.v1.AuthorizeRoomBrowserEvidenceRequest
 	(*AuthorizeRoomBrowserEvidenceResponse)(nil), // 21: model_plane.v1.AuthorizeRoomBrowserEvidenceResponse
+	(*SummarizeRoomBrowserRunRequest)(nil),       // 22: model_plane.v1.SummarizeRoomBrowserRunRequest
+	(*SummarizeRoomBrowserRunResponse)(nil),      // 23: model_plane.v1.SummarizeRoomBrowserRunResponse
 }
 var file_model_plane_v1_space_run_proto_depIdxs = []int32{
 	2,  // 0: model_plane.v1.ApplyRunThreadActionRequest.rename:type_name -> model_plane.v1.RenameThreadArgs
@@ -1789,15 +1958,17 @@ var file_model_plane_v1_space_run_proto_depIdxs = []int32{
 	13, // 12: model_plane.v1.SpaceBrowserRead.ListRoomBrowserRuns:input_type -> model_plane.v1.ListRoomBrowserRunsRequest
 	16, // 13: model_plane.v1.SpaceBrowserRead.ReadRoomBrowserTimeline:input_type -> model_plane.v1.ReadRoomBrowserTimelineRequest
 	20, // 14: model_plane.v1.SpaceBrowserRead.AuthorizeRoomBrowserEvidence:input_type -> model_plane.v1.AuthorizeRoomBrowserEvidenceRequest
-	6,  // 15: model_plane.v1.SpaceRunActions.ApplyRunThreadAction:output_type -> model_plane.v1.ApplyRunThreadActionResponse
-	8,  // 16: model_plane.v1.SpaceRunActions.ProbeRunThreadActions:output_type -> model_plane.v1.ProbeRunThreadActionsResponse
-	10, // 17: model_plane.v1.SpaceBrowserRead.CountActiveRoomBrowserRuns:output_type -> model_plane.v1.CountActiveRoomBrowserRunsResponse
-	12, // 18: model_plane.v1.SpaceBrowserRead.ResolveRunSpace:output_type -> model_plane.v1.ResolveRunSpaceResponse
-	14, // 19: model_plane.v1.SpaceBrowserRead.ListRoomBrowserRuns:output_type -> model_plane.v1.ListRoomBrowserRunsResponse
-	17, // 20: model_plane.v1.SpaceBrowserRead.ReadRoomBrowserTimeline:output_type -> model_plane.v1.ReadRoomBrowserTimelineResponse
-	21, // 21: model_plane.v1.SpaceBrowserRead.AuthorizeRoomBrowserEvidence:output_type -> model_plane.v1.AuthorizeRoomBrowserEvidenceResponse
-	15, // [15:22] is the sub-list for method output_type
-	8,  // [8:15] is the sub-list for method input_type
+	22, // 15: model_plane.v1.SpaceBrowserRead.SummarizeRoomBrowserRun:input_type -> model_plane.v1.SummarizeRoomBrowserRunRequest
+	6,  // 16: model_plane.v1.SpaceRunActions.ApplyRunThreadAction:output_type -> model_plane.v1.ApplyRunThreadActionResponse
+	8,  // 17: model_plane.v1.SpaceRunActions.ProbeRunThreadActions:output_type -> model_plane.v1.ProbeRunThreadActionsResponse
+	10, // 18: model_plane.v1.SpaceBrowserRead.CountActiveRoomBrowserRuns:output_type -> model_plane.v1.CountActiveRoomBrowserRunsResponse
+	12, // 19: model_plane.v1.SpaceBrowserRead.ResolveRunSpace:output_type -> model_plane.v1.ResolveRunSpaceResponse
+	14, // 20: model_plane.v1.SpaceBrowserRead.ListRoomBrowserRuns:output_type -> model_plane.v1.ListRoomBrowserRunsResponse
+	17, // 21: model_plane.v1.SpaceBrowserRead.ReadRoomBrowserTimeline:output_type -> model_plane.v1.ReadRoomBrowserTimelineResponse
+	21, // 22: model_plane.v1.SpaceBrowserRead.AuthorizeRoomBrowserEvidence:output_type -> model_plane.v1.AuthorizeRoomBrowserEvidenceResponse
+	23, // 23: model_plane.v1.SpaceBrowserRead.SummarizeRoomBrowserRun:output_type -> model_plane.v1.SummarizeRoomBrowserRunResponse
+	16, // [16:24] is the sub-list for method output_type
+	8,  // [8:16] is the sub-list for method input_type
 	8,  // [8:8] is the sub-list for extension type_name
 	8,  // [8:8] is the sub-list for extension extendee
 	0,  // [0:8] is the sub-list for field type_name
@@ -1819,7 +1990,7 @@ func file_model_plane_v1_space_run_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_space_run_proto_rawDesc), len(file_model_plane_v1_space_run_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   21,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

@@ -192,6 +192,7 @@ const (
 	SpaceBrowserRead_ListRoomBrowserRuns_FullMethodName          = "/model_plane.v1.SpaceBrowserRead/ListRoomBrowserRuns"
 	SpaceBrowserRead_ReadRoomBrowserTimeline_FullMethodName      = "/model_plane.v1.SpaceBrowserRead/ReadRoomBrowserTimeline"
 	SpaceBrowserRead_AuthorizeRoomBrowserEvidence_FullMethodName = "/model_plane.v1.SpaceBrowserRead/AuthorizeRoomBrowserEvidence"
+	SpaceBrowserRead_SummarizeRoomBrowserRun_FullMethodName      = "/model_plane.v1.SpaceBrowserRead/SummarizeRoomBrowserRun"
 )
 
 // SpaceBrowserReadClient is the client API for SpaceBrowserRead service.
@@ -223,6 +224,10 @@ type SpaceBrowserReadClient interface {
 	// Whether an evidence id is one of the run's persisted observations (WS20-S4, R4). Returns the Quarry
 	// artifact reference model-gateway fetches; Session Core never returns the bytes.
 	AuthorizeRoomBrowserEvidence(ctx context.Context, in *AuthorizeRoomBrowserEvidenceRequest, opts ...grpc.CallOption) (*AuthorizeRoomBrowserEvidenceResponse, error)
+	// The starter's own summary of one room browser run, read for the run's result turn (WS20-S3). The caller
+	// must be the run's owner. Counts, at most eight hosts and six evidence ids, and the run's start and end
+	// instants. Never a URL, title, rationale, selector, decided-by subject or evidence byte.
+	SummarizeRoomBrowserRun(ctx context.Context, in *SummarizeRoomBrowserRunRequest, opts ...grpc.CallOption) (*SummarizeRoomBrowserRunResponse, error)
 }
 
 type spaceBrowserReadClient struct {
@@ -283,6 +288,16 @@ func (c *spaceBrowserReadClient) AuthorizeRoomBrowserEvidence(ctx context.Contex
 	return out, nil
 }
 
+func (c *spaceBrowserReadClient) SummarizeRoomBrowserRun(ctx context.Context, in *SummarizeRoomBrowserRunRequest, opts ...grpc.CallOption) (*SummarizeRoomBrowserRunResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SummarizeRoomBrowserRunResponse)
+	err := c.cc.Invoke(ctx, SpaceBrowserRead_SummarizeRoomBrowserRun_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SpaceBrowserReadServer is the server API for SpaceBrowserRead service.
 // All implementations must embed UnimplementedSpaceBrowserReadServer
 // for forward compatibility.
@@ -312,6 +327,10 @@ type SpaceBrowserReadServer interface {
 	// Whether an evidence id is one of the run's persisted observations (WS20-S4, R4). Returns the Quarry
 	// artifact reference model-gateway fetches; Session Core never returns the bytes.
 	AuthorizeRoomBrowserEvidence(context.Context, *AuthorizeRoomBrowserEvidenceRequest) (*AuthorizeRoomBrowserEvidenceResponse, error)
+	// The starter's own summary of one room browser run, read for the run's result turn (WS20-S3). The caller
+	// must be the run's owner. Counts, at most eight hosts and six evidence ids, and the run's start and end
+	// instants. Never a URL, title, rationale, selector, decided-by subject or evidence byte.
+	SummarizeRoomBrowserRun(context.Context, *SummarizeRoomBrowserRunRequest) (*SummarizeRoomBrowserRunResponse, error)
 	mustEmbedUnimplementedSpaceBrowserReadServer()
 }
 
@@ -336,6 +355,9 @@ func (UnimplementedSpaceBrowserReadServer) ReadRoomBrowserTimeline(context.Conte
 }
 func (UnimplementedSpaceBrowserReadServer) AuthorizeRoomBrowserEvidence(context.Context, *AuthorizeRoomBrowserEvidenceRequest) (*AuthorizeRoomBrowserEvidenceResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AuthorizeRoomBrowserEvidence not implemented")
+}
+func (UnimplementedSpaceBrowserReadServer) SummarizeRoomBrowserRun(context.Context, *SummarizeRoomBrowserRunRequest) (*SummarizeRoomBrowserRunResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SummarizeRoomBrowserRun not implemented")
 }
 func (UnimplementedSpaceBrowserReadServer) mustEmbedUnimplementedSpaceBrowserReadServer() {}
 func (UnimplementedSpaceBrowserReadServer) testEmbeddedByValue()                          {}
@@ -448,6 +470,24 @@ func _SpaceBrowserRead_AuthorizeRoomBrowserEvidence_Handler(srv interface{}, ctx
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SpaceBrowserRead_SummarizeRoomBrowserRun_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SummarizeRoomBrowserRunRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SpaceBrowserReadServer).SummarizeRoomBrowserRun(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SpaceBrowserRead_SummarizeRoomBrowserRun_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SpaceBrowserReadServer).SummarizeRoomBrowserRun(ctx, req.(*SummarizeRoomBrowserRunRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // SpaceBrowserRead_ServiceDesc is the grpc.ServiceDesc for SpaceBrowserRead service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -474,6 +514,10 @@ var SpaceBrowserRead_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "AuthorizeRoomBrowserEvidence",
 			Handler:    _SpaceBrowserRead_AuthorizeRoomBrowserEvidence_Handler,
+		},
+		{
+			MethodName: "SummarizeRoomBrowserRun",
+			Handler:    _SpaceBrowserRead_SummarizeRoomBrowserRun_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
